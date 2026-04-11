@@ -10,6 +10,8 @@ import CalendarScreenPremium from './CalendarScreenPremium';
 import SettingsScreenPremium from './SettingsScreenPremium';
 import ProfileScreen from './ProfileScreen';
 import ConfigScreenPremium from './ConfigScreenPremium';
+import GroupsScreen from './GroupsScreen';
+import HoursReportScreen from './HoursReportScreen';
 import TabBarPremium from '../components/TabBarPremium';
 import { Colors, Spacing } from '../constants/DesignSystem';
 import Logger from '../utils/Logger';
@@ -17,24 +19,32 @@ import Logger from '../utils/Logger';
 export default function MainScreenPremium() {
   const [currentTab, setCurrentTab] = useState('home');
   const [currentScreen, setCurrentScreen] = useState(null);
+  const [screenParams, setScreenParams] = useState(null);
   const { user } = useContext(AuthContext);
 
   const handleTabPress = (tabId) => {
     Logger.debug(`📱 Navegando para tab: ${tabId}`);
     setCurrentTab(tabId);
     setCurrentScreen(null); // Reset sub-screen when changing tabs
+    setScreenParams(null);
   };
 
   // Navigation handler for internal screens
-  const handleNavigation = (screenName) => {
+  const handleNavigation = (screenName, params = null) => {
     Logger.debug(`📱 Navegação interna para: ${screenName}`);
     
     if (screenName === 'Profile') {
       setCurrentScreen('profile');
     } else if (screenName === 'ConfigScreenPremium') {
       setCurrentScreen('config');
+    } else if (screenName === 'GroupsScreen') {
+      setCurrentScreen('groups');
+      setScreenParams(params);
+    } else if (screenName === 'HoursReport') {
+      setCurrentScreen('hoursReport');
     } else {
       setCurrentScreen(null);
+      setScreenParams(null);
     }
   };
 
@@ -42,6 +52,7 @@ export default function MainScreenPremium() {
   const handleBackNavigation = () => {
     Logger.debug(`📱 Voltando de navegação interna`);
     setCurrentScreen(null);
+    setScreenParams(null);
   };
 
   // Header data configuration
@@ -100,23 +111,32 @@ export default function MainScreenPremium() {
     // Sub-screens
     if (currentTab === 'settings') {
       if (currentScreen === 'profile') {
-        return <ProfileScreen navigation={{ goBack: handleBackNavigation }} />;
+        return <ProfileScreen navigation={{ 
+          goBack: handleBackNavigation, 
+          navigate: handleNavigation 
+        }} />;
       }
       if (currentScreen === 'config') {
-        return <ConfigScreenPremium navigation={{ goBack: handleBackNavigation }} />;
+        return <ConfigScreenPremium navigation={{ 
+          goBack: handleBackNavigation,
+          navigate: handleNavigation 
+        }} />;
+      }
+      if (currentScreen === 'groups') {
+        return <GroupsScreen navigation={{ goBack: handleBackNavigation }} focusGroupId={screenParams?.focusGroupId} />;
       }
     }
 
     // Main tab screens
     switch (currentTab) {
       case 'home':
-        return <HomeScreenPremium />;
+        return <HomeScreenPremium navigation={{ navigate: handleNavigation }} />;
       case 'calendar':
-        return <CalendarScreenPremium />;
+        return <CalendarScreenPremium navigation={{ navigate: handleNavigation }} />;
       case 'settings':
         return <SettingsScreenPremium navigation={{ navigate: handleNavigation }} />;
       default:
-        return <HomeScreenPremium />;
+        return <HomeScreenPremium navigation={{ navigate: handleNavigation }} />;
     }
   };
 

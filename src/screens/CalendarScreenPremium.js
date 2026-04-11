@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Calendar, LocaleConfig } from 'react-native-calendars';
+import * as SecureStore from 'expo-secure-store';
 import { AuthContext } from '../context/AuthContext';
 import { useShifts } from '../contexts/ShiftsContext';
 import { Colors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
@@ -30,7 +31,7 @@ LocaleConfig.locales['pt'] = {
 };
 LocaleConfig.defaultLocale = 'pt';
 
-const CalendarScreenPremium = () => {
+const CalendarScreenPremium = ({ navigation }) => {
   const { user } = useContext(AuthContext);
   const { 
     daysWithShifts, 
@@ -56,6 +57,7 @@ const CalendarScreenPremium = () => {
   const [bottomSheetVisible, setBottomSheetVisible] = useState(false);
   const [selectedDayData, setSelectedDayData] = useState(null);
   const [shiftValues, setShiftValues] = useState(null);
+  const [extraHours, setExtraHours] = useState(0);
 
   // Carregar dados quando a data mudar
   useEffect(() => {
@@ -84,9 +86,119 @@ const CalendarScreenPremium = () => {
     }
   };
 
+  // Calcular horas extras registradas no mês
+  const calculateExtraHours = async () => {
+    try {
+      let totalExtras = 0;
+      
+      console.log('🔍 calculateExtraHours - Iniciando cálculo para mês:', currentDate.getMonth() + 1);
+      
+      if (!daysWithShifts) return 0;
+
+      for (const day of daysWithShifts) {
+        if (day.shifts) {
+          const dateKey = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-${String(day.day).padStart(2, '0')}`;
+          const savedHoursKey = `real_hours_${dateKey}`;
+          
+          console.log('🔍 calculateExtraHours - Verificando dia:', dateKey);
+          
+          // Tentar carregar horas reais salvas para este dia
+          const savedHours = await SecureStore.getItemAsync(savedHoursKey);
+          
+          if (savedHours) {
+            const realHours = JSON.parse(savedHours);
+            console.log('🔍 calculateExtraHours - Horas salvas encontradas:', realHours);
+            
+            // Para cada plantão do dia, calcular diferença
+            day.shifts.forEach((shift, index) => {
+              const shiftRealHours = realHours[index];
+              
+              console.log('🔍 calculateExtraHours - Shift', index, ':', {
+                shiftTime: shift.time,
+                realHours: shiftRealHours
+              });
+              
+              if (shiftRealHours?.startTime && shiftRealHours?.endTime) {
+                // Calcular horas previstas
+                const shiftTime = shift.time || '';
+                let timeParts = shiftTime.split(' – ');
+                if (timeParts.length !== 2) {
+                  timeParts = shiftTime.split(' - ');
+                }
+                
+                if (timeParts.length === 2) {
+                  const [predictedStart, predictedEnd] = timeParts.map(time => time.replace(/\s*\([^)]*\)/, '').trim());
+                  const predictedDurationMin = calculateDuration(predictedStart, predictedEnd);
+                  const realDurationMin = calculateDuration(shiftRealHours.startTime, shiftRealHours.endTime);
+                  
+                  console.log('🔍 calculateExtraHours - Durações calculadas:', {
+                    predictedDurationMin,
+                    realDurationMin,
+                    difference: realDurationMin - predictedDurationMin
+                  });
+                  
+                  if (predictedDurationMin !== null && realDurationMin !== null) {
+                    const differenceMin = realDurationMin - predictedDurationMin;
+                    // Incluir TODAS as diferenças (positivas e negativas)
+                    totalExtras += differenceMin / 60;
+                    
+                    console.log('🔍 calculateExtraHours - Diferença adicionada:', {
+                      differenceMin,
+                      differenceHours: differenceMin / 60,
+                      totalAcumulado: totalExtras
+                    });
+                  }
+                }
+              }
+            });
+          }
+        }
+      }
+      
+      console.log('🔍 calculateExtraHours - Total final:', totalExtras);
+      return totalExtras;
+    } catch (error) {
+      Logger.warn('Erro ao calcular horas extras:', error);
+      return 0;
+    }
+  };
+
+  // Calcular duração em minutos
+  const calculateDuration = (startTime, endTime) => {
+    try {
+      // Normalizar formato dos horários (tanto "07h00" quanto "07:00")
+      const normalizeTime = (time) => {
+        return time.replace('h', ':');
+      };
+      
+      const normalizedStart = normalizeTime(startTime);
+      const normalizedEnd = normalizeTime(endTime);
+      
+      const [startHour, startMin] = normalizedStart.split(':').map(Number);
+      const [endHour, endMin] = normalizedEnd.split(':').map(Number);
+      
+      if (isNaN(startHour) || isNaN(startMin) || isNaN(endHour) || isNaN(endMin)) {
+        return null;
+      }
+      
+      const startTotalMin = startHour * 60 + startMin;
+      let endTotalMin = endHour * 60 + endMin;
+      
+      if (endTotalMin < startTotalMin) {
+        endTotalMin += 24 * 60;
+      }
+      
+      return endTotalMin - startTotalMin;
+    } catch (error) {
+      return null;
+    }
+  };
+
   // Atualizar marcações quando os dados mudarem
   useEffect(() => {
     updateCalendarMarkers();
+    // Recalcular horas extras quando os dados mudarem
+    calculateExtraHours().then(setExtraHours);
   }, [daysWithShifts, shiftFilters]);
 
   // Função para atualizar as marcações do calendário baseado nos filtros
@@ -179,8 +291,24 @@ const CalendarScreenPremium = () => {
       return;
     }
     
-    // Criar string de data para o BottomSheet - usar a data original do contexto
-    const selectedDate = dayData.date;
+    // Criar objeto Date válido para o BottomSheet
+    // Se dayData.date já é um objeto Date, usar ele; senão criar um novo
+    let selectedDate;
+    if (dayData.date instanceof Date) {
+      selectedDate = dayData.date;
+    } else if (typeof dayData.date === 'string') {
+      // Corrigir problema de timezone - parsear manualmente para evitar offset UTC
+      if (dayData.date.includes('-')) {
+        // Formato YYYY-MM-DD
+        const [year, month, day] = dayData.date.split('-');
+        selectedDate = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+      } else {
+        selectedDate = new Date(dayData.date);
+      }
+    } else {
+      // Fallback: criar data baseada no dia selecionado e mês/ano do calendário atual
+      selectedDate = new Date(currentDate.getFullYear(), currentDate.getMonth(), parseInt(day.day));
+    }
     
     setSelectedDayData({
       date: selectedDate,
@@ -198,6 +326,30 @@ const CalendarScreenPremium = () => {
     return calculateShiftValueSync(shift, dateString, shiftValues);
   };
 
+  // Callback chamado quando horas são alteradas no BottomSheet
+  const handleHoursChanged = async (dateKey, newHours) => {
+    console.log('📊 Horas alteradas para', dateKey, '- Recalculando totalizador...');
+    
+    // Recalcular horas extras após mudança
+    try {
+      const newExtraHours = await calculateExtraHours();
+      setExtraHours(newExtraHours);
+    } catch (error) {
+      console.error('Erro ao recalcular horas extras:', error);
+    }
+  };
+
+  // Navegar para GroupsScreen com grupo selecionado
+  const handleNavigateToGroup = (group) => {
+    if (navigation?.navigate && group?.id) {
+      handleCloseBottomSheet();
+      // Pequeno delay para fechar o bottom sheet antes de navegar
+      setTimeout(() => {
+        navigation.navigate('GroupsScreen', { focusGroupId: group.id });
+      }, 300);
+    }
+  };
+
   const goToPreviousMonth = () => {
     const newDate = new Date(currentDate);
     newDate.setMonth(newDate.getMonth() - 1);
@@ -210,22 +362,46 @@ const CalendarScreenPremium = () => {
     setCurrentDate(newDate);
   };
 
-  // Gerar estatísticas do mês baseado nos filtros ativos - CORRIGIDO
+  // Gerar estatísticas do mês baseado nos filtros ativos
   const generateStatistics = () => {
     if (!daysWithShifts || daysWithShifts.length === 0) {
       return {
         totalDays: 0,
         totalShifts: 0,
         byType: { M: 0, T: 0, N: 0 },
-        filteredHours: 0
+        filteredHours: 0,
+        extraHours: 0,
+        extraHoursFormatted: '0h'
       };
     }
+
+    // Formatar horas extras com sinal e cor apropriada
+    const formatExtraHours = (hours) => {
+      if (hours === 0) return '0h';
+      
+      const absHours = Math.abs(hours);
+      const wholeHours = Math.floor(absHours);
+      const minutes = Math.round((absHours - wholeHours) * 60);
+      
+      let formatted = '';
+      if (wholeHours > 0 && minutes > 0) {
+        formatted = `${wholeHours}h${minutes.toString().padStart(2, '0')}`;
+      } else if (wholeHours > 0) {
+        formatted = `${wholeHours}h`;
+      } else {
+        formatted = `${minutes}min`;
+      }
+      
+      return hours >= 0 ? `+${formatted}` : `-${formatted}`;
+    };
 
     const stats = {
       totalDays: 0,
       totalShifts: 0,
       byType: { M: 0, T: 0, N: 0 },
-      filteredHours: 0
+      filteredHours: 0,
+      extraHours: Math.round(extraHours * 100) / 100, // Arredondar para 2 casas decimais
+      extraHoursFormatted: formatExtraHours(extraHours)
     };
 
     // Contar apenas dias que possuem shifts visíveis após filtros
@@ -292,8 +468,19 @@ const CalendarScreenPremium = () => {
         <View style={styles.statsSection}>
           <View style={styles.statsGrid}>
             <View style={styles.statCard}>
-              <Text style={styles.statNumber}>{stats.totalDays}</Text>
-              <Text style={styles.statLabel}>Dias</Text>
+              <Text style={[
+                styles.statNumber,
+                {
+                  color: stats.extraHours === 0 
+                    ? Colors.text.secondary
+                    : stats.extraHours > 0 
+                      ? Colors.success 
+                      : Colors.error
+                }
+              ]}>
+                {stats.extraHoursFormatted}
+              </Text>
+              <Text style={styles.statLabel}>Horas Extras</Text>
             </View>
             
             <View style={styles.statCard}>
@@ -537,8 +724,10 @@ const CalendarScreenPremium = () => {
         isVisible={bottomSheetVisible}
         onClose={handleCloseBottomSheet}
         shifts={selectedDayData?.shifts || []}
-        selectedDate={selectedDayData?.date || ''}
+        selectedDate={selectedDayData?.date || null}
         calculateShiftValue={calculateShiftValueForBottomSheet}
+        onHoursChanged={handleHoursChanged}
+        onNavigateToGroup={handleNavigateToGroup}
       />
     </ScrollView>
   );

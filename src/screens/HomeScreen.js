@@ -11,8 +11,10 @@ import {
   Animated,
   useColorScheme,
 } from 'react-native';
+import * as SecureStore from 'expo-secure-store';
 import { AuthContext } from '../context/AuthContext';
 import { useShifts } from '../contexts/ShiftsContext';
+import useShiftsGroupsIntegration from '../hooks/useShiftsGroupsIntegration';
 import COLORS from '../constants/Colors';
 
 // Componente Skeleton para loading sutil
@@ -59,8 +61,11 @@ const SkeletonLoader = ({ width = '100%', height = 20, style = {} }) => {
   );
 };
 
+import { useNavigation } from '@react-navigation/native';
+
 export default function HomeScreen() {
   const isDarkMode = useColorScheme() === 'dark';
+  const navigation = useNavigation();
   const { user, logout } = useContext(AuthContext);
   const [currentDate, setCurrentDate] = useState(new Date());
   
@@ -74,6 +79,9 @@ export default function HomeScreen() {
     loadMonthlyShifts,
     hasDataFor
   } = useShifts();
+  
+  // Integração automática entre plantões e grupos
+  const { isIntegrationActive, shiftsCount } = useShiftsGroupsIntegration();
   
   // Usar currentDate para gerar currentMonth
   const currentMonth = `${currentDate.getMonth() + 1}/${currentDate.getFullYear()}`;
@@ -99,6 +107,157 @@ export default function HomeScreen() {
     newDate.setMonth(newDate.getMonth() + 1);
     setCurrentDate(newDate);
   };
+
+  // Calcular horas extras registradas no mês
+  const calculateExtraHours = async () => {
+    try {
+      let totalExtras = 0;
+      
+      console.log('🔍 calculateExtraHours - daysWithShifts:', daysWithShifts?.length || 0);
+      
+      if (!daysWithShifts) return 0;
+
+      for (const day of daysWithShifts) {
+        if (day.shifts) {
+          const dateKey = day.date;
+          const savedHoursKey = `real_hours_${dateKey}`;
+          
+          console.log('🔍 Verificando dia:', dateKey);
+          
+          // Tentar carregar horas reais salvas para este dia
+          const savedHours = await SecureStore.getItemAsync(savedHoursKey);
+          
+          console.log('🔍 Dados salvos para', dateKey, ':', savedHours ? 'SIM' : 'NÃO');
+          
+          if (savedHours) {
+            const realHours = JSON.parse(savedHours);
+            
+            // Para cada plantão do dia, calcular diferença
+            day.shifts.forEach((shift, index) => {
+              const shiftRealHours = realHours[index];
+              
+              console.log('🔍 Plantão', index, '- Tipo:', shift.label, '- shiftRealHours:', shiftRealHours);
+              
+              if (shiftRealHours?.startTime && shiftRealHours?.endTime) {
+                // Verificar compatibilidade com nova estrutura
+                const shiftType = shiftRealHours.shiftType || 'N/A';
+                const groupName = shiftRealHours.groupName || 'N/A';
+                
+                console.log('🔍 Detalhes do registro:', {
+                  tipo: shiftType,
+                  grupo: groupName,
+                  horarios: `${shiftRealHours.startTime} - ${shiftRealHours.endTime}`
+                });
+                
+                // Calcular horas previstas (mesmo processo anterior)
+                const shiftTime = shift.time || '';
+                let timeParts = shiftTime.split(' – ');
+                if (timeParts.length !== 2) {
+                  timeParts = shiftTime.split(' - '); // Tentar com hífen simples
+                }
+                
+                if (timeParts.length === 2) {
+                  const [predictedStart, predictedEnd] = timeParts.map(time => time.replace(/\s*\([^)]*\)/, '').trim());
+                  const predictedDurationMin = calculateDuration(predictedStart, predictedEnd);
+                  const realDurationMin = calculateDuration(shiftRealHours.startTime, shiftRealHours.endTime);
+                  
+                  console.log('🔍 Durações:', {
+                    predicted: predictedDurationMin,
+                    real: realDurationMin,
+                    diff: realDurationMin - predictedDurationMin,
+                    shiftType: shiftType
+                  });
+                  
+                  if (predictedDurationMin !== null && realDurationMin !== null) {
+                    const differenceMin = realDurationMin - predictedDurationMin;
+                    totalExtras += differenceMin / 60; // Converter para horas para o total
+                  }
+                }
+              }
+            });
+          }
+        }
+      }
+      
+      console.log('🔍 Total extras calculado:', totalExtras, 'horas');
+      return totalExtras;
+    } catch (error) {
+      console.warn('Erro ao calcular horas extras:', error);
+      return 0;
+    }
+  };
+
+  // Função utilitária para calcular duração (retorna minutos para precisão)
+  const calculateDuration = (start, end) => {
+    try {
+      const [startHour, startMin] = start.split(':').map(Number);
+      const [endHour, endMin] = end.split(':').map(Number);
+      
+      if (isNaN(startHour) || isNaN(startMin) || isNaN(endHour) || isNaN(endMin)) {
+        return null;
+      }
+      
+      const startTotalMin = startHour * 60 + startMin;
+      let endTotalMin = endHour * 60 + endMin;
+      
+      if (endTotalMin < startTotalMin) {
+        endTotalMin += 24 * 60;
+      }
+      
+      return endTotalMin - startTotalMin; // Retorna em minutos
+    } catch (error) {
+      return null;
+    }
+  };
+
+  // Formatar horas extras para exibição
+  const formatExtraHours = (hours) => {
+    if (hours === null || isNaN(hours) || hours === 0) return '0min';
+    
+    const absHours = Math.abs(hours);
+    const wholeHours = Math.floor(absHours);
+    const minutes = Math.round((absHours - wholeHours) * 60);
+    
+    if (wholeHours === 0) {
+      return `${minutes}min`;
+    } else if (minutes === 0) {
+      return `${wholeHours}h`;
+    } else {
+      return `${wholeHours}h${minutes.toString().padStart(2, '0')}`;
+    }
+  };
+
+  // Estado para horas extras
+  const [extraHours, setExtraHours] = useState(0);
+  const [loadingExtras, setLoadingExtras] = useState(false);
+
+  // Carregar horas extras quando dados mudarem
+  useEffect(() => {
+    const loadExtras = async () => {
+      if (daysWithShifts && daysWithShifts.length > 0) {
+        setLoadingExtras(true);
+        const extras = await calculateExtraHours();
+        setExtraHours(extras);
+        setLoadingExtras(false);
+      } else {
+        setExtraHours(0);
+      }
+    };
+
+    loadExtras();
+  }, [daysWithShifts]);
+
+  // Recarregar extras periodicamente para capturar mudanças
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      if (daysWithShifts && daysWithShifts.length > 0) {
+        const extras = await calculateExtraHours();
+        setExtraHours(extras);
+      }
+    }, 2000); // Verificar a cada 2 segundos
+
+    return () => clearInterval(interval);
+  }, [daysWithShifts]);
 
   // Carregar dados quando o mês mudar
   useEffect(() => {
@@ -225,9 +384,9 @@ export default function HomeScreen() {
           </Text>
         </View>
 
-        {/* Total de Horas do Mês */}
+        {/* Total de Horas Extras do Mês - Card Principal */}
         <View style={styles.totalHoursCard}>
-          <Text style={styles.cardTitle}>Horas do Mês</Text>
+          <Text style={styles.cardTitle}>Horas Extras do Mês</Text>
           
           {/* Seletor de Mês */}
           <View style={styles.monthSelector}>
@@ -249,29 +408,32 @@ export default function HomeScreen() {
             </TouchableOpacity>
           </View>
           
-          {loadingShifts ? (
+          {loadingExtras ? (
             <View style={styles.hoursContainer}>
               <SkeletonLoader width={120} height={36} style={{ marginBottom: 8, borderRadius: 8 }} />
-              <SkeletonLoader width={80} height={16} style={{ borderRadius: 6 }} />
+              <SkeletonLoader width={100} height={16} style={{ borderRadius: 6 }} />
             </View>
           ) : (
             <View style={styles.hoursContainer}>
-              <Text style={styles.totalHours}>
-                {hoursReport?.realHours || 0}h
+              <Text style={[
+                styles.totalHours,
+                { color: extraHours > 0 ? COLORS.SUCCESS : COLORS.TEXT }
+              ]}>
+                {extraHours > 0 ? '+' : ''}{formatExtraHours(extraHours)}
               </Text>
               <Text style={styles.totalShifts}>
-                {totalShifts || 0} plantões
+                registradas pelos usuários
               </Text>
             </View>
           )}
         </View>
 
-        {/* Grid de Estatísticas */}
+        {/* Grid de Estatísticas dos Plantões */}
         <View style={styles.sectionCard}>
           <View style={styles.cardHeader}>
-            <Text style={styles.cardTitle}>Distribuição de Plantões</Text>
+            <Text style={styles.cardTitle}>Plantões Agendados</Text>
             <Text style={styles.cardSubtitle}>
-              {totalShifts || 0} plantões no mês
+              {totalShifts || 0} plantões • {hoursReport?.realHours || 0}h previstas
             </Text>
           </View>
           {renderStatsGrid()}
@@ -290,11 +452,15 @@ export default function HomeScreen() {
           </View>
         </View>
 
+        {/* Botão de Relatório */}
+        <TouchableOpacity style={styles.reportButton} onPress={() => navigation.navigate('ReportScreen')}>
+          <Text style={styles.reportButtonText}>Relatório</Text>
+        </TouchableOpacity>
+
         {/* Botão de Logout */}
         <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
           <Text style={styles.logoutText}>Sair</Text>
         </TouchableOpacity>
-        
         <View style={styles.bottomSpacer} />
       </ScrollView>
     </View>
@@ -302,6 +468,24 @@ export default function HomeScreen() {
 }
 
 const styles = StyleSheet.create({
+  reportButton: {
+    backgroundColor: COLORS.PRIMARY,
+    borderRadius: 12,
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    alignItems: 'center',
+    marginBottom: 12,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+  },
+  reportButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
   container: {
     flex: 1,
     backgroundColor: COLORS.BACKGROUND,
@@ -428,6 +612,36 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.1,
     shadowRadius: 2,
+  },
+  
+  // Estilos para seção de horas extras
+  extraHoursCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    padding: 20,
+    marginBottom: 16,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+  },
+  
+  extraHoursContainer: {
+    alignItems: 'center',
+    paddingVertical: 16,
+  },
+  
+  extraHoursValue: {
+    fontSize: 28,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  
+  extraHoursLabel: {
+    fontSize: 14,
+    color: COLORS.TEXT_SECONDARY,
+    fontWeight: '500',
   },
   statsGrid: {
     marginTop: 16,

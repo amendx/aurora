@@ -1,4 +1,4 @@
-import React, { useContext } from 'react';
+import React, { useContext, useEffect } from 'react';
 import {
   View,
   Text,
@@ -6,13 +6,33 @@ import {
   ScrollView,
   Pressable,
   Alert,
+  RefreshControl,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { AuthContext } from '../context/AuthContext';
-import { Colors, Typography, Spacing, Shadows, BorderRadius, Layout } from '../constants/DesignSystem';
+import { useGroups } from '../contexts/GroupsContext';
+import { Colors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
 
 const ProfileScreen = ({ navigation }) => {
   const { user, logout } = useContext(AuthContext);
+  const { groups: rawGroups, loading, loadGroups } = useGroups();
+  const [refreshing, setRefreshing] = React.useState(false);
+
+  // Garantir que groups seja sempre um array
+  const groups = Array.isArray(rawGroups) ? rawGroups : [];
+
+  useEffect(() => {
+    loadGroups();
+  }, []);
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await loadGroups();
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const handleLogout = () => {
     Alert.alert(
@@ -32,90 +52,59 @@ const ProfileScreen = ({ navigation }) => {
     );
   };
 
-  const menuItems = [
-    {
-      id: 'personal-info',
-      title: 'Informações Pessoais',
-      subtitle: 'Nome, email e dados do perfil',
-      icon: 'person-outline',
-      onPress: () => console.log('Personal Info'),
-    },
-    {
-      id: 'notifications',
-      title: 'Notificações',
-      subtitle: 'Gerencie suas notificações',
-      icon: 'notifications-outline',
-      onPress: () => console.log('Notifications'),
-    },
-    {
-      id: 'preferences',
-      title: 'Preferências',
-      subtitle: 'Tema, idioma e configurações',
-      icon: 'settings-outline',
-      onPress: () => console.log('Preferences'),
-    },
-    {
-      id: 'privacy',
-      title: 'Privacidade e Segurança',
-      subtitle: 'Controle seus dados',
-      icon: 'shield-checkmark-outline',
-      onPress: () => console.log('Privacy'),
-    },
-    {
-      id: 'help',
-      title: 'Ajuda e Suporte',
-      subtitle: 'FAQ, contato e documentação',
-      icon: 'help-circle-outline',
-      onPress: () => console.log('Help'),
-    },
-  ];
-
-  const renderMenuItem = (item) => (
-    <Pressable
-      key={item.id}
-      style={({ pressed }) => [
-        styles.menuItem,
-        pressed && styles.menuItemPressed
-      ]}
-      onPress={item.onPress}
-    >
-      <View style={styles.menuItemIcon}>
-        <Ionicons name={item.icon} size={24} color={Colors.interactive.active} />
+  const renderGroupItem = (group) => (
+    <View key={group.id} style={styles.groupItem}>
+      <View style={styles.groupItemIcon}>
+        <View style={[styles.groupColorDot, { backgroundColor: group.color || Colors.primary }]} />
       </View>
-      <View style={styles.menuItemContent}>
-        <Text style={styles.menuItemTitle}>{item.title}</Text>
-        <Text style={styles.menuItemSubtitle}>{item.subtitle}</Text>
-      </View>
-      <Ionicons 
-        name="chevron-forward" 
-        size={20} 
-        color={Colors.interactive.inactive} 
-      />
-    </Pressable>
-  );
-
-  const renderSection = (title, items) => (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>{title}</Text>
-      <View style={styles.card}>
-        {items.map((item, index) => (
-          <View key={item.id}>
-            {renderMenuItem(item)}
-            {index < items.length - 1 && <View style={styles.separator} />}
-          </View>
-        ))}
+      <View style={styles.groupItemContent}>
+        <Text style={styles.groupName}>{group.name}</Text>
+        {group.institution && (
+          <Text style={styles.groupInstitution}>{group.institution.name}</Text>
+        )}
+        <View style={styles.groupStats}>
+          <MaterialCommunityIcons name="account-group" size={14} color={Colors.text.secondary} />
+          <Text style={styles.groupStatsText}>
+            {(group.assists?.length || 0) + (group.analysts?.length || 0) + (group.observers?.length || 0) + 1} membros
+          </Text>
+          {group.is_personal && (
+            <>
+              <View style={styles.statDot} />
+              <MaterialCommunityIcons name="account" size={14} color={Colors.accent} />
+              <Text style={[styles.groupStatsText, { color: Colors.accent }]}>Pessoal</Text>
+            </>
+          )}
+          {group.is_admin && (
+            <>
+              <View style={styles.statDot} />
+              <MaterialCommunityIcons name="shield-crown" size={14} color={Colors.warning} />
+              <Text style={[styles.groupStatsText, { color: Colors.warning }]}>Admin</Text>
+            </>
+          )}
+        </View>
       </View>
     </View>
   );
 
   return (
-    <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
+    <ScrollView 
+      style={styles.container} 
+      showsVerticalScrollIndicator={false}
+      refreshControl={
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={handleRefresh}
+          colors={[Colors.primary]}
+          tintColor={Colors.primary}
+        />
+      }
+    >
       <View style={styles.content}>
         {/* Profile Header */}
         <View style={styles.profileHeader}>
           <View style={styles.avatarContainer}>
             <View style={styles.avatar}>
-              <Ionicons name="person" size={32} color={Colors.interactive.active} />
+              <Ionicons name="person" size={32} color={Colors.primary} />
             </View>
           </View>
           
@@ -123,36 +112,80 @@ const ProfileScreen = ({ navigation }) => {
             <Text style={styles.userName}>{user?.name || 'Usuário'}</Text>
             <Text style={styles.userEmail}>{user?.email || 'email@exemplo.com'}</Text>
           </View>
-          
-          <Pressable style={styles.editButton}>
-            <Ionicons name="create-outline" size={20} color={Colors.interactive.active} />
-          </Pressable>
         </View>
 
-        {/* Menu Sections */}
-        {renderSection('Conta', menuItems.slice(0, 2))}
-        {renderSection('Configurações', menuItems.slice(2, 4))}
-        {renderSection('Suporte', menuItems.slice(4, 5))}
+        {/* User Groups */}
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Meus Grupos</Text>
+            <Text style={styles.sectionCounter}>
+              {groups.length} {groups.length === 1 ? 'grupo' : 'grupos'}
+            </Text>
+          </View>
+          
+          <View style={styles.card}>
+            {loading && groups.length === 0 ? (
+              <View style={styles.loadingContainer}>
+                <MaterialCommunityIcons name="loading" size={24} color={Colors.text.secondary} />
+                <Text style={styles.loadingText}>Carregando grupos...</Text>
+              </View>
+            ) : groups.length === 0 ? (
+              <View style={styles.emptyContainer}>
+                <MaterialCommunityIcons name="account-group-outline" size={48} color={Colors.text.tertiary} />
+                <Text style={styles.emptyTitle}>Nenhum grupo encontrado</Text>
+                <Text style={styles.emptyDescription}>
+                  Você ainda não faz parte de nenhum grupo ou plantão.
+                </Text>
+              </View>
+            ) : (
+              groups.map((group, index) => (
+                <View key={group.id}>
+                  {renderGroupItem(group)}
+                  {index < groups.length - 1 && <View style={styles.separator} />}
+                </View>
+              ))
+            )}
+          </View>
+        </View>
 
-        {/* Logout Section */}
+        {/* Actions */}
         <View style={styles.section}>
           <View style={styles.card}>
             <Pressable
               style={({ pressed }) => [
-                styles.menuItem,
+                styles.actionItem,
+                pressed && styles.actionItemPressed
+              ]}
+              onPress={() => navigation.navigate('GroupsScreen')}
+            >
+              <View style={styles.actionIcon}>
+                <MaterialCommunityIcons name="account-group" size={24} color={Colors.primary} />
+              </View>
+              <View style={styles.actionContent}>
+                <Text style={styles.actionTitle}>Ver Todos os Grupos</Text>
+                <Text style={styles.actionSubtitle}>Visualizar detalhes e membros</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={20} color={Colors.text.tertiary} />
+            </Pressable>
+            
+            <View style={styles.separator} />
+            
+            <Pressable
+              style={({ pressed }) => [
+                styles.actionItem,
                 styles.logoutItem,
-                pressed && styles.menuItemPressed
+                pressed && styles.actionItemPressed
               ]}
               onPress={handleLogout}
             >
-              <View style={[styles.menuItemIcon, styles.logoutIcon]}>
+              <View style={[styles.actionIcon, styles.logoutIcon]}>
                 <Ionicons name="log-out-outline" size={24} color={Colors.error} />
               </View>
-              <View style={styles.menuItemContent}>
-                <Text style={[styles.menuItemTitle, styles.logoutText]}>
+              <View style={styles.actionContent}>
+                <Text style={[styles.actionTitle, styles.logoutText]}>
                   Sair da Conta
                 </Text>
-                <Text style={styles.menuItemSubtitle}>
+                <Text style={styles.actionSubtitle}>
                   Desconectar do aplicativo
                 </Text>
               </View>
@@ -178,8 +211,8 @@ const styles = StyleSheet.create({
   },
   content: {
     paddingHorizontal: Spacing.screen,
-    paddingTop: Spacing.lg,
-    paddingBottom: Spacing.xxxl + 60, // Extra space for tab bar
+    paddingTop: Spacing.md,
+    paddingBottom: Spacing.xxxl + 60,
   },
 
   // Profile Header
@@ -210,38 +243,35 @@ const styles = StyleSheet.create({
   userName: {
     fontSize: Typography.fontSize.title3,
     fontWeight: Typography.fontWeight.semiBold,
-    fontFamily: Typography.fontFamily.semiBold,
     color: Colors.text.primary,
     marginBottom: 4,
   },
   userEmail: {
     fontSize: Typography.fontSize.subhead,
-    fontWeight: Typography.fontWeight.regular,
-    fontFamily: Typography.fontFamily.regular,
     color: Colors.text.secondary,
-  },
-  editButton: {
-    width: 44,
-    height: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: Colors.background.secondary,
-    borderRadius: 22,
   },
 
   // Sections
   section: {
     marginBottom: Spacing.lg,
   },
+  sectionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: Spacing.sm,
+    paddingHorizontal: Spacing.sm,
+  },
   sectionTitle: {
     fontSize: Typography.fontSize.subhead,
     fontWeight: Typography.fontWeight.semiBold,
-    fontFamily: Typography.fontFamily.semiBold,
     color: Colors.text.secondary,
-    marginBottom: Spacing.sm,
-    marginLeft: Spacing.sm,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
+  },
+  sectionCounter: {
+    fontSize: Typography.fontSize.caption1,
+    color: Colors.text.tertiary,
   },
   card: {
     backgroundColor: Colors.background.primary,
@@ -250,17 +280,14 @@ const styles = StyleSheet.create({
     ...Shadows.small,
   },
 
-  // Menu Items
-  menuItem: {
+  // Group Items
+  groupItem: {
     flexDirection: 'row',
     alignItems: 'center',
     padding: Spacing.md,
-    minHeight: 60,
+    minHeight: 68,
   },
-  menuItemPressed: {
-    backgroundColor: Colors.background.secondary,
-  },
-  menuItemIcon: {
+  groupItemIcon: {
     width: 40,
     height: 40,
     alignItems: 'center',
@@ -269,38 +296,115 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     marginRight: Spacing.md,
   },
-  menuItemContent: {
+  groupColorDot: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+  },
+  groupItemContent: {
     flex: 1,
   },
-  menuItemTitle: {
+  groupName: {
     fontSize: Typography.fontSize.body,
     fontWeight: Typography.fontWeight.medium,
-    fontFamily: Typography.fontFamily.medium,
     color: Colors.text.primary,
     marginBottom: 2,
   },
-  menuItemSubtitle: {
+  groupInstitution: {
     fontSize: Typography.fontSize.footnote,
-    fontWeight: Typography.fontWeight.regular,
-    fontFamily: Typography.fontFamily.regular,
     color: Colors.text.secondary,
-    lineHeight: Typography.fontSize.footnote * Typography.lineHeight.normal,
+    marginBottom: 4,
+  },
+  groupStats: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  groupStatsText: {
+    fontSize: Typography.fontSize.caption1,
+    color: Colors.text.secondary,
+  },
+  statDot: {
+    width: 3,
+    height: 3,
+    borderRadius: 1.5,
+    backgroundColor: Colors.text.tertiary,
+    marginHorizontal: 4,
+  },
+
+  // Action Items
+  actionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: Spacing.md,
+    minHeight: 60,
+  },
+  actionItemPressed: {
+    backgroundColor: Colors.background.secondary,
+  },
+  actionIcon: {
+    width: 40,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: Colors.background.secondary,
+    borderRadius: 20,
+    marginRight: Spacing.md,
+  },
+  actionContent: {
+    flex: 1,
+  },
+  actionTitle: {
+    fontSize: Typography.fontSize.body,
+    fontWeight: Typography.fontWeight.medium,
+    color: Colors.text.primary,
+    marginBottom: 2,
+  },
+  actionSubtitle: {
+    fontSize: Typography.fontSize.footnote,
+    color: Colors.text.secondary,
   },
   separator: {
     height: StyleSheet.hairlineWidth,
     backgroundColor: Colors.border.light,
-    marginLeft: 56, // Align with content
+    marginLeft: 56,
   },
 
   // Logout Item
-  logoutItem: {
-    // Special styling for logout
-  },
   logoutIcon: {
     backgroundColor: Colors.error + '10',
   },
   logoutText: {
     color: Colors.error,
+  },
+
+  // Loading & Empty States
+  loadingContainer: {
+    alignItems: 'center',
+    padding: Spacing.xl,
+  },
+  loadingText: {
+    fontSize: Typography.fontSize.footnote,
+    color: Colors.text.secondary,
+    marginTop: Spacing.xs,
+  },
+  emptyContainer: {
+    alignItems: 'center',
+    padding: Spacing.xl,
+  },
+  emptyTitle: {
+    fontSize: Typography.fontSize.body,
+    fontWeight: Typography.fontWeight.medium,
+    color: Colors.text.primary,
+    marginTop: Spacing.sm,
+    textAlign: 'center',
+  },
+  emptyDescription: {
+    fontSize: Typography.fontSize.footnote,
+    color: Colors.text.secondary,
+    textAlign: 'center',
+    marginTop: Spacing.xs,
+    lineHeight: 18,
   },
 
   // App Info
@@ -310,8 +414,6 @@ const styles = StyleSheet.create({
   },
   appInfoText: {
     fontSize: Typography.fontSize.caption1,
-    fontWeight: Typography.fontWeight.regular,
-    fontFamily: Typography.fontFamily.regular,
     color: Colors.text.tertiary,
   },
 });

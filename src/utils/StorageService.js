@@ -2,6 +2,7 @@ import * as SecureStore from 'expo-secure-store';
 
 const TOKEN_KEY = 'soffia_auth_token';
 const USER_KEY = 'soffia_user_data';
+const GROUPS_KEY = 'soffia_groups_cache';
 
 export class StorageService {
   static async saveToken(token) {
@@ -69,11 +70,43 @@ export class StorageService {
     }
   }
 
+  // ── Grupos ────────────────────────────────────────────────
+  static async saveGroups(groups) {
+    try {
+      await SecureStore.setItemAsync(GROUPS_KEY, JSON.stringify(groups));
+      return true;
+    } catch (error) {
+      console.error('Erro ao salvar grupos:', error);
+      return false;
+    }
+  }
+
+  static async getGroups() {
+    try {
+      const data = await SecureStore.getItemAsync(GROUPS_KEY);
+      return data ? JSON.parse(data) : null;
+    } catch (error) {
+      console.error('Erro ao recuperar grupos:', error);
+      return null;
+    }
+  }
+
+  static async clearGroups() {
+    try {
+      await SecureStore.deleteItemAsync(GROUPS_KEY);
+      return true;
+    } catch (error) {
+      console.error('Erro ao remover grupos:', error);
+      return false;
+    }
+  }
+
   static async clearAll() {
     try {
       await Promise.all([
         this.removeToken(),
         this.removeUserData(),
+        this.clearGroups(),
       ]);
       return true;
     } catch (error) {

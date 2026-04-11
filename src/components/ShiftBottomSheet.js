@@ -8,10 +8,14 @@ import {
   Dimensions,
   Pressable,
   ScrollView,
+  TouchableOpacity,
+  Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import * as SecureStore from 'expo-secure-store';
 import { Colors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
 import { calculateShiftValueWithBreakdown, calculateShiftValue } from '../utils/ShiftValueCalculator';
+import HoursEditModal from './HoursEditModal';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 const BOTTOM_SHEET_MAX_HEIGHT = SCREEN_HEIGHT * 0.75;
@@ -22,27 +26,425 @@ const ShiftBottomSheet = ({
   onClose, 
   shifts, 
   selectedDate,
-  calculateShiftValue 
+  calculateShiftValue,
+  onHoursChanged, // Novo callback para notificar mudanças nas horas
+  onNavigateToGroup, // Callback para navegar ao grupo ao clicar no nome
 }) => {
   const translateY = useRef(new Animated.Value(BOTTOM_SHEET_MAX_HEIGHT)).current;
   const backdropOpacity = useRef(new Animated.Value(0)).current;
   const [shiftBreakdowns, setShiftBreakdowns] = useState({});
+  const [realHours, setRealHours] = useState({}); // Armazenar horas reais por plantão
+  const [editingShift, setEditingShift] = useState(null); // Shift sendo editado no modal
 
+  // Carregar horas reais salvas
+  useEffect(() => {
+    const loadRealHours = async () => {
+      if (!shifts || !selectedDate) return;
+      
+      try {
+        // Garantir que selectedDate é válido
+        let date;
+        if (selectedDate instanceof Date) {
+          date = selectedDate;
+        } else if (typeof selectedDate === 'string' && selectedDate.trim() !== '') {
+          date = new Date(selectedDate);
+        } else {
+          console.warn('selectedDate inválido ou vazio:', selectedDate);
+          return;
+        }
+        
+        if (isNaN(date.getTime())) {
+          console.warn('selectedDate inválido após conversão:', selectedDate);
+          return;
+        }
+        
+        const dateKey = date.toISOString().split('T')[0];
+        const savedHours = await SecureStore.getItemAsync(`real_hours_${dateKey}`);
+        
+        if (savedHours) {
+          setRealHours(JSON.parse(savedHours));
+        }
+      } catch (error) {
+        console.warn('Erro ao carregar horas reais:', error);
+      }
+    };
+    
+    if (isVisible) {
+      loadRealHours();
+    }
+  }, [shifts, selectedDate, isVisible]);
+
+  // LIMPEZA AUTOMÁTICA REMOVIDA COMPLETAMENTE
+  // Não limpar dados automaticamente para permitir testes
+  /*
+  useEffect(() => {
+    const initializeClearData = async () => {
+      // Removido para permitir teste das horas extras
+    };
+    initializeClearData();
+  }, []);
+  */
+
+  // Salvar horas reais
+  const saveRealHours = async (newRealHours) => {
+    try {
+      // Garantir que selectedDate é válido
+      let date;
+      if (selectedDate instanceof Date) {
+        date = selectedDate;
+      } else if (typeof selectedDate === 'string' && selectedDate.trim() !== '') {
+        date = new Date(selectedDate);
+      } else {
+        console.error('selectedDate inválido ou vazio para salvar:', selectedDate);
+        return;
+      }
+      
+      if (isNaN(date.getTime())) {
+        console.error('selectedDate inválido após conversão para salvar:', selectedDate);
+        return;
+      }
+      
+      const dateKey = date.toISOString().split('T')[0];
+      await SecureStore.setItemAsync(`real_hours_${dateKey}`, JSON.stringify(newRealHours));
+      setRealHours(newRealHours);
+      
+      // Notificar o componente pai sobre a mudança nas horas
+      if (onHoursChanged) {
+        onHoursChanged(dateKey, newRealHours);
+      }
+    } catch (error) {
+      console.error('Erro ao salvar horas reais:', error);
+    }
+  };
+
+  // Abrir modal de edição
+  const openHoursEditor = (shiftIndex) => {
+    if (typeof shiftIndex !== 'number' || shiftIndex < 0 || !shifts || !shifts[shiftIndex]) {
+      console.error('❌ Tentativa de abrir editor com índice inválido:', { shiftIndex, shiftsLength: shifts?.length });
+      return;
+    }
+    
+    setEditingShift(shiftIndex);
+    console.log('📝 Abrindo editor para shift index:', shiftIndex);
+  };
+
+  // Salvar horas do modal
+  const handleSaveHours = (shiftIndex, hours) => {
+    if (!shifts || !shifts[shiftIndex]) {
+      console.error('❌ Shift inválido para salvar horas:', { shiftIndex, shiftsLength: shifts?.length });
+      return;
+    }
+
+    if (!hours || typeof hours !== 'object') {
+      console.error('❌ Dados de horas inválidos:', hours);
+      return;
+    }
+
+    const shift = shifts[shiftIndex];
+    const newRealHours = { ...realHours };
+    
+    // Nova estrutura com identificação específica do plantão
+    newRealHours[shiftIndex] = {
+      ...hours,
+      shiftId: shift.id || `${shift.label}_${shiftIndex}`, // ID único do plantão
+      shiftType: shift.label || 'M', // M, T, N
+      shiftTime: shift.time || 'Horário não informado', // Horário previsto (ex: "07:00 - 13:00 (M)")
+      groupName: shift.group?.name || 'Sem grupo',
+      institutionName: shift.group?.institution?.name || 'Sem instituição',
+      registeredAt: new Date().toISOString(), // Timestamp do registro
+    };
+    
+    saveRealHours(newRealHours);
+    setEditingShift(null);
+    
+    // Log detalhado do que foi salvo
+    console.log('💾 Horas registradas para plantão:', {
+      shiftIndex,
+      shiftType: shift.label,
+      group: shift.group?.name,
+      institution: shift.group?.institution?.name,
+      hours: hours,
+      savedData: newRealHours[shiftIndex]
+    });
+  };
+
+  // Confirmar limpeza de horas
+  const confirmClearHours = (shiftIndex) => {
+    Alert.alert(
+      "Limpar Horas Registradas",
+      "Deseja realmente limpar as horas registradas para este plantão? Esta ação não pode ser desfeita.",
+      [
+        {
+          text: "Cancelar",
+          style: "cancel"
+        },
+        {
+          text: "Sim, limpar",
+          style: "destructive",
+          onPress: () => clearHours(shiftIndex)
+        }
+      ]
+    );
+  };
+
+  // Limpar horas registradas de um plantão específico
+  const clearHours = (shiftIndex) => {
+    if (typeof shiftIndex !== 'number' || shiftIndex < 0 || !realHours[shiftIndex]) {
+      console.warn('❌ Tentativa de limpar horas de índice inválido:', shiftIndex);
+      return;
+    }
+
+    const newRealHours = { ...realHours };
+    delete newRealHours[shiftIndex];
+    saveRealHours(newRealHours);
+    
+    console.log('🧹 Horas limpas para shift index:', shiftIndex);
+  };
+
+  // Função para limpar TODOS os dados de horas extras salvos (para debug/reset)
+  const clearAllSavedHours = async () => {
+    try {
+      // Obter todas as chaves do SecureStore que contenham 'real_hours_'
+      const keysToDelete = [];
+      
+      // Como não podemos listar chaves no SecureStore, vamos tentar limpar
+      // algumas datas conhecidas dos últimos meses
+      const today = new Date();
+      for (let i = 0; i < 90; i++) { // Últimos 90 dias
+        const date = new Date(today);
+        date.setDate(date.getDate() - i);
+        const dateKey = date.toISOString().split('T')[0];
+        keysToDelete.push(`real_hours_${dateKey}`);
+      }
+
+      // Deletar todas as chaves
+      await Promise.all(
+        keysToDelete.map(async (key) => {
+          try {
+            await SecureStore.deleteItemAsync(key);
+          } catch (error) {
+            // Ignorar erros de chaves que não existem
+          }
+        })
+      );
+
+      console.log('✅ Todos os dados de horas extras foram limpos');
+      
+      // Limpar estado local também
+      setRealHours({});
+      
+    } catch (error) {
+      console.error('❌ Erro ao limpar dados:', error);
+    }
+  };
+
+  // Calcular diferença de horas para exibição
+  const getHoursSummary = (shift, shiftIndex) => {
+    // Validações robustas
+    if (!shift || typeof shiftIndex !== 'number' || shiftIndex < 0) {
+      console.log('🔍 getHoursSummary - Parâmetros inválidos:', { shift: !!shift, shiftIndex });
+      return null;
+    }
+
+    const shiftRealHours = realHours[shiftIndex];
+    if (!shiftRealHours || typeof shiftRealHours !== 'object') {
+      console.log('🔍 getHoursSummary - Sem horas reais para index:', shiftIndex);
+      return null;
+    }
+
+    if (!shiftRealHours.startTime || !shiftRealHours.endTime) {
+      console.log('🔍 getHoursSummary - Horários incompletos:', { 
+        startTime: shiftRealHours.startTime, 
+        endTime: shiftRealHours.endTime 
+      });
+      return null;
+    }
+
+    const shiftTime = shift.time || '';
+    console.log('🔍 getHoursSummary - shiftTime original:', shiftTime);
+    
+    // Aceitar tanto hífen (-) quanto travessão (–) como separador
+    let timeParts = shiftTime.split(' – ');
+    if (timeParts.length !== 2) {
+      timeParts = shiftTime.split(' - '); // Tentar com hífen simples
+    }
+    if (timeParts.length !== 2) {
+      console.log('🔍 getHoursSummary - Não conseguiu dividir o horário:', timeParts);
+      return null;
+    }
+
+    const [predictedStart, predictedEnd] = timeParts.map(time => time.replace(/\s*\([^)]*\)/, '').trim());
+    console.log('🔍 getHoursSummary - Horários extraídos:', { predictedStart, predictedEnd });
+    
+    const predictedDurationMin = calculateDuration(predictedStart, predictedEnd);
+    const realDurationMin = calculateDuration(shiftRealHours.startTime, shiftRealHours.endTime);
+
+    console.log('🔍 getHoursSummary - Durações calculadas:', {
+      predictedStart,
+      predictedEnd,
+      predictedDurationMin,
+      realStart: shiftRealHours.startTime,
+      realEnd: shiftRealHours.endTime,
+      realDurationMin
+    });
+
+    if (predictedDurationMin === null || realDurationMin === null) {
+      console.log('🔍 getHoursSummary - Duração nula, cancelando cálculo');
+      return null;
+    }
+
+    const differenceMin = realDurationMin - predictedDurationMin;
+    
+    console.log('🔍 getHoursSummary - Diferença final:', {
+      realDurationMin,
+      predictedDurationMin,
+      differenceMin,
+      differenceFormatted: formatMinutesDifference(differenceMin)
+    });
+
+    return {
+      startTime: shiftRealHours.startTime,
+      endTime: shiftRealHours.endTime,
+      predictedHours: predictedDurationMin / 60, // Converter para horas apenas para display
+      realHours: realDurationMin / 60,
+      difference: differenceMin / 60, // Diferença em horas para display
+      differenceMinutes: differenceMin // Manter diferença em minutos para precisão
+    };
+  };
+
+  // Calcular duração entre dois horários (retorna minutos para maior precisão)
+  const calculateDuration = (startTime, endTime) => {
+    try {
+      console.log('🔍 calculateDuration - Input:', { startTime, endTime });
+      
+      // Normalizar formato dos horários (tanto "07h00" quanto "07:00")
+      const normalizeTime = (time) => {
+        const normalized = time.replace('h', ':');
+        console.log('🔍 calculateDuration - Normalizado:', time, '->', normalized);
+        return normalized;
+      };
+      
+      const normalizedStart = normalizeTime(startTime);
+      const normalizedEnd = normalizeTime(endTime);
+      
+      const [startHour, startMin] = normalizedStart.split(':').map(Number);
+      const [endHour, endMin] = normalizedEnd.split(':').map(Number);
+      
+      console.log('🔍 calculateDuration - Componentes:', {
+        startHour, startMin, endHour, endMin,
+        startValid: !isNaN(startHour) && !isNaN(startMin),
+        endValid: !isNaN(endHour) && !isNaN(endMin)
+      });
+      
+      if (isNaN(startHour) || isNaN(startMin) || isNaN(endHour) || isNaN(endMin)) {
+        console.log('🔍 calculateDuration - Valores inválidos detectados');
+        return null;
+      }
+      
+      const startTotalMin = startHour * 60 + startMin;
+      let endTotalMin = endHour * 60 + endMin;
+      
+      // Se horário de fim é menor que início, considerar passagem de dia
+      if (endTotalMin < startTotalMin) {
+        endTotalMin += 24 * 60;
+        console.log('🔍 calculateDuration - Detectada passagem de dia');
+      }
+      
+      const duration = endTotalMin - startTotalMin;
+      console.log('🔍 calculateDuration - Resultado:', {
+        startTotalMin,
+        endTotalMin,
+        duration
+      });
+      
+      return duration; // Retorna em minutos para preservar precisão
+    } catch (error) {
+      console.error('🔍 calculateDuration - Erro:', error);
+      return null;
+    }
+  };
+
+  // Formatar duração em horas e minutos
+  const formatDuration = (hours) => {
+    if (hours === null || isNaN(hours)) return '0h';
+    
+    const wholeHours = Math.floor(hours);
+    const minutes = Math.round((hours - wholeHours) * 60);
+    
+    if (minutes === 0) {
+      return `${wholeHours}h`;
+    }
+    
+    return `${wholeHours}h${minutes.toString().padStart(2, '0')}`;
+  };
+
+  // Formatar diferença de minutos de forma precisa
+  const formatMinutesDifference = (minutes) => {
+    console.log('🔍 formatMinutesDifference - Input:', minutes);
+    
+    if (!minutes || minutes === 0) {
+      console.log('🔍 formatMinutesDifference - Retornando 0min');
+      return '0min';
+    }
+    
+    const absMinutes = Math.abs(minutes);
+    const hours = Math.floor(absMinutes / 60);
+    const remainingMinutes = absMinutes % 60;
+    
+    let result;
+    if (hours === 0) {
+      result = `${remainingMinutes}min`;
+    } else if (remainingMinutes === 0) {
+      result = `${hours}h`;
+    } else {
+      result = `${hours}h${remainingMinutes.toString().padStart(2, '0')}`;
+    }
+    
+    console.log('🔍 formatMinutesDifference - Output:', {
+      minutes,
+      absMinutes,
+      hours,
+      remainingMinutes,
+      result
+    });
+    
+    return result;
+  };
   // Carregar breakdowns quando shifts ou data mudarem
   useEffect(() => {
     const loadBreakdowns = async () => {
       if (!shifts || !selectedDate) return;
       
+      // Converter selectedDate para string no formato esperado pela função
+      let dateString;
+      try {
+        if (selectedDate instanceof Date) {
+          if (isNaN(selectedDate.getTime())) {
+            console.warn('selectedDate é um Date inválido:', selectedDate);
+            return;
+          }
+          dateString = selectedDate.toISOString().split('T')[0]; // YYYY-MM-DD
+        } else if (typeof selectedDate === 'string' && selectedDate.trim() !== '') {
+          dateString = selectedDate.trim();
+        } else {
+          console.warn('selectedDate tem formato inesperado ou está vazio:', selectedDate);
+          return;
+        }
+      } catch (error) {
+        console.warn('Erro ao processar selectedDate:', error, selectedDate);
+        return;
+      }
+      
       const breakdowns = {};
       for (let i = 0; i < shifts.length; i++) {
         const shift = shifts[i];
         try {
-          // Não precisamos mais passar horas totais - sempre aplicar configuração ativa
-          const result = await calculateShiftValueWithBreakdown(shift, selectedDate, 0);
+          // Passar dateString em vez de selectedDate
+          const result = await calculateShiftValueWithBreakdown(shift, dateString, 0);
           breakdowns[i] = result;
         } catch (error) {
           console.warn('Erro ao carregar breakdown para shift:', error);
-          const simpleValue = calculateShiftValue ? calculateShiftValue(shift, selectedDate) : 0;
+          const simpleValue = calculateShiftValue ? calculateShiftValue(shift, dateString) : 0;
           breakdowns[i] = {
             baseValue: simpleValue,
             finalValue: simpleValue,
@@ -88,6 +490,9 @@ const ShiftBottomSheet = ({
           useNativeDriver: true,
         }),
       ]).start();
+      
+      // Reset editing modal when closing
+      setEditingShift(null);
     }
   }, [isVisible]);
 
@@ -132,11 +537,36 @@ const ShiftBottomSheet = ({
     return `${day} de ${month}, ${year}`;
   };
 
-  const formatDateHeader = (dateString) => {
-    if (!dateString) return '';
+  const formatDateHeader = (dateInput) => {
+    if (!dateInput) return '';
+    
     try {
-      const [year, month, day] = dateString.split('-');
-      const date = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+      let date;
+      
+      // Se for um objeto Date, usar diretamente
+      if (dateInput instanceof Date) {
+        date = dateInput;
+      } 
+      // Se for string, tentar parsear
+      else if (typeof dateInput === 'string') {
+        if (dateInput.includes('-')) {
+          // Formato YYYY-MM-DD
+          const [year, month, day] = dateInput.split('-');
+          date = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+        } else {
+          // Outros formatos de string
+          date = new Date(dateInput);
+        }
+      }
+      // Fallback
+      else {
+        date = new Date(dateInput);
+      }
+      
+      // Verificar se a data é válida
+      if (isNaN(date.getTime())) {
+        return 'Data inválida';
+      }
       
       const weekday = date.toLocaleDateString('pt-BR', { weekday: 'long' });
       const dayMonth = date.toLocaleDateString('pt-BR', { 
@@ -146,7 +576,8 @@ const ShiftBottomSheet = ({
       
       return `${weekday.charAt(0).toUpperCase() + weekday.slice(1)}, ${dayMonth}`;
     } catch (error) {
-      return dateString;
+      console.warn('Erro ao formatar data do header:', error);
+      return 'Data inválida';
     }
   };
 
@@ -182,9 +613,33 @@ const ShiftBottomSheet = ({
   };
 
   const renderShiftCard = (shift, index) => {
+    // Validações robustas
+    if (!shift || typeof index !== 'number' || index < 0) {
+      console.error('❌ renderShiftCard - Parâmetros inválidos:', { shift: !!shift, index });
+      return null;
+    }
+
     const breakdown = shiftBreakdowns[index];
     const shiftType = getShiftTypeLabel(shift.label);
     const shiftColor = getShiftTypeColor(shift.label);
+    const hoursSummary = getHoursSummary(shift, index);
+    const hasRegisteredHours = hoursSummary !== null;
+
+    // Log detalhado para debug
+    console.log('🔍 renderShiftCard - Shift', index, ':', {
+      shiftType,
+      hasRegisteredHours,
+      hoursSummary: hoursSummary ? {
+        startTime: hoursSummary.startTime,
+        endTime: hoursSummary.endTime,
+        differenceMinutes: hoursSummary.differenceMinutes,
+        difference: hoursSummary.difference,
+        predictedHours: hoursSummary.predictedHours,
+        realHours: hoursSummary.realHours
+      } : null,
+      shiftTime: shift.time,
+      realHours: realHours[index]
+    });
 
     return (
       <View key={index} style={styles.shiftCard}>
@@ -204,62 +659,227 @@ const ShiftBottomSheet = ({
           </View>
         </View>
 
-        {/* Detalhes do Plantão */}
+        {/* Detalhes do Plantão com Botão Integrado */}
         <View style={styles.shiftDetails}>
-          <View style={styles.shiftDetailRow}>
-            <Ionicons name="time-outline" size={18} color={Colors.text.tertiary} />
-            <Text style={styles.shiftDetailText}>
-              {formatTime(shift.time)}
-            </Text>
+          <View style={styles.detailsContent}>
+            <View style={styles.detailsLeft}>
+              <View style={styles.shiftDetailRow}>
+                <Ionicons name="time-outline" size={18} color={Colors.text.tertiary} />
+                <Text style={styles.shiftDetailText}>
+                  {formatTime(shift.time)}
+                </Text>
+              </View>
+
+              {shift.group?.institution?.name && (
+                <View style={styles.shiftDetailRow}>
+                  <Ionicons name="location-outline" size={18} color={Colors.text.tertiary} />
+                  <Text style={styles.shiftDetailText}>
+                    {shift.group.institution.name}
+                  </Text>
+                </View>
+              )}
+
+              {shift.group?.name && (
+                <TouchableOpacity 
+                  style={styles.shiftDetailRow}
+                  onPress={() => {
+                    if (onNavigateToGroup && shift.group) {
+                      onNavigateToGroup(shift.group);
+                    }
+                  }}
+                  activeOpacity={0.6}
+                >
+                  <Ionicons name="people-outline" size={18} color={Colors.text.tertiary} />
+                  <Text style={[styles.shiftDetailText, styles.groupText, onNavigateToGroup && styles.groupTextClickable]}>
+                    {shift.group.name}
+                  </Text>
+                  {onNavigateToGroup && (
+                    <Ionicons name="chevron-forward" size={14} color={Colors.text.tertiary} />
+                  )}
+                </TouchableOpacity>
+              )}
+            </View>
+
+            {/* Botão de Ação Integrado */}
+            <TouchableOpacity 
+              style={[
+                styles.compactActionButton,
+                hasRegisteredHours && styles.compactActionButtonActive
+              ]}
+              onPress={() => openHoursEditor(index)}
+            >
+              <Ionicons 
+                name={hasRegisteredHours ? "create-outline" : "time-outline"} 
+                size={16} 
+                color={hasRegisteredHours ? Colors.primary : Colors.text.tertiary}
+              />
+            </TouchableOpacity>
           </View>
-
-          {shift.group?.institution?.name && (
-            <View style={styles.shiftDetailRow}>
-              <Ionicons name="location-outline" size={18} color={Colors.text.tertiary} />
-              <Text style={styles.shiftDetailText}>
-                {shift.group.institution.name}
-              </Text>
-            </View>
-          )}
-
-          {shift.group?.name && (
-            <View style={styles.shiftDetailRow}>
-              <Ionicons name="people-outline" size={18} color={Colors.text.tertiary} />
-              <Text style={[styles.shiftDetailText, styles.groupText]}>
-                {shift.group.name}
-              </Text>
-            </View>
-          )}
         </View>
 
-        {/* Linha divisória */}
-        <View style={styles.divider} />
+        {/* Seção de Horas Registradas - Nova estrutura visual */}
+        {hasRegisteredHours && (
+          <>
+            <View style={styles.divider} />
+            
+            <View style={styles.registeredHoursSection}>
+              <View style={styles.registeredHoursHeader}>
+                <View style={styles.registeredHoursHeaderLeft}>
+                  <Ionicons name="checkmark-circle" size={16} color={Colors.success} />
+                  <Text style={styles.registeredHoursTitle}>
+                    Horas registradas - {getShiftTypeLabel(shift.label)}
+                  </Text>
+                </View>
+                
+                {/* Botão de Limpar */}
+                <TouchableOpacity 
+                  style={styles.clearButton}
+                  onPress={() => confirmClearHours(index)}
+                >
+                  <Ionicons name="trash-outline" size={14} color={Colors.error} />
+                  <Text style={styles.clearButtonText}>Limpar</Text>
+                </TouchableOpacity>
+              </View>
+              
+              {/* Informações específicas do plantão registrado */}
+              <View style={styles.registeredHoursDetails}>
+                <View style={styles.registeredHoursDisplay}>
+                  <Text style={styles.registeredHoursTime}>
+                    {hoursSummary.startTime} – {hoursSummary.endTime}
+                  </Text>
+                </View>
+                
+                {/* Informações contextuais do plantão */}
+                <View style={styles.shiftContextInfo}>
+                  {/* {shift.group?.name && (
+                    <Text style={styles.contextInfoText}>
+                      📍 {shift.group.name}
+                    </Text>
+                  )} */}
+                  {realHours[index]?.registeredAt && (
+                    <Text style={styles.contextInfoText}>
+                      🕐 Registrado em {(() => {
+                        try {
+                          const date = new Date(realHours[index].registeredAt);
+                          return !isNaN(date.getTime()) ? date.toLocaleDateString('pt-BR') : 'Data inválida';
+                        } catch (error) {
+                          console.warn('Erro ao formatar data de registro:', error);
+                          return 'Data inválida';
+                        }
+                      })()}
+                    </Text>
+                  )}
+                </View>
+              </View>
 
-        {/* Composição do Valor - AGORA ABAIXO DAS INFORMAÇÕES */}
+              {/* Extras em destaque com formatação precisa */}
+              {hoursSummary.differenceMinutes !== 0 && (
+                <View style={[
+                  styles.extrasIndicator,
+                  {
+                    backgroundColor: hoursSummary.differenceMinutes > 0 
+                      ? Colors.success + '15'
+                      : Colors.error + '15',
+                    borderColor: hoursSummary.differenceMinutes > 0 
+                      ? Colors.success + '30'
+                      : Colors.error + '30'
+                  }
+                ]}>
+                  <View style={styles.extrasContent}>
+                    <Ionicons 
+                      name={hoursSummary.differenceMinutes > 0 ? "trending-up-outline" : "trending-down-outline"} 
+                      size={14} 
+                      color={hoursSummary.differenceMinutes > 0 ? Colors.success : Colors.error}
+                    />
+                    <Text style={[
+                      styles.extrasText,
+                      {
+                        color: hoursSummary.differenceMinutes > 0 
+                          ? Colors.success
+                          : Colors.error
+                      }
+                    ]}>
+                      {hoursSummary.differenceMinutes > 0 ? 'Extras: +' : 'Faltou: -'}{formatMinutesDifference(Math.abs(hoursSummary.differenceMinutes))}
+                    </Text>
+                  </View>
+                </View>
+              )}
+            </View>
+          </>
+        )}
+
+        {/* Composição do Valor - Estilo clean como horas registradas */}
         {breakdown && (
-          <View style={styles.calculationSummary}>
-            <Text style={styles.summaryTitle}>💰 Composição do valor:</Text>
-            <Text style={styles.summaryItem}>
-              R$ {breakdown.hourlyValue?.toFixed(0) || '0'}/h × {breakdown.hours || 0}h 
-              {breakdown.weekend && breakdown.isNaturalWeekend ? ' (FDS)' : ''}
-              {breakdown.isFridayNight ? ' (Sexta N)' : ''} = R$ {breakdown.baseValue?.toFixed(2).replace('.', ',') || '0,00'}
-            </Text>
-            {breakdown.loyaltyBonus > 0 && (
-              <Text style={[styles.summaryBonus, { color: Colors.primary }]}>
-                + Fidelização {breakdown.loyaltyPercentage}% = R$ {breakdown.loyaltyBonus.toFixed(2).replace('.', ',')}
-              </Text>
-            )}
-            {breakdown.generalBonus > 0 && (
-              <Text style={[styles.summaryBonus, { color: Colors.success }]}>
-                + Bônus {breakdown.generalBonusPercentage}% = R$ {breakdown.generalBonus.toFixed(2).replace('.', ',')}
-              </Text>
-            )}
-            {breakdown.isFridayNight && (
-              <Text style={[styles.summaryBonus, { color: Colors.warning }]}>
-                (Sexta-feira (N) - aplicando valor de FDS)
-              </Text>
-            )}
-          </View>
+          <>
+            <View style={styles.divider} />
+            
+            <View style={styles.registeredHoursSection}>
+              <View style={styles.registeredHoursHeader}>
+                <View style={styles.registeredHoursHeaderLeft}>
+                  <Ionicons name="calculator-outline" size={16} color={Colors.primary} />
+                  <Text style={styles.registeredHoursTitle}>
+                    Composição do valor
+                  </Text>
+                </View>
+              </View>
+              
+              <View style={styles.valueCalculationDetails}>
+                {/* Cálculo base */}
+                <View style={styles.valueCalculationRow}>
+                  <Text style={styles.valueCalculationText}>
+                    R$ {breakdown.hourlyValue?.toFixed(0) || '0'}/h × {breakdown.hours || 0}h
+                    {breakdown.weekend && breakdown.isNaturalWeekend ? ' (FDS)' : ''}
+                    {breakdown.isFridayNight ? ' (Sexta N)' : ''}
+                  </Text>
+                  <Text style={styles.valueCalculationAmount}>
+                    R$ {breakdown.baseValue?.toFixed(2).replace('.', ',') || '0,00'}
+                  </Text>
+                </View>
+                
+                {/* Bônus de fidelização */}
+                {breakdown.loyaltyBonus > 0 && (
+                  <View style={styles.valueCalculationRow}>
+                    <Text style={[styles.valueCalculationText, { color: Colors.primary }]}>
+                      + Fidelização {breakdown.loyaltyPercentage}%
+                    </Text>
+                    <Text style={[styles.valueCalculationAmount, { color: Colors.primary }]}>
+                      R$ {breakdown.loyaltyBonus.toFixed(2).replace('.', ',')}
+                    </Text>
+                  </View>
+                )}
+                
+                {/* Bônus geral */}
+                {breakdown.generalBonus > 0 && (
+                  <View style={styles.valueCalculationRow}>
+                    <Text style={[styles.valueCalculationText, { color: Colors.success }]}>
+                      + Bônus {breakdown.generalBonusPercentage}%
+                    </Text>
+                    <Text style={[styles.valueCalculationAmount, { color: Colors.success }]}>
+                      R$ {breakdown.generalBonus.toFixed(2).replace('.', ',')}
+                    </Text>
+                  </View>
+                )}
+                
+                {/* Observação sobre sexta-feira */}
+                {breakdown.isFridayNight && (
+                  <View style={styles.shiftContextInfo}>
+                    <Text style={[styles.contextInfoText, { color: Colors.warning }]}>
+                    - Sexta-feira (N) - aplicando valor de FDS
+                    </Text>
+                  </View>
+                )}
+              </View>
+              
+              {/* Linha de origem dos valores - FORA do registeredHoursDetails */}
+              {/* <View style={styles.valueSourceContainer}>
+                <Text style={styles.valueSourceText}>
+                  {breakdown.hours || 0}h × R$ {breakdown.hourlyValue?.toFixed(0) || '0'}
+                  {breakdown.loyaltyBonus > 0 && ` | + ${breakdown.loyaltyPercentage}% fidelização`}
+                  {breakdown.generalBonus > 0 && ` | + ${breakdown.generalBonusPercentage}% bônus`}
+                </Text>
+              </View> */}
+            </View>
+          </>
         )}
       </View>
     );
@@ -328,6 +948,15 @@ const ShiftBottomSheet = ({
           )}
         </ScrollView>
       </Animated.View>
+
+      {/* Modal de Edição de Horas */}
+      <HoursEditModal
+        visible={editingShift !== null && typeof editingShift === 'number' && editingShift >= 0}
+        onClose={() => setEditingShift(null)}
+        onSave={(hours) => handleSaveHours(editingShift, hours)}
+        shift={editingShift !== null && shifts && shifts[editingShift] ? shifts[editingShift] : null}
+        currentHours={editingShift !== null && realHours && realHours[editingShift] ? realHours[editingShift] : {}}
+      />
     </View>
   );
 };
@@ -469,8 +1098,18 @@ const styles = StyleSheet.create({
   },
 
   shiftDetails: {
-    padding: Spacing.md,
-    paddingTop: Spacing.sm,
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.md,
+  },
+
+  detailsContent: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+  },
+
+  detailsLeft: {
+    flex: 1,
     gap: Spacing.sm,
   },
 
@@ -490,6 +1129,29 @@ const styles = StyleSheet.create({
   groupText: {
     color: Colors.text.tertiary,
     fontSize: Typography.fontSize.footnote,
+  },
+
+  groupTextClickable: {
+    color: Colors.primary,
+    textDecorationLine: 'underline',
+  },
+
+  // Botão compacto integrado
+  compactActionButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: Colors.background.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: Spacing.md,
+    borderWidth: 1,
+    borderColor: Colors.border.light,
+  },
+
+  compactActionButtonActive: {
+    backgroundColor: Colors.primary + '10',
+    borderColor: Colors.primary + '30',
   },
 
   // Calculation Summary
@@ -547,6 +1209,148 @@ const styles = StyleSheet.create({
     color: Colors.text.secondary,
     textAlign: 'center',
   },
+
+  // Registered Hours Section (Nueva estructura visual)
+  registeredHoursSection: {
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.md,
+  },
+
+  registeredHoursHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: Spacing.sm,
+  },
+
+  registeredHoursHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.xs,
+  },
+
+  registeredHoursTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: Colors.text.secondary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+
+  registeredHoursDetails: {
+    display: 'flex', 
+    justifyContent: 'space-between',
+    alignContent: 'center',
+    flexDirection: 'row',
+    gap: Spacing.md,
+  },
+
+  shiftContextInfo: {
+    gap: 2,
+  },
+
+  contextInfoText: {
+    fontSize: 11,
+    color: Colors.text.tertiary,
+    fontWeight: '500',
+    margin: 2,
+  },
+
+  clearButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: Colors.error + '10',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: Colors.error + '20',
+  },
+
+  clearButtonText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: Colors.error,
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+  },
+
+  registeredHoursDisplay: {
+    marginBottom: Spacing.sm,
+  },
+
+  registeredHoursTime: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: Colors.text.primary,
+    letterSpacing: 0.3,
+  },
+
+  extrasIndicator: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    borderWidth: 1,
+  },
+
+  extrasContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+
+  extrasText: {
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+
+  // Novos estilos para composição de valor clean
+  valueCalculationDetails: {
+    flexDirection: 'column',
+    gap: Spacing.xs,
+  },
+
+  valueCalculationRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 2,
+  },
+
+  valueCalculationText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: Colors.text.secondary,
+    flex: 1,
+  },
+
+  valueCalculationAmount: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: Colors.text.primary,
+    textAlign: 'right',
+  },
+
+  // Container e texto para origem dos valores
+  valueSourceContainer: {
+    marginTop: Spacing.sm,
+    paddingTop: Spacing.xs,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: Colors.border.light,
+  },
+
+  valueSourceText: {
+    fontSize: 10,
+    fontWeight: '500',
+    color: Colors.text.tertiary,
+    textAlign: 'center',
+    letterSpacing: 0.2,
+  },
+
 });
 
 export default ShiftBottomSheet;

@@ -15,12 +15,12 @@ import { Colors, Typography, Spacing, Shadows, BorderRadius } from '../constants
 
 const HomeScreenPremium = () => {
   const { user } = useContext(AuthContext);
-  const { shifts, loading, error, refreshShifts } = useShifts();
+  const { daysWithShifts, loading, error, getCurrentMonthData } = useShifts();
   const [refreshing, setRefreshing] = useState(false);
 
   const handleRefresh = async () => {
     setRefreshing(true);
-    await refreshShifts();
+    getCurrentMonthData();
     setRefreshing(false);
   };
 
@@ -31,30 +31,20 @@ const HomeScreenPremium = () => {
     return 'Boa noite';
   };
 
+  // Achata todos os turnos de daysWithShifts em uma lista plana
+  const allShifts = (daysWithShifts || []).flatMap(d => d.shifts || []);
+
   const getUpcomingShifts = () => {
-    if (!shifts) return [];
     const today = new Date();
-    return shifts
-      .filter(shift => new Date(shift.date) >= today)
+    today.setHours(0, 0, 0, 0);
+    return allShifts
+      .filter(shift => new Date(shift.date + 'T00:00:00') >= today)
       .slice(0, 3);
   };
 
   const getMonthlyStats = () => {
-    if (!shifts) return { total: 0, completed: 0, upcoming: 0 };
-    
-    const currentMonth = new Date().getMonth();
-    const currentYear = new Date().getFullYear();
-    
-    const monthlyShifts = shifts.filter(shift => {
-      const shiftDate = new Date(shift.date);
-      return shiftDate.getMonth() === currentMonth && shiftDate.getFullYear() === currentYear;
-    });
-
-    return {
-      total: monthlyShifts.length,
-      completed: monthlyShifts.filter(shift => shift.status === 'completed').length,
-      upcoming: monthlyShifts.filter(shift => shift.status === 'upcoming').length,
-    };
+    const total = (daysWithShifts || []).reduce((sum, d) => sum + (d.shiftsCount || 0), 0);
+    return { total, completed: 0, upcoming: total };
   };
 
   const stats = getMonthlyStats();

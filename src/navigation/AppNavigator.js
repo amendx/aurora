@@ -2,6 +2,8 @@ import React from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import TabNavigator from './TabNavigator';
 import ConfigScreenWithHeader from '../screens/ConfigScreenWithHeader';
+import GroupsScreen from '../screens/GroupsScreen';
+import ReportScreen from '../screens/ReportScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -23,6 +25,24 @@ export default function AppNavigator() {
       <Stack.Screen 
         name="ConfigScreenPremium" 
         component={ConfigScreenWithHeader}
+        options={{
+          animation: 'slide_from_right',
+          gestureEnabled: true,
+          fullScreenGestureEnabled: true,
+        }}
+      />
+      <Stack.Screen 
+        name="GroupsScreen" 
+        component={GroupsScreen}
+        options={{
+          animation: 'slide_from_right',
+          gestureEnabled: true,
+          fullScreenGestureEnabled: true,
+        }}
+      />
+      <Stack.Screen
+        name="ReportScreen"
+        component={ReportScreen}
         options={{
           animation: 'slide_from_right',
           gestureEnabled: true,

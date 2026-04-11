@@ -75,58 +75,58 @@ export const AuthProvider = ({ children }) => {
     try {
       setLoading(true);
       const result = await SoffiaApiService.login(email, password);
-      
-      Logger.debug('🔍 Resultado do SoffiaApiService.login:', result);
-      
-      if (result && result.message) {
-        // Resposta mockada ou da API real vem no formato: { data: { ... }, message: "..." }
-        const responseData = result;
-        
-        // O token está dentro de responseData.data.token
-        const apiData = responseData.data;
-        const token = apiData.token;
-        
-        // Dados do usuário são o próprio apiData (sem o token para não duplicar)
-        const userInfo = { ...apiData };
-        delete userInfo.token; // Remove token dos dados do usuário
-        
-        console.log('✅ Login bem-sucedido!');
-        console.log('📦 Dados da API:', responseData);
-        console.log('🔑 Token extraído:', token ? 'Token presente' : 'Token não encontrado');
-        console.log('👤 Dados do usuário:', userInfo.name || userInfo.email);
-        
-        await StorageService.saveToken(token);
-        await StorageService.saveUserData(userInfo);
-        
-        setToken(token);
-        setUser(userInfo);
-        setIsAuthenticated(true);
-        
-        Logger.info('✅ Login finalizado e dados armazenados');
-        
-        return { success: true };
-      } else if (result.success) {
-        // Formato antigo com { success: true, data: ... }
-        const responseData = result.data;
-        const apiData = responseData.data;
-        const token = apiData.token;
-        const userInfo = { ...apiData };
-        delete userInfo.token;
-        
-        await StorageService.saveToken(token);
-        await StorageService.saveUserData(userInfo);
-        
-        setToken(token);
-        setUser(userInfo);
-        setIsAuthenticated(true);
-        
-        Logger.info('✅ Login finalizado e dados armazenados');
-        
-        return { success: true };
-      } else {
-        Logger.error('❌ Login falhou:', result.error || 'Erro desconhecido');
-        return { success: false, error: result.error || 'Erro desconhecido' };
+
+      Logger.debug('🔍 Resultado do SoffiaApiService.login:', JSON.stringify(result));
+
+      // Extrair apiData do formato { message, data: {...} } ou { success, data: { data: {...} } }
+      let apiData = null;
+
+      if (result && result.message && result.data) {
+        // Formato direto da API real / login local: { message: "...", data: { token, id, name, ... } }
+        apiData = result.data;
+      } else if (result && result.success && result.data) {
+        // Formato legado com { success: true, data: { data: { token, ... } } }
+        apiData = result.data.data || result.data;
       }
+
+      if (!apiData) {
+        const errorMsg = result?.error || 'Resposta inválida do servidor';
+        Logger.error('❌ Login falhou:', errorMsg);
+        return { success: false, error: errorMsg };
+      }
+
+      const extractedToken = apiData.token;
+      if (!extractedToken) {
+        Logger.error('❌ Token não encontrado na resposta');
+        return { success: false, error: 'Token não recebido pelo servidor' };
+      }
+
+      // Normalizar dados do usuário — suportar variações de campo da API
+      const userInfo = {
+        id: apiData.id || apiData.user_id,
+        name: apiData.name || apiData.full_name || apiData.username || email,
+        email: apiData.email || email,
+        username: apiData.username || '',
+        role: apiData.role || '',
+        photo: apiData.photo || null,
+        council: apiData.council || '',
+        phone: apiData.phone || '',
+        is_premium: apiData.is_premium || false,
+      };
+
+      Logger.info('✅ Login bem-sucedido!');
+      Logger.info(`👤 Usuário: ${userInfo.name} (${userInfo.email})`);
+      Logger.info(`🔑 Token: ${extractedToken.substring(0, 20)}...`);
+
+      await StorageService.saveToken(extractedToken);
+      await StorageService.saveUserData(userInfo);
+
+      setToken(extractedToken);
+      setUser(userInfo);
+      setIsAuthenticated(true);
+
+      Logger.info('✅ Login finalizado e dados armazenados');
+      return { success: true };
     } catch (error) {
       Logger.error('❌ Erro no processo de login:', error.message);
       return { success: false, error: error.message };
@@ -138,10 +138,13 @@ export const AuthProvider = ({ children }) => {
   const logout = async () => {
     try {
       setLoading(true);
-      const token = await StorageService.getToken();
-      
-      if (token) {
-        await SoffiaApiService.logout(token);
+      const storedToken = await StorageService.getToken();
+
+      // Só chama a API de logout se for um token real (não login local)
+      if (storedToken && storedToken !== 'mock_token_for_development') {
+        await SoffiaApiService.logout(storedToken);
+      } else {
+        Logger.info('🧪 Logout local - sem chamada à API');
       }
       
       await StorageService.clearAll();

@@ -57,47 +57,108 @@ export const ShiftsProvider = ({ children }) => {
       const currentMonthDays = monthlyData.data.current.days;
       Logger.info(`📊 ${currentMonthDays.length} dias encontrados no monthly`);
 
-      // PASSO 3: Converter os dados para nosso formato usando dados mockados detalhados
-      const daysWithShifts = currentMonthDays.map(dayData => {
+      // PASSO 3: Buscar detalhes diários para cada dia com plantões
+      const isMock = SoffiaApiService.isMockToken(token);
+      const daysWithShifts = [];
+
+      for (const dayData of currentMonthDays) {
         const day = parseInt(dayData.date.split('-')[2]);
         const shiftsCount = dayData.shifts ? dayData.shifts.length : 0;
-        
-        // Buscar dados mockados detalhados para este dia
-        const { MOCK_DETAILED_SHIFTS } = require('../mocks/MockDataReal');
-        const dayDetailedData = MOCK_DETAILED_SHIFTS[dayData.date];
-        
+
         let shifts = [];
-        if (dayDetailedData && dayDetailedData.data.items) {
-          // Usar dados mockados detalhados com tipos reais (M, T, N)
-          shifts = dayDetailedData.data.items.map((shiftData, index) => ({
-            id: shiftData.id,
-            label: shiftData.label,
-            time: shiftData.time,
-            date: dayData.date,
-            group: shiftData.group,
-            originalData: shiftData
-          }));
-          
-          Logger.info(`✅ Dia ${dayData.date}: ${shifts.length} turnos (${shifts.map(s => s.label).join(', ')})`);
+
+        if (isMock) {
+          // Token local → usar dados mockados detalhados
+          const { MOCK_DETAILED_SHIFTS } = require('../mocks/MockDataReal');
+          const dayDetailedData = MOCK_DETAILED_SHIFTS[dayData.date];
+          if (dayDetailedData && dayDetailedData.data.items) {
+            shifts = dayDetailedData.data.items.map(shiftData => ({
+              id: shiftData.id,
+              label: shiftData.label,
+              time: shiftData.time,
+              date: dayData.date,
+              group: shiftData.group,
+              originalData: shiftData,
+            }));
+          } else {
+            shifts = (dayData.shifts || []).map(shiftId => ({
+              id: shiftId,
+              label: 'M',
+              time: '07h00 - 13h00 (M)',
+              date: dayData.date,
+              group: { name: 'Grupo Padrão' },
+            }));
+          }
         } else {
-          // Fallback caso não tenha dados mockados detalhados
-          shifts = dayData.shifts.map((shiftId, index) => ({
-            id: shiftId,
-            label: 'M',
-            time: '07h00 - 13h00 (M)',
-            date: dayData.date,
-            group: { name: 'Grupo Padrão' }
-          }));
+          // Token real → chamar endpoint diário para detalhes
+          const dateObj = new Date(dayData.date + 'T12:00:00.000Z');
+          const dailyResponse = await SoffiaApiService.getDailyShifts(token, dateObj);
+
+          if (dailyResponse.success && dailyResponse.data && dailyResponse.data.length > 0) {
+            // Log do primeiro item para diagnóstico de estrutura da API real
+            if (dailyResponse.data[0]) {
+              Logger.info(`🔬 Estrutura raw do daily (${dayData.date}): ${JSON.stringify(dailyResponse.data[0])}`);
+            }
+
+            shifts = dailyResponse.data.map(shiftData => {
+              // Detectar label com precedência correta — sem bug de ternário
+              const detectLabel = () => {
+                if (shiftData.label) return shiftData.label;
+                if (shiftData.shift_type) return shiftData.shift_type;
+                if (shiftData.type) return shiftData.type;
+                const t = (shiftData.time || shiftData.schedule || shiftData.hours || '');
+                // Noturno: começa >= 18h ou 19h
+                if (/1[89][:h]/.test(t) || /2[0-3][:h]/.test(t)) return 'N';
+                // Tarde: começa >= 13h
+                if (/1[3-7][:h]/.test(t)) return 'T';
+                return 'M';
+              };
+              const label = detectLabel();
+
+              return {
+                id: shiftData.id,
+                label: typeof label === 'string' ? label : 'M',
+                time: shiftData.time || shiftData.schedule || shiftData.hours || '',
+                date: dayData.date,
+                group: shiftData.group || { name: shiftData.group_name || 'Sem grupo' },
+                originalData: shiftData,
+              };
+            });
+
+            Logger.info(`📋 ${dayData.date}: ${shifts.length} plantão(s) da API`);
+            shifts.forEach((s, i) =>
+              Logger.info(`   ${i + 1}. [${s.label}] ${s.time} — ${s.group?.name || ''}`)
+            );
+          } else {
+            // API não retornou detalhes → montar placeholder com IDs do monthly
+            shifts = (dayData.shifts || []).map(shiftId => ({
+              id: shiftId,
+              label: 'M',
+              time: '',
+              date: dayData.date,
+              group: { name: '' },
+            }));
+            Logger.warn(`⚠️ ${dayData.date}: sem detalhes da API daily (${shiftsCount} IDs do monthly)`);
+          }
         }
 
-        return {
+        daysWithShifts.push({
           day,
           shiftsCount,
           shifts,
           date: dayData.date,
-          originalData: dayData
-        };
+          originalData: dayData,
+        });
+      }
+
+      // Log resumo de todos os plantões do mês
+      Logger.info(`\n📅 ===== PLANTÕES DE ${month}/${year} =====`);
+      daysWithShifts.forEach(d => {
+        if (d.shifts.length > 0) {
+          Logger.info(`  ${d.date} (${d.shifts.length}): ${d.shifts.map(s => `[${s.label}] ${s.time}`).join(' | ')}`);
+        }
       });
+      Logger.info(`📅 =======================================\n`);
 
       const totalShifts = daysWithShifts.reduce((sum, day) => sum + day.shiftsCount, 0);
       // PASSO 4: Calcular estatísticas REAIS baseadas nos turnos da API
@@ -111,10 +172,21 @@ export const ShiftsProvider = ({ children }) => {
         });
       });
 
+      // IMPORTANTE: Separar horas previstas de horas reais
+      // standardHours = sempre baseado nos plantões cadastrados (NUNCA muda)
+      // realHours = horas previstas + horas extras registradas (pode variar)
+      
+      const standardHours = realBreakdown.M.hours + realBreakdown.T.hours + realBreakdown.N.hours;
+      
+      // TODO: Calcular horas extras registradas pelo usuário
+      // Por enquanto, realHours = standardHours (sem extras)
+      // Quando implementarmos o cálculo de extras, será: standardHours + totalExtras
+      const realHours = standardHours; // Será atualizado em futuras versões
+
       const hoursReport = {
         totalShifts,
-        standardHours: realBreakdown.M.hours + realBreakdown.T.hours + realBreakdown.N.hours,
-        realHours: realBreakdown.M.hours + realBreakdown.T.hours + realBreakdown.N.hours,
+        standardHours, // Horas previstas (fixas)
+        realHours, // Horas reais (previstas + extras)
         breakdown: realBreakdown
       };
 
@@ -154,14 +226,13 @@ export const ShiftsProvider = ({ children }) => {
     }
   };
 
-  // Auto-carregar dados do mês atual quando o token estiver disponível
+  // Carregar dados do mês atual
   const getCurrentMonthData = () => {
     const now = new Date();
-    const month = now.getMonth() + 1; // JS months are 0-based
+    const month = now.getMonth() + 1;
     const year = now.getFullYear();
-    
-    // Para teste, usar março 2026
-    loadMonthlyShifts(3, 2026);
+    Logger.info(`📅 Carregando mês atual: ${month}/${year}`);
+    loadMonthlyShifts(month, year);
   };
 
   // Limpar dados

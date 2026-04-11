@@ -2,27 +2,28 @@ const API_BASE_URL = 'https://api.plantaoativo.com';
 import Logger from '../utils/Logger';
 import { MOCK_USER_DATA, MOCK_CALENDAR_DATA, MOCK_DETAILED_SHIFTS } from '../mocks/MockDataReal';
 
-// Modo de desenvolvimento - REMOVER EM PRODUÇÃO
-const MOCK_MODE = true; // Altere para false para usar API real
+const MOCK_TOKEN = 'mock_token_for_development';
+const DEMO_EMAIL = 'demo@cemhoras.com';
 
 export class SoffiaApiService {
+  // Retorna true quando o token é o token local de desenvolvimento
+  static isMockToken(token) {
+    return !token || token === MOCK_TOKEN;
+  }
+
   static async login(email, password) {
-    // Modo desenvolvimento - usar dados mockados
-    if (MOCK_MODE) {
-      Logger.info('🧪 MODO DE DESENVOLVIMENTO - Usando dados mockados');
-      Logger.info(`📧 Email mockado: ${email}`);
-      
-      // Simular delay da API
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
+    // Login local (demo) - retorna dados mockados sem chamar API
+    if (email === DEMO_EMAIL) {
+      Logger.info('🧪 LOGIN LOCAL - Usando dados mockados');
+      await new Promise(resolve => setTimeout(resolve, 800));
+
       const mockResponse = {
-        message: "Seu login foi efetuado com sucesso.",
-        data: MOCK_USER_DATA
+        message: 'Seu login foi efetuado com sucesso.',
+        data: { ...MOCK_USER_DATA, token: MOCK_TOKEN },
       };
-      
-      Logger.info('✅ Login mockado realizado com sucesso');
+
+      Logger.info('✅ Login local realizado com sucesso');
       Logger.loginSuccess(email, mockResponse);
-      
       return mockResponse;
     }
     
@@ -97,6 +98,12 @@ export class SoffiaApiService {
   }
 
   static async logout(token) {
+    // Login local não tem sessão na API
+    if (this.isMockToken(token)) {
+      Logger.info('🧪 Logout local - nenhuma chamada à API necessária');
+      return { success: true };
+    }
+
     const logoutUrl = `${API_BASE_URL}/auth/logout`;
     
     Logger.logoutAttempt(logoutUrl);
@@ -143,9 +150,9 @@ export class SoffiaApiService {
     const targetYear = year || currentDate.getFullYear();
     const targetMonth = month || (currentDate.getMonth() + 1); // getMonth() returns 0-11, API expects 1-12
     
-    // Modo desenvolvimento - usar dados mockados
-    if (MOCK_MODE) {
-      Logger.info('🧪 MODO DE DESENVOLVIMENTO - Usando dados mockados de calendário');
+    // Token local → retorna dados mockados
+    if (this.isMockToken(token)) {
+      Logger.info('🧪 TOKEN LOCAL - Usando dados mockados de calendário');
       Logger.info(`📅 Buscando plantões mockados para: ${targetMonth}/${targetYear}`);
       
       // Simular delay da API
@@ -267,9 +274,8 @@ export class SoffiaApiService {
    * @returns {Promise<Object>} Dados do calendário com 3 meses
    */
   static async getGenericMonthlyCalendar(token) {
-    // Modo desenvolvimento - usar dados mockados
-    if (MOCK_MODE) {
-      Logger.info('🧪 MODO DE DESENVOLVIMENTO - Usando dados mockados de calendário genérico');
+    if (this.isMockToken(token)) {
+      Logger.info('🧪 TOKEN LOCAL - Usando dados mockados de calendário genérico');
       
       // Simular delay da API
       await new Promise(resolve => setTimeout(resolve, 600));
@@ -432,9 +438,9 @@ export class SoffiaApiService {
     const day = String(date.getDate()).padStart(2, '0');
     const dateStr = `${year}-${month}-${day}`;
     
-    // Modo desenvolvimento - usar dados mockados
-    if (MOCK_MODE) {
-      Logger.info('🧪 MODO DE DESENVOLVIMENTO - Usando dados mockados de plantões diários');
+    // Token local → retorna dados mockados
+    if (this.isMockToken(token)) {
+      Logger.info('🧪 TOKEN LOCAL - Usando dados mockados de plantões diários');
       Logger.info(`📅 Buscando plantões mockados para: ${dateStr}`);
       
       // Simular delay da API
@@ -515,6 +521,207 @@ export class SoffiaApiService {
         success: false,
         error: error.message || 'Erro de conexão',
       };
+    }
+  }
+
+  // Carregar grupos do usuário
+  static async getGroups(token) {
+    if (this.isMockToken(token)) {
+      Logger.info('🧪 TOKEN LOCAL - Usando grupos mockados');
+      
+      // Simular delay da API
+      await new Promise(resolve => setTimeout(resolve, 800));
+      
+      const mockGroups = {
+        data: {
+          items: [
+            {
+              id: 1,
+              name: "UTI Adulto",
+              is_personal: false,
+              is_removed: false,
+              color: "#4CAF50",
+              logo: null,
+              is_admin: true,
+              total_users: 8,
+              created_at: "2023-01-15T10:00:00Z",
+              has_workingtime: true,
+              has_amount: true,
+              unread_notices: 2,
+              institution: {
+                id: 1,
+                name: "Hospital São José",
+                category: {
+                  id: 1,
+                  name: "Hospital"
+                }
+              },
+              manager: {
+                id: 1,
+                username: "dr.silva",
+                name: "Dr. Silva",
+                full_name: "Dr. João Silva",
+                photo: null,
+                description: "Coordenador UTI",
+                council: "CRM/SP 123456",
+                status: "active",
+                phone: "(11) 99999-9999",
+                email: "dr.silva@hospital.com",
+                role: "Médico",
+                is_premium: true
+              },
+              assists: [
+                {
+                  id: 2,
+                  name: "Dra. Maria",
+                  full_name: "Dra. Maria Santos",
+                  photo: null,
+                  council: "CRM/SP 789012",
+                  email: "maria@hospital.com",
+                  phone: "(11) 88888-8888",
+                  role: "Médica"
+                }
+              ],
+              analysts: [
+                {
+                  id: 3,
+                  name: "Enfermeiro João",
+                  full_name: "João da Silva",
+                  photo: null,
+                  council: "COREN/SP 345678",
+                  email: "joao@hospital.com",
+                  phone: "(11) 77777-7777",
+                  role: "Enfermeiro"
+                }
+              ],
+              observers: []
+            },
+            {
+              id: 2,
+              name: "Plantão Particular",
+              is_personal: true,
+              is_removed: false,
+              color: "#2196F3",
+              logo: null,
+              is_admin: false,
+              total_users: 3,
+              created_at: "2023-03-01T14:30:00Z",
+              has_workingtime: false,
+              has_amount: true,
+              unread_notices: 0,
+              institution: {
+                id: 2,
+                name: "Clínica Particular",
+                category: {
+                  id: 2,
+                  name: "Clínica"
+                }
+              },
+              manager: {
+                id: 4,
+                name: "Dr. Carlos",
+                full_name: "Dr. Carlos Oliveira",
+                photo: null,
+                council: "CRM/SP 456789",
+                email: "carlos@clinica.com",
+                role: "Médico"
+              },
+              assists: [],
+              analysts: [],
+              observers: [
+                {
+                  id: 5,
+                  name: "Ana Paula",
+                  full_name: "Ana Paula Costa",
+                  photo: null,
+                  email: "ana@clinica.com",
+                  role: "Administradora"
+                }
+              ]
+            }
+          ]
+        }
+      };
+      
+      Logger.info(`✅ Grupos mockados carregados - ${mockGroups.data.items.length} grupos`);
+      return mockGroups;
+    }
+
+    // API real — busca com paginação (20 por página, busca todas as páginas)
+    const groupsUrl = `${API_BASE_URL}/groups?page=1&limit=100`;
+
+    try {
+      Logger.info(`🌐 Fazendo requisição para grupos: ${groupsUrl}`);
+      
+      const response = await fetch(groupsUrl, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+          'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+          'Accept-Version': '2.0',
+          'Authorization': `Bearer ${token}`,
+          'Cache-Control': 'no-cache',
+          'Origin': 'https://web.soffia.co',
+          'Referer': 'https://web.soffia.co/',
+          'User-Agent': 'CemHoras-Mobile-App/1.0.0',
+        },
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        Logger.error(`❌ Erro HTTP ${response.status}: ${errorText}`);
+        throw new Error(`Erro HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      Logger.debug('📦 Resposta grupos:', JSON.stringify(data, null, 2));
+      
+      if (!data) {
+        Logger.error('❌ Resposta vazia da API de grupos');
+        throw new Error('Erro ao processar resposta dos grupos');
+      }
+      
+      Logger.info(`✅ Grupos carregados - ${data.data?.items?.length || 0} grupos`);
+      
+      return data;
+    } catch (error) {
+      Logger.error('❌ Erro na requisição dos grupos:', error.message);
+      throw error;
+    }
+  }
+  // Buscar detalhes de um grupo específico pelo ID
+  static async getGroupById(token, groupId) {
+    if (this.isMockToken(token)) {
+      Logger.info(`🧪 TOKEN LOCAL - Grupo mockado: ${groupId}`);
+      return { success: true, data: null }; // sem dados mock por grupo
+    }
+
+    const url = `${API_BASE_URL}/groups/${groupId}`;
+    Logger.info(`🌐 Buscando grupo: ${url}`);
+
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+          'Accept-Version': '2.0',
+          'Authorization': `Bearer ${token}`,
+          'Origin': 'https://web.soffia.co',
+          'Referer': 'https://web.soffia.co/',
+          'User-Agent': 'CemHoras-Mobile-App/1.0.0',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      Logger.info(`✅ Grupo ${groupId} carregado`);
+      return { success: true, data: data.data };
+    } catch (error) {
+      Logger.error(`❌ Erro ao buscar grupo ${groupId}:`, error.message);
+      return { success: false, error: error.message };
     }
   }
 }
