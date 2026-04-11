@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useContext } from 'react';
+import React, { useState, useEffect, useContext, useRef } from 'react';
 import {
   View,
   Text,
@@ -7,6 +7,7 @@ import {
   Pressable,
   Alert,
   ActivityIndicator,
+  Animated,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Calendar, LocaleConfig } from 'react-native-calendars';
@@ -31,15 +32,34 @@ LocaleConfig.locales['pt'] = {
 };
 LocaleConfig.defaultLocale = 'pt';
 
+const SkeletonBox = ({ width = '100%', height = 20, style }) => {
+  const anim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(anim, { toValue: 1, duration: 900, useNativeDriver: false }),
+        Animated.timing(anim, { toValue: 0, duration: 900, useNativeDriver: false }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, []);
+  const opacity = anim.interpolate({ inputRange: [0, 1], outputRange: [0.08, 0.2] });
+  return (
+    <Animated.View
+      style={[{ width, height, backgroundColor: '#90a4ae', borderRadius: 6, opacity }, style]}
+    />
+  );
+};
+
 const CalendarScreenPremium = ({ navigation }) => {
   const { user } = useContext(AuthContext);
   const { 
-    daysWithShifts, 
-    loading, 
-    error, 
-    loadMonthlyShifts, 
-    hasDataFor,
-    hoursReport 
+    daysWithShifts,
+    loading,
+    error,
+    loadMonthlyShifts,
+    hoursReport
   } = useShifts();
   
   const [currentDate, setCurrentDate] = useState(new Date());
@@ -50,7 +70,8 @@ const CalendarScreenPremium = ({ navigation }) => {
   const [shiftFilters, setShiftFilters] = useState({
     M: true,  // Manhã
     T: true,  // Tarde
-    N: true   // Noite
+    N: true,  // Noite
+    D: true   // Derivado/Carryover (sempre incluir)
   });
 
   // Estados para o BottomSheet
@@ -59,18 +80,13 @@ const CalendarScreenPremium = ({ navigation }) => {
   const [shiftValues, setShiftValues] = useState(null);
   const [extraHours, setExtraHours] = useState(0);
 
-  // Carregar dados quando a data mudar
+  // Carregar dados quando a data mudar — context deduplica por loadedFor
   useEffect(() => {
     const month = currentDate.getMonth() + 1;
     const year = currentDate.getFullYear();
-    
-    if (!hasDataFor(month, year)) {
-      Logger.debug(`📅 CalendarScreen: Carregando dados para ${month}/${year}`);
-      loadMonthlyShifts(month, year);
-    } else {
-      Logger.debug(`📅 CalendarScreen: Usando dados em cache para ${month}/${year}`);
-    }
-  }, [currentDate]);
+    Logger.debug(`📅 CalendarScreen: solicitando dados para ${month}/${year}`);
+    loadMonthlyShifts(month, year);
+  }, [currentDate.getMonth(), currentDate.getFullYear()]);
 
   // Carregar configurações de valores
   useEffect(() => {
@@ -226,7 +242,8 @@ const CalendarScreenPremium = ({ navigation }) => {
       let visibleShifts = dayData.shifts || [];
       visibleShifts = visibleShifts.filter(shift => {
         const type = shift.label?.charAt(0);
-        return shiftFilters[type];
+        // Incluir plantões conhecidos que estão habilitados OU plantões sem tipo definido
+        return shiftFilters[type] || !type || !shiftFilters.hasOwnProperty(type);
       });
 
       if (visibleShifts.length === 0) {
@@ -368,7 +385,7 @@ const CalendarScreenPremium = ({ navigation }) => {
       return {
         totalDays: 0,
         totalShifts: 0,
-        byType: { M: 0, T: 0, N: 0 },
+        byType: { M: 0, T: 0, N: 0, D: 0 }, // Incluir tipo D para carryovers
         filteredHours: 0,
         extraHours: 0,
         extraHoursFormatted: '0h'
@@ -398,7 +415,7 @@ const CalendarScreenPremium = ({ navigation }) => {
     const stats = {
       totalDays: 0,
       totalShifts: 0,
-      byType: { M: 0, T: 0, N: 0 },
+      byType: { M: 0, T: 0, N: 0, D: 0 }, // Incluir tipo D para carryovers
       filteredHours: 0,
       extraHours: Math.round(extraHours * 100) / 100, // Arredondar para 2 casas decimais
       extraHoursFormatted: formatExtraHours(extraHours)
@@ -412,7 +429,8 @@ const CalendarScreenPremium = ({ navigation }) => {
         // Filtrar turnos baseado nos filtros ativos
         const filteredShifts = day.shifts.filter(shift => {
           const type = shift.label?.charAt(0);
-          return shiftFilters[type];
+          // Incluir plantões conhecidos que estão habilitados OU plantões sem tipo definido
+          return shiftFilters[type] || !type || !shiftFilters.hasOwnProperty(type);
         });
 
         // Se há turnos visíveis neste dia, contar o dia
@@ -423,17 +441,36 @@ const CalendarScreenPremium = ({ navigation }) => {
           // Contar por tipo apenas os visíveis
           filteredShifts.forEach(shift => {
             const type = shift.label?.charAt(0);
-            if (stats.byType[type] !== undefined) {
+            
+            // Contar o shift por tipo (se o tipo é conhecido)
+            if (stats.byType.hasOwnProperty(type)) {
               stats.byType[type]++;
-              // Calcular horas baseado no tipo (assumindo M=6h, T=6h, N=12h)
-              const hoursPerShift = type === 'N' ? 12 : 6;
-              stats.filteredHours += hoursPerShift;
             }
+              
+            // Calcular horas para TODOS os shifts (mesmo aqueles com tipos não mapeados)
+            let hoursPerShift;
+            if (shift.splitHours && shift.splitHours.hoursThisMonth !== undefined) {
+              hoursPerShift = shift.splitHours.hoursThisMonth;
+              console.log(`🔍 Calendar - Split shift found: ${shift.label || 'NO_LABEL'} = ${hoursPerShift}h (from splitHours.hoursThisMonth)`);
+            } else {
+              // Para shifts normais sem split
+              hoursPerShift = type === 'N' ? 12 : 6;
+              console.log(`🔍 Calendar - Regular shift found: ${shift.label || 'NO_LABEL'} = ${hoursPerShift}h (standard for type ${type})`);
+            }
+            
+            stats.filteredHours += hoursPerShift;
           });
         }
       }
     });
 
+    console.log(`🔍 Calendar - Total de horas calculado: ${stats.filteredHours}h`);
+    console.log('🔍 Calendar - Breakdown:', {
+      totalShifts: stats.totalShifts,
+      daysWithShifts: daysWithVisibleShifts,
+      byType: stats.byType,
+      filteredHours: stats.filteredHours
+    });
     stats.totalDays = daysWithVisibleShifts;
     return stats;
   };
@@ -467,31 +504,52 @@ const CalendarScreenPremium = ({ navigation }) => {
         {/* Statistics Overview */}
         <View style={styles.statsSection}>
           <View style={styles.statsGrid}>
-            <View style={styles.statCard}>
-              <Text style={[
-                styles.statNumber,
-                {
-                  color: stats.extraHours === 0 
-                    ? Colors.text.secondary
-                    : stats.extraHours > 0 
-                      ? Colors.success 
-                      : Colors.error
-                }
-              ]}>
-                {stats.extraHoursFormatted}
-              </Text>
-              <Text style={styles.statLabel}>Horas Extras</Text>
-            </View>
-            
-            <View style={styles.statCard}>
-              <Text style={styles.statNumber}>{stats.totalShifts}</Text>
-              <Text style={styles.statLabel}>Plantões</Text>
-            </View>
-            
-            <View style={styles.statCard}>
-              <Text style={styles.statNumber}>{stats.filteredHours}h</Text>
-              <Text style={styles.statLabel}>Horas</Text>
-            </View>
+            {loading ? (
+              <>
+                {[0, 1, 2].map(i => (
+                  <View key={i} style={[styles.statCard, { gap: 6 }]}>
+                    <SkeletonBox width={40} height={28} />
+                    <SkeletonBox width={52} height={12} />
+                  </View>
+                ))}
+              </>
+            ) : (
+              <>
+                <View style={styles.statCard}>
+                  <Text style={[
+                    styles.statNumber,
+                    {
+                      color: stats.extraHours === 0
+                        ? Colors.text.secondary
+                        : stats.extraHours > 0
+                          ? Colors.success
+                          : Colors.error
+                    }
+                  ]}>
+                    {stats.extraHoursFormatted}
+                  </Text>
+                  <Text style={styles.statLabel}>Horas Extras</Text>
+                </View>
+
+                <View style={styles.statCard}>
+                  <Text style={[styles.statNumber, 
+                    {
+                      color: stats.totalShifts === 0
+                        ? Colors.text.secondary
+                        : stats.totalShifts > 0
+                          ? Colors.success
+                          : Colors.error
+                    }
+                  ]}>{stats.totalShifts}</Text>
+                  <Text style={styles.statLabel}>Plantões</Text>
+                </View>
+
+                <View style={styles.statCard}>
+                  <Text style={styles.statNumber}>{stats.filteredHours}h</Text>
+                  <Text style={styles.statLabel}>Horas</Text>
+                </View>
+              </>
+            )}
           </View>
         </View>
 

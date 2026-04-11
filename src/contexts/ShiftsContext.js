@@ -18,22 +18,63 @@ export const ShiftsProvider = ({ children }) => {
     totalShifts: 0,
     loading: false,
     error: null,
-    lastUpdated: null
+    lastUpdated: null,
+    loadedFor: null, // "YYYY-M" — tracks which month was fully loaded (even if 0 shifts)
   });
+
+  // Helper: parse "19h00 - 07h00 (N)" and return split info for month-boundary night shifts
+  const computeSplitHours = (timeStr) => {
+    if (!timeStr) return null;
+    let parts = timeStr.split(' – ');
+    if (parts.length !== 2) parts = timeStr.split(' - ');
+    if (parts.length !== 2) return null;
+
+    const normalize = (t) => t.replace('h', ':').replace(/\s*\([^)]*\)/, '').trim();
+    const [sh, sm] = normalize(parts[0]).split(':').map(Number);
+    const [eh, em] = normalize(parts[1]).split(':').map(Number);
+    if (isNaN(sh) || isNaN(sm) || isNaN(eh) || isNaN(em)) return null;
+
+    const startMin = sh * 60 + sm;
+    const endMin = eh * 60 + em;
+    if (endMin >= startMin) return null; // doesn't cross midnight
+
+    const minutesThisMonth = 24 * 60 - startMin;
+    const minutesNextMonth = endMin;
+    return {
+      minutesThisMonth,
+      minutesNextMonth,
+      hoursThisMonth: +(minutesThisMonth / 60).toFixed(2),
+      hoursNextMonth: +(minutesNextMonth / 60).toFixed(2),
+    };
+  };
 
   // Carregar dados dos plantões para um mês específico (APENAS MONTHLY)
   const loadMonthlyShifts = async (month, year, forceReload = false) => {
     const monthKey = `${year}-${month}`;
-    
-    // Evitar recarregar se já temos dados
-    if (!forceReload && shiftsData.currentMonth === month && shiftsData.currentYear === year) {
+
+    // Evitar recarregar se já temos dados para este mês
+    if (!forceReload && shiftsData.loadedFor === monthKey) {
       Logger.info('📋 Dados já carregados para', monthKey);
       return;
     }
 
+    // Evitar recarregar se já está carregando o mesmo mês
+    if (shiftsData.loading && shiftsData.currentMonth === month && shiftsData.currentYear === year) {
+      Logger.info('📋 Carregamento já em progresso para', monthKey);
+      return;
+    }
+
     Logger.info(`🚀 CARREGAMENTO SIMPLES - APENAS MONTHLY para ${month}/${year}`);
-    
-    setShiftsData(prev => ({ ...prev, loading: true, error: null }));
+
+    // Limpar dados do mês anterior imediatamente para evitar UI stale
+    const switchingMonth = shiftsData.currentMonth !== month || shiftsData.currentYear !== year;
+    setShiftsData(prev => ({
+      ...prev,
+      loading: true,
+      error: null,
+      daysWithShifts: switchingMonth ? [] : prev.daysWithShifts,
+      loadedFor: switchingMonth ? null : prev.loadedFor,
+    }));
 
     try {
       Logger.info(`📅 Chamando endpoint monthly: ${month}/${year}`);
@@ -96,9 +137,9 @@ export const ShiftsProvider = ({ children }) => {
 
           if (dailyResponse.success && dailyResponse.data && dailyResponse.data.length > 0) {
             // Log do primeiro item para diagnóstico de estrutura da API real
-            if (dailyResponse.data[0]) {
-              Logger.info(`🔬 Estrutura raw do daily (${dayData.date}): ${JSON.stringify(dailyResponse.data[0])}`);
-            }
+            // if (dailyResponse.data[0]) {
+            //   Logger.info(`🔬 Estrutura raw do daily (${dayData.date}): ${JSON.stringify(dailyResponse.data[0])}`);
+            // }
 
             shifts = dailyResponse.data.map(shiftData => {
               // Detectar label com precedência correta — sem bug de ternário
@@ -142,6 +183,18 @@ export const ShiftsProvider = ({ children }) => {
           }
         }
 
+        // Detect month-boundary split for night shifts on the last day of the month
+        const lastDayOfMonth = new Date(year, month, 0).getDate();
+        if (day === lastDayOfMonth) {
+          shifts = shifts.map(shift => {
+            if (shift.label?.charAt(0) !== 'N') return shift;
+            const split = computeSplitHours(shift.time);
+            if (!split) return shift;
+            Logger.info(`🌙 Split shift detected on day ${day}: ${split.hoursThisMonth}h this month, ${split.hoursNextMonth}h next month`);
+            return { ...shift, splitHours: split };
+          });
+        }
+
         daysWithShifts.push({
           day,
           shiftsCount,
@@ -150,6 +203,91 @@ export const ShiftsProvider = ({ children }) => {
           originalData: dayData,
         });
       }
+
+      // ── Day-1 carryover: inject derived shift from previous month's last night ──
+      // Check the API monthly response for "previous" month's last day
+      const prevDays = monthlyData.data?.previous?.days;
+      if (prevDays && Array.isArray(prevDays)) {
+        const prevLastDay = [...prevDays].sort((a, b) =>
+          parseInt(b.date.split('-')[2]) - parseInt(a.date.split('-')[2])
+        )[0];
+
+        if (prevLastDay) {
+          // Try to get the actual shift detail for that day from the API
+          let prevNightShifts = [];
+
+          if (isMock) {
+            const { MOCK_DETAILED_SHIFTS } = require('../mocks/MockDataReal');
+            const prevDetail = MOCK_DETAILED_SHIFTS[prevLastDay.date];
+            if (prevDetail?.data?.items) {
+              prevNightShifts = prevDetail.data.items
+                .filter(s => s.label?.charAt(0) === 'N')
+                .map(s => ({ ...s, date: prevLastDay.date }));
+            }
+          } else {
+            const dateObj = new Date(prevLastDay.date + 'T12:00:00.000Z');
+            const resp = await SoffiaApiService.getDailyShifts(token, dateObj);
+            if (resp.success && resp.data) {
+              prevNightShifts = resp.data
+                .filter(s => (s.label || '').charAt(0) === 'N')
+                .map(s => ({ ...s, date: prevLastDay.date }));
+            }
+          }
+
+          for (const prevShift of prevNightShifts) {
+            const split = computeSplitHours(prevShift.time || prevShift.schedule || '');
+            if (!split) continue;
+
+            // Build the carryover end time string, e.g. "00h00 - 07h00"
+            const normalize = (t) => t.replace('h', ':').replace(/\s*\([^)]*\)/, '').trim();
+            let parts = (prevShift.time || '').split(' – ');
+            if (parts.length !== 2) parts = (prevShift.time || '').split(' - ');
+            const endTimeRaw = parts.length === 2 ? normalize(parts[1]) : null;
+            const carryoverTime = endTimeRaw
+              ? `00h00 - ${endTimeRaw.replace(':', 'h').replace(/^(\d):/, '0$1:')}`
+              : `00h00 - ${String(Math.floor(split.minutesNextMonth / 60)).padStart(2,'0')}h${String(split.minutesNextMonth % 60).padStart(2,'0')}`;
+
+            const derivedShift = {
+              id: `carry_${prevShift.id || prevLastDay.date}`,
+              label: 'D', // D = Divided (carryover)
+              time: carryoverTime,
+              date: `${year}-${String(month).padStart(2, '0')}-01`,
+              group: prevShift.group || { name: prevShift.group_name || 'Sem grupo' },
+              carryover: true, // marks this as a derived carryover shift
+              splitHours: {
+                minutesThisMonth: split.minutesNextMonth,
+                minutesNextMonth: 0,
+                hoursThisMonth: split.hoursNextMonth,
+                hoursNextMonth: 0,
+              },
+              originalLabel: 'N',
+              originalTime: prevShift.time,
+            };
+
+            // Inject into day 1 if it exists, otherwise create a day-1 entry
+            const day1Idx = daysWithShifts.findIndex(d => d.day === 1);
+            if (day1Idx >= 0) {
+              daysWithShifts[day1Idx] = {
+                ...daysWithShifts[day1Idx],
+                shifts: [derivedShift, ...daysWithShifts[day1Idx].shifts],
+                shiftsCount: daysWithShifts[day1Idx].shiftsCount + 1,
+              };
+            } else {
+              const day1Date = `${year}-${String(month).padStart(2, '0')}-01`;
+              daysWithShifts.unshift({
+                day: 1,
+                shiftsCount: 1,
+                shifts: [derivedShift],
+                date: day1Date,
+                originalData: null,
+              });
+            }
+
+            Logger.info(`🌙 Carryover shift injected on ${year}-${String(month).padStart(2,'0')}-01: ${split.hoursNextMonth}h (${carryoverTime})`);
+          }
+        }
+      }
+      // ────────────────────────────────────────────────────────────────────────
 
       // Log resumo de todos os plantões do mês
       Logger.info(`\n📅 ===== PLANTÕES DE ${month}/${year} =====`);
@@ -166,9 +304,22 @@ export const ShiftsProvider = ({ children }) => {
       
       daysWithShifts.forEach(day => {
         day.shifts.forEach(shift => {
-          const type = shift.label;
+          // Carryover 'D' shifts count as 'N' for stats purposes
+          const type = shift.carryover ? 'N' : (shift.label?.charAt(0) || shift.label || 'M');
+          if (!realBreakdown[type]) realBreakdown[type] = { count: 0, hours: 0 };
           realBreakdown[type].count++;
-          realBreakdown[type].hours += type === 'N' ? 12 : 6; // Noturno = 12h, outros = 6h
+          
+          // Use split hours when available (both end-of-month and carryover shifts)
+          let hours = 0;
+          if (shift.splitHours) {
+            hours = shift.splitHours.hoursThisMonth;
+            Logger.info(`🔍 Split shift found: ${shift.label} - ${hours}h (from split)`);
+          } else {
+            hours = type === 'N' ? 12 : 6;
+            Logger.info(`🔍 Regular shift found: ${shift.label} - ${hours}h (standard)`);
+          }
+          
+          realBreakdown[type].hours += hours;
         });
       });
 
@@ -211,7 +362,8 @@ export const ShiftsProvider = ({ children }) => {
         hoursReport,
         loading: false,
         error: null,
-        lastUpdated: new Date()
+        lastUpdated: new Date(),
+        loadedFor: `${year}-${month}`,
       });
 
       Logger.info('🎉 DADOS CARREGADOS COM SUCESSO!');
@@ -221,18 +373,19 @@ export const ShiftsProvider = ({ children }) => {
       setShiftsData(prev => ({
         ...prev,
         loading: false,
-        error: error.message
+        error: error.message,
+        loadedFor: `${year}-${month}`, // prevent retry loop on error
       }));
     }
   };
 
-  // Carregar dados do mês atual
-  const getCurrentMonthData = () => {
+  // Carregar dados do mês atual — respeita cache
+  const getCurrentMonthData = (forceReload = false) => {
     const now = new Date();
     const month = now.getMonth() + 1;
     const year = now.getFullYear();
     Logger.info(`📅 Carregando mês atual: ${month}/${year}`);
-    loadMonthlyShifts(month, year);
+    loadMonthlyShifts(month, year, forceReload);
   };
 
   // Limpar dados
@@ -274,9 +427,7 @@ export const ShiftsProvider = ({ children }) => {
     },
     
     hasDataFor: (month, year) => {
-      return shiftsData.currentMonth === month && 
-             shiftsData.currentYear === year && 
-             shiftsData.daysWithShifts.length > 0;
+      return shiftsData.loadedFor === `${year}-${month}`;
     }
   };
 

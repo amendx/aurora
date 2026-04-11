@@ -15,6 +15,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
 import { Colors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
 import { calculateShiftValueWithBreakdown, calculateShiftValue } from '../utils/ShiftValueCalculator';
+import { formatMoney, formatMoneyCompact, formatHourlyRate } from '../utils/MoneyFormatter';
 import HoursEditModal from './HoursEditModal';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -497,15 +498,12 @@ const ShiftBottomSheet = ({
   }, [isVisible]);
 
   const panResponder = PanResponder.create({
-    onStartShouldSetPanResponder: (evt, gestureState) => {
-      // Só responder se o toque inicial for no header ou handle (primeiros 100px)
-      return evt.nativeEvent.locationY < 100;
-    },
-    onMoveShouldSetPanResponder: (evt, gestureState) => {
-      // Só responder a movimentos verticais significativos e se começou no header
-      const isVertical = Math.abs(gestureState.dy) > Math.abs(gestureState.dx);
-      const isInHeader = evt.nativeEvent.locationY < 100;
-      return isVertical && isInHeader && Math.abs(gestureState.dy) > 10;
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: (_, gestureState) => {
+      // Só capturar swipe para baixo (fechar) — nunca roubar scroll para cima
+      const isDownward = gestureState.dy > 10;
+      const isMoreVertical = Math.abs(gestureState.dy) > Math.abs(gestureState.dx);
+      return isDownward && isMoreVertical;
     },
     onPanResponderMove: (_, gestureState) => {
       // Só permitir movimento para baixo (fechar)
@@ -641,6 +639,46 @@ const ShiftBottomSheet = ({
       realHours: realHours[index]
     });
 
+    // Calcular valor correto para split shifts
+    const getDisplayValue = () => {
+      if (!breakdown) return '0,00';
+      
+      // Para split shifts, recalcular valor considerando apenas horas deste mês
+      if (shift.splitHours) {
+        const hoursThisMonth = shift.splitHours.hoursThisMonth || 0;
+        const proportionalBaseValue = (breakdown.hourlyValue || 0) * hoursThisMonth;
+        
+        // Aplicar bônus proporcionais baseados no valor das horas do split
+        let loyaltyBonus = 0;
+        let generalBonus = 0;
+        
+        if (breakdown.loyaltyPercentage) {
+          loyaltyBonus = (proportionalBaseValue * breakdown.loyaltyPercentage) / 100;
+        }
+        
+        if (breakdown.generalBonusPercentage) {
+          generalBonus = (proportionalBaseValue * breakdown.generalBonusPercentage) / 100;
+        }
+        
+        const totalValue = proportionalBaseValue + loyaltyBonus + generalBonus;
+        console.log('🔍 Split Value Calculation:', {
+          hoursThisMonth,
+          hourlyValue: breakdown.hourlyValue,
+          proportionalBaseValue,
+          loyaltyPercentage: breakdown.loyaltyPercentage,
+          loyaltyBonus,
+          generalBonusPercentage: breakdown.generalBonusPercentage,
+          generalBonus,
+          totalValue
+        });
+        
+        return formatMoneyCompact(totalValue);
+      }
+      
+      // Para plantões normais, usar valor original
+      return formatMoneyCompact(breakdown.finalValue);
+    };
+
     return (
       <View key={index} style={styles.shiftCard}>
         {/* Header do Card com Tipo e Valor */}
@@ -650,10 +688,18 @@ const ShiftBottomSheet = ({
               {shiftType}
             </Text>
           </View>
-          
+
+          {shift.splitHours && (
+            <View style={[styles.shiftTypeBadge, styles.splitInlineBadge]}>
+              <Text style={[styles.shiftTypeText, { color: Colors.info }]}>
+                {shift.splitHours.hoursThisMonth}h mês
+              </Text>
+            </View>
+          )}
+
           <View style={styles.shiftValueContainer}>
             <Text style={styles.shiftValueText}>
-              R$ {breakdown?.finalValue ? breakdown.finalValue.toFixed(2).replace('.', ',') : '0,00'}
+              R$ {getDisplayValue()}
             </Text>
             <Text style={styles.shiftValueLabel}>valor estimado</Text>
           </View>
@@ -687,14 +733,15 @@ const ShiftBottomSheet = ({
                       onNavigateToGroup(shift.group);
                     }
                   }}
-                  activeOpacity={0.6}
+                  activeOpacity={onNavigateToGroup ? 0.6 : 1}
+                  disabled={!onNavigateToGroup}
                 >
                   <Ionicons name="people-outline" size={18} color={Colors.text.tertiary} />
-                  <Text style={[styles.shiftDetailText, styles.groupText, onNavigateToGroup && styles.groupTextClickable]}>
+                  <Text style={[styles.shiftDetailText, styles.groupText]}>
                     {shift.group.name}
                   </Text>
                   {onNavigateToGroup && (
-                    <Ionicons name="chevron-forward" size={14} color={Colors.text.tertiary} />
+                    <Ionicons name="chevron-forward" size={16} color={Colors.text.tertiary} />
                   )}
                 </TouchableOpacity>
               )}
@@ -824,40 +871,83 @@ const ShiftBottomSheet = ({
               </View>
               
               <View style={styles.valueCalculationDetails}>
-                {/* Cálculo base */}
-                <View style={styles.valueCalculationRow}>
-                  <Text style={styles.valueCalculationText}>
-                    R$ {breakdown.hourlyValue?.toFixed(0) || '0'}/h × {breakdown.hours || 0}h
-                    {breakdown.weekend && breakdown.isNaturalWeekend ? ' (FDS)' : ''}
-                    {breakdown.isFridayNight ? ' (Sexta N)' : ''}
-                  </Text>
-                  <Text style={styles.valueCalculationAmount}>
-                    R$ {breakdown.baseValue?.toFixed(2).replace('.', ',') || '0,00'}
-                  </Text>
-                </View>
-                
-                {/* Bônus de fidelização */}
-                {breakdown.loyaltyBonus > 0 && (
-                  <View style={styles.valueCalculationRow}>
-                    <Text style={[styles.valueCalculationText, { color: Colors.primary }]}>
-                      + Fidelização {breakdown.loyaltyPercentage}%
-                    </Text>
-                    <Text style={[styles.valueCalculationAmount, { color: Colors.primary }]}>
-                      R$ {breakdown.loyaltyBonus.toFixed(2).replace('.', ',')}
-                    </Text>
-                  </View>
-                )}
-                
-                {/* Bônus geral */}
-                {breakdown.generalBonus > 0 && (
-                  <View style={styles.valueCalculationRow}>
-                    <Text style={[styles.valueCalculationText, { color: Colors.success }]}>
-                      + Bônus {breakdown.generalBonusPercentage}%
-                    </Text>
-                    <Text style={[styles.valueCalculationAmount, { color: Colors.success }]}>
-                      R$ {breakdown.generalBonus.toFixed(2).replace('.', ',')}
-                    </Text>
-                  </View>
+                {/* Para split shifts, mostrar apenas cálculo das horas do mês atual */}
+                {shift.splitHours ? (
+                  <>
+                    {/* Apenas horas deste mês (não mostrar próximo mês) */}
+                    <View style={styles.valueCalculationRow}>
+                      <Text style={[styles.valueCalculationText, { color: Colors.info }]}>
+                        {formatHourlyRate(breakdown.hourlyValue)} × {shift.splitHours.hoursThisMonth}h (split - este mês)
+                        {breakdown.weekend && breakdown.isNaturalWeekend ? ' (FDS)' : ''}
+                        {breakdown.isFridayNight ? ' (Sexta N)' : ''}
+                      </Text>
+                      <Text style={[styles.valueCalculationAmount, { color: Colors.info }]}>
+                        R$ {formatMoneyCompact((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth)}
+                      </Text>
+                    </View>
+                    
+                    {/* Bônus de fidelização para split (proporcional às horas do split) */}
+                    {breakdown.loyaltyPercentage > 0 && (
+                      <View style={styles.valueCalculationRow}>
+                        <Text style={[styles.valueCalculationText, { color: Colors.primary }]}>
+                          + Fidelização {breakdown.loyaltyPercentage}% (sobre {shift.splitHours.hoursThisMonth}h)
+                        </Text>
+                        <Text style={[styles.valueCalculationAmount, { color: Colors.primary }]}>
+                          R$ {formatMoneyCompact(((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth * breakdown.loyaltyPercentage) / 100)}
+                        </Text>
+                      </View>
+                    )}
+                    
+                    {/* Bônus geral para split (proporcional às horas do split) */}
+                    {breakdown.generalBonusPercentage > 0 && (
+                      <View style={styles.valueCalculationRow}>
+                        <Text style={[styles.valueCalculationText, { color: Colors.success }]}>
+                          + Bônus {breakdown.generalBonusPercentage}% (sobre {shift.splitHours.hoursThisMonth}h)
+                        </Text>
+                        <Text style={[styles.valueCalculationAmount, { color: Colors.success }]}>
+                          R$ {formatMoneyCompact(((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth * breakdown.generalBonusPercentage) / 100)}
+                        </Text>
+                      </View>
+                    )}
+                  </>
+                ) : (
+                  /* Cálculo normal para plantões não-split */
+                  <>
+                    <View style={styles.valueCalculationRow}>
+                      <Text style={styles.valueCalculationText}>
+                        {formatHourlyRate(breakdown.hourlyValue)} × {breakdown.hours || 0}h
+                        {breakdown.weekend && breakdown.isNaturalWeekend ? ' (FDS)' : ''}
+                        {breakdown.isFridayNight ? ' (Sexta N)' : ''}
+                      </Text>
+                      <Text style={styles.valueCalculationAmount}>
+                        R$ {formatMoneyCompact(breakdown.baseValue) || '0,00'}
+                      </Text>
+                    </View>
+                    
+                    {/* Bônus de fidelização para plantões normais */}
+                    {breakdown.loyaltyBonus > 0 && (
+                      <View style={styles.valueCalculationRow}>
+                        <Text style={[styles.valueCalculationText, { color: Colors.primary }]}>
+                          + Fidelização {breakdown.loyaltyPercentage}%
+                        </Text>
+                        <Text style={[styles.valueCalculationAmount, { color: Colors.primary }]}>
+                          R$ {formatMoneyCompact(breakdown.loyaltyBonus)}
+                        </Text>
+                      </View>
+                    )}
+                    
+                    {/* Bônus geral para plantões normais */}
+                    {breakdown.generalBonus > 0 && (
+                      <View style={styles.valueCalculationRow}>
+                        <Text style={[styles.valueCalculationText, { color: Colors.success }]}>
+                          + Bônus {breakdown.generalBonusPercentage}%
+                        </Text>
+                        <Text style={[styles.valueCalculationAmount, { color: Colors.success }]}>
+                          R$ {formatMoneyCompact(breakdown.generalBonus)}
+                        </Text>
+                      </View>
+                    )}
+                  </>
                 )}
                 
                 {/* Observação sobre sexta-feira */}
@@ -981,11 +1071,10 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
+    height: BOTTOM_SHEET_MAX_HEIGHT,
     backgroundColor: Colors.background.primary,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-    maxHeight: BOTTOM_SHEET_MAX_HEIGHT,
-    minHeight: 200,
     ...Shadows.strong,
   },
 
@@ -1060,6 +1149,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     padding: Spacing.lg,
+    paddingBottom: Spacing.xs,
   },
 
   shiftTypeBadge: {
@@ -1079,7 +1169,7 @@ const styles = StyleSheet.create({
   },
 
   shiftValueText: {
-    fontSize: Typography.fontSize.title2,
+    fontSize: 18, // Reduzido de Typography.fontSize.title2 para caber valores maiores
     fontWeight: Typography.fontWeight.bold,
     color: Colors.success,
     marginBottom: 2,
@@ -1129,11 +1219,6 @@ const styles = StyleSheet.create({
   groupText: {
     color: Colors.text.tertiary,
     fontSize: Typography.fontSize.footnote,
-  },
-
-  groupTextClickable: {
-    color: Colors.primary,
-    textDecorationLine: 'underline',
   },
 
   // Botão compacto integrado
@@ -1351,6 +1436,11 @@ const styles = StyleSheet.create({
     letterSpacing: 0.2,
   },
 
+  splitInlineBadge: {
+    backgroundColor: Colors.info + '15',
+    borderColor: Colors.info + '30',
+    marginRight: Spacing.sm,
+  },
 });
 
 export default ShiftBottomSheet;

@@ -1,28 +1,101 @@
-import React, { useContext, useState, useEffect } from 'react';
+import React, { useContext, useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   ScrollView,
   Pressable,
-  Alert,
   RefreshControl,
+  Animated,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { AuthContext } from '../context/AuthContext';
 import { useShifts } from '../contexts/ShiftsContext';
 import { Colors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
+import ShiftBottomSheet from '../components/ShiftBottomSheet';
 
-const HomeScreenPremium = () => {
+// ── Skeleton ──────────────────────────────────────────────────────────────────
+const SkeletonBox = ({ width = '100%', height = 20, style }) => {
+  const anim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(anim, { toValue: 1, duration: 900, useNativeDriver: false }),
+        Animated.timing(anim, { toValue: 0, duration: 900, useNativeDriver: false }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, []);
+
+  const opacity = anim.interpolate({ inputRange: [0, 1], outputRange: [0.08, 0.2] });
+
+  return (
+    <Animated.View
+      style={[{ width, height, backgroundColor: '#90a4ae', borderRadius: 6, opacity }, style]}
+    />
+  );
+};
+
+const ShiftCardSkeleton = () => (
+  <View style={styles.shiftCard}>
+    <View style={styles.shiftDate}>
+      <SkeletonBox width={32} height={28} style={{ marginBottom: 4 }} />
+      <SkeletonBox width={24} height={12} />
+    </View>
+    <View style={styles.shiftInfo}>
+      <SkeletonBox width="60%" height={14} style={{ marginBottom: 6 }} />
+      <SkeletonBox width="40%" height={12} style={{ marginBottom: 4 }} />
+      <SkeletonBox width="50%" height={11} />
+    </View>
+  </View>
+);
+
+const StatCardSkeleton = () => (
+  <View style={[styles.statsCard, { alignItems: 'center', gap: 6 }]}>
+    <SkeletonBox width={32} height={28} />
+    <SkeletonBox width={48} height={12} />
+  </View>
+);
+// ─────────────────────────────────────────────────────────────────────────────
+
+const LABEL_MAP = { M: 'Manhã', T: 'Tarde', N: 'Noite' };
+
+const HomeScreenPremium = ({ navigation }) => {
   const { user } = useContext(AuthContext);
-  const { daysWithShifts, loading, error, getCurrentMonthData } = useShifts();
+  const { daysWithShifts, loading, error, getCurrentMonthData, loadTwoMonthsData } = useShifts();
   const [refreshing, setRefreshing] = useState(false);
+
+  // Bottom Sheet state
+  const [bsVisible, setBsVisible] = useState(false);
+  const [bsShifts, setBsShifts] = useState([]);
+  const [bsDate, setBsDate] = useState(null);
 
   const handleRefresh = async () => {
     setRefreshing(true);
-    getCurrentMonthData();
+    const now = new Date();
+    const currentMonth = now.getMonth() + 1;
+    const currentYear = now.getFullYear();
+    
+    // Usar nova função que carrega 2 meses
+    await loadTwoMonthsData(currentMonth, currentYear);
     setRefreshing(false);
   };
+
+  // Carregar dados iniciais ao montar o componente
+  useEffect(() => {
+    const loadInitialData = async () => {
+      const now = new Date();
+      const currentMonth = now.getMonth() + 1;
+      const currentYear = now.getFullYear();
+      
+      // Usar nova função para carregar com contexto completo
+      await loadTwoMonthsData(currentMonth, currentYear);
+    };
+    
+    loadInitialData();
+  }, []);
 
   const getGreeting = () => {
     const hour = new Date().getHours();
@@ -31,7 +104,6 @@ const HomeScreenPremium = () => {
     return 'Boa noite';
   };
 
-  // Achata todos os turnos de daysWithShifts em uma lista plana
   const allShifts = (daysWithShifts || []).flatMap(d => d.shifts || []);
 
   const getUpcomingShifts = () => {
@@ -50,13 +122,29 @@ const HomeScreenPremium = () => {
   const stats = getMonthlyStats();
   const upcomingShifts = getUpcomingShifts();
 
+  const openShiftBottomSheet = (shift) => {
+    // Find all shifts for the same day
+    const dayData = (daysWithShifts || []).find(d => d.date === shift.date);
+    setBsShifts(dayData?.shifts || [shift]);
+    setBsDate(new Date(shift.date + 'T00:00:00'));
+    setBsVisible(true);
+  };
+
+  const handleVerTodos = () => {
+    if (navigation?.navigate) {
+      navigation.navigate('calendar');
+    }
+  };
+
   const renderWelcomeCard = () => (
     <View style={styles.welcomeCard}>
       <View style={styles.welcomeContent}>
         <Text style={styles.greetingText}>{getGreeting()},</Text>
         <Text style={styles.userNameText}>{user?.name || 'Usuário'}</Text>
         <Text style={styles.welcomeSubtext}>
-          Você tem {upcomingShifts.length} plantões próximos
+          {loading
+            ? 'Carregando plantões...'
+            : `Você tem ${upcomingShifts.length} plantões próximos`}
         </Text>
       </View>
       <View style={styles.welcomeIcon}>
@@ -67,26 +155,34 @@ const HomeScreenPremium = () => {
 
   const renderStatsCards = () => (
     <View style={styles.statsContainer}>
-      <View style={styles.statsCard}>
-        <View style={styles.statItem}>
-          <Text style={styles.statNumber}>{stats.total}</Text>
-          <Text style={styles.statLabel}>Total</Text>
-        </View>
-      </View>
-      
-      <View style={styles.statsCard}>
-        <View style={styles.statItem}>
-          <Text style={styles.statNumber}>{stats.completed}</Text>
-          <Text style={styles.statLabel}>Concluídos</Text>
-        </View>
-      </View>
-      
-      <View style={styles.statsCard}>
-        <View style={styles.statItem}>
-          <Text style={styles.statNumber}>{stats.upcoming}</Text>
-          <Text style={styles.statLabel}>Próximos</Text>
-        </View>
-      </View>
+      {loading ? (
+        <>
+          <StatCardSkeleton />
+          <StatCardSkeleton />
+          <StatCardSkeleton />
+        </>
+      ) : (
+        <>
+          <View style={styles.statsCard}>
+            <View style={styles.statItem}>
+              <Text style={styles.statNumber}>{stats.total}</Text>
+              <Text style={styles.statLabel}>Total</Text>
+            </View>
+          </View>
+          <View style={styles.statsCard}>
+            <View style={styles.statItem}>
+              <Text style={styles.statNumber}>{stats.completed}</Text>
+              <Text style={styles.statLabel}>Concluídos</Text>
+            </View>
+          </View>
+          <View style={styles.statsCard}>
+            <View style={styles.statItem}>
+              <Text style={styles.statNumber}>{stats.upcoming}</Text>
+              <Text style={styles.statLabel}>Próximos</Text>
+            </View>
+          </View>
+        </>
+      )}
     </View>
   );
 
@@ -94,40 +190,55 @@ const HomeScreenPremium = () => {
     <View style={styles.section}>
       <View style={styles.sectionHeader}>
         <Text style={styles.sectionTitle}>Próximos Plantões</Text>
-        <Pressable style={styles.sectionAction}>
+        <Pressable style={styles.sectionAction} onPress={handleVerTodos}>
           <Text style={styles.sectionActionText}>Ver todos</Text>
           <Ionicons name="chevron-forward" size={16} color={Colors.interactive.active} />
         </Pressable>
       </View>
 
-      {upcomingShifts.length > 0 ? (
+      {loading ? (
         <View style={styles.shiftsContainer}>
-          {upcomingShifts.map((shift, index) => (
-            <Pressable key={index} style={styles.shiftCard}>
-              <View style={styles.shiftDate}>
-                <Text style={styles.shiftDay}>
-                  {new Date(shift.date).getDate()}
-                </Text>
-                <Text style={styles.shiftMonth}>
-                  {new Date(shift.date).toLocaleDateString('pt-BR', { month: 'short' })}
-                </Text>
-              </View>
-              
-              <View style={styles.shiftInfo}>
-                <Text style={styles.shiftTitle}>{shift.title || 'Plantão'}</Text>
-                <Text style={styles.shiftTime}>
-                  {shift.startTime} - {shift.endTime}
-                </Text>
-                <Text style={styles.shiftLocation}>
-                  {shift.location || 'Local não informado'}
-                </Text>
-              </View>
+          <ShiftCardSkeleton />
+          <ShiftCardSkeleton />
+        </View>
+      ) : upcomingShifts.length > 0 ? (
+        <View style={styles.shiftsContainer}>
+          {upcomingShifts.map((shift, index) => {
+            const shiftDate = new Date(shift.date + 'T00:00:00');
+            const turno = LABEL_MAP[shift.label] || shift.label || '';
+            return (
+              <Pressable
+                key={index}
+                style={styles.shiftCard}
+                onPress={() => openShiftBottomSheet(shift)}
+              >
+                <View style={styles.shiftDate}>
+                  <Text style={styles.shiftDay}>{shiftDate.getDate()}</Text>
+                  <Text style={styles.shiftWeekday}>
+                    {shiftDate.toLocaleDateString('pt-BR', { weekday: 'short' })}
+                  </Text>
+                </View>
 
-              <View style={styles.shiftStatus}>
-                <View style={[styles.statusIndicator, { backgroundColor: Colors.warning }]} />
-              </View>
-            </Pressable>
-          ))}
+                <View style={styles.shiftInfo}>
+                  <Text style={styles.shiftTitle}>
+                    {turno ? `Plantão ${turno}` : (shift.title || 'Plantão')}
+                  </Text>
+                  <Text style={styles.shiftTime}>
+                    {shift.startTime || shift.start_time} – {shift.endTime || shift.end_time}
+                  </Text>
+                  {shift.group?.name && (
+                    <Text style={styles.shiftGroup}>{shift.group.name}</Text>
+                  )}
+                
+                </View>
+
+                <View style={styles.shiftStatus}>
+                  {/* <View style={[styles.statusIndicator, { backgroundColor: Colors.warning }]} /> */}
+                  <Ionicons name="chevron-forward" size={14} color={Colors.text.tertiary} style={{ marginTop: 4 }} />
+                </View>
+              </Pressable>
+            );
+          })}
         </View>
       ) : (
         <View style={styles.emptyState}>
@@ -144,54 +255,54 @@ const HomeScreenPremium = () => {
   const renderQuickActions = () => (
     <View style={styles.section}>
       <Text style={styles.sectionTitle}>Ações Rápidas</Text>
-      
       <View style={styles.actionsContainer}>
-        <Pressable style={styles.actionCard}>
-          <View style={styles.actionIcon}>
-            <Ionicons name="add" size={24} color={Colors.primary} />
+        <Pressable
+          style={[styles.actionCard, styles.actionCardDisabled]}
+          disabled
+        >
+          <View style={[styles.actionIcon, styles.actionIconDisabled]}>
+            <Ionicons name="time" size={24} color={Colors.text.tertiary} />
           </View>
-          <Text style={styles.actionText}>Novo Plantão</Text>
+          <Text style={[styles.actionText, styles.actionTextDisabled]}>Registrar Horas</Text>
         </Pressable>
 
-        <Pressable style={styles.actionCard}>
-          <View style={styles.actionIcon}>
-            <Ionicons name="time" size={24} color={Colors.success} />
-          </View>
-          <Text style={styles.actionText}>Registrar Horas</Text>
-        </Pressable>
-
-        <Pressable style={styles.actionCard}>
+        <Pressable
+          style={styles.actionCard}
+          onPress={() => navigation?.navigate?.('Reports')}
+        >
           <View style={styles.actionIcon}>
             <Ionicons name="document-text" size={24} color={Colors.warning} />
           </View>
-          <Text style={styles.actionText}>Relatório</Text>
-        </Pressable>
-
-        <Pressable style={styles.actionCard}>
-          <View style={styles.actionIcon}>
-            <Ionicons name="settings" size={24} color={Colors.interactive.inactive} />
-          </View>
-          <Text style={styles.actionText}>Configurar</Text>
+          <Text style={styles.actionText}>Relatórios</Text>
         </Pressable>
       </View>
     </View>
   );
 
   return (
-    <ScrollView 
-      style={styles.container}
-      showsVerticalScrollIndicator={false}
-      refreshControl={
-        <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />
-      }
-    >
-      <View style={styles.content}>
-        {renderWelcomeCard()}
-        {renderStatsCards()}
-        {renderUpcomingShifts()}
-        {renderQuickActions()}
-      </View>
-    </ScrollView>
+    <>
+      <ScrollView
+        style={styles.container}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />
+        }
+      >
+        <View style={styles.content}>
+          {renderWelcomeCard()}
+          {renderStatsCards()}
+          {renderUpcomingShifts()}
+          {renderQuickActions()}
+        </View>
+      </ScrollView>
+
+      <ShiftBottomSheet
+        isVisible={bsVisible}
+        onClose={() => setBsVisible(false)}
+        shifts={bsShifts}
+        selectedDate={bsDate}
+      />
+    </>
   );
 };
 
@@ -323,7 +434,7 @@ const styles = StyleSheet.create({
     color: Colors.primary,
     lineHeight: Typography.fontSize.title2 * 1.1,
   },
-  shiftMonth: {
+  shiftWeekday: {
     fontSize: Typography.fontSize.caption1,
     fontWeight: Typography.fontWeight.medium,
     color: Colors.text.secondary,
@@ -342,6 +453,12 @@ const styles = StyleSheet.create({
     fontSize: Typography.fontSize.subhead,
     fontWeight: Typography.fontWeight.regular,
     color: Colors.text.secondary,
+    marginBottom: 2,
+  },
+  shiftGroup: {
+    fontSize: Typography.fontSize.footnote,
+    fontWeight: Typography.fontWeight.medium,
+    color: Colors.primary,
     marginBottom: 2,
   },
   shiftLocation: {
@@ -384,12 +501,10 @@ const styles = StyleSheet.create({
   // Quick Actions
   actionsContainer: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
     gap: Spacing.md,
   },
   actionCard: {
     flex: 1,
-    minWidth: '45%',
     backgroundColor: Colors.background.primary,
     borderRadius: BorderRadius.md,
     padding: Spacing.md,
@@ -410,6 +525,15 @@ const styles = StyleSheet.create({
     fontWeight: Typography.fontWeight.medium,
     color: Colors.text.primary,
     textAlign: 'center',
+  },
+  actionCardDisabled: {
+    opacity: 0.45,
+  },
+  actionIconDisabled: {
+    backgroundColor: Colors.background.secondary,
+  },
+  actionTextDisabled: {
+    color: Colors.text.tertiary,
   },
 });
 

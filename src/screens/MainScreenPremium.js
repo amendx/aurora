@@ -1,8 +1,10 @@
-import React, { useState, useContext } from 'react';
+import React, { useState, useContext, useRef, useEffect } from 'react';
 import {
   View,
   StyleSheet,
+  Animated,
 } from 'react-native';
+
 import { AuthContext } from '../context/AuthContext';
 import AppHeader from '../components/AppHeader';
 import HomeScreenPremium from './HomeScreenPremium';
@@ -11,7 +13,7 @@ import SettingsScreenPremium from './SettingsScreenPremium';
 import ProfileScreen from './ProfileScreen';
 import ConfigScreenPremium from './ConfigScreenPremium';
 import GroupsScreen from './GroupsScreen';
-import HoursReportScreen from './HoursReportScreen';
+import ReportsScreen from './ReportsScreen';
 import TabBarPremium from '../components/TabBarPremium';
 import { Colors, Spacing } from '../constants/DesignSystem';
 import Logger from '../utils/Logger';
@@ -21,42 +23,78 @@ export default function MainScreenPremium() {
   const [currentScreen, setCurrentScreen] = useState(null);
   const [screenParams, setScreenParams] = useState(null);
   const { user } = useContext(AuthContext);
+  const fadeAnim = useRef(new Animated.Value(1)).current;
+
+  const fadeTransition = (callback) => {
+    // Instant state change, then fade in — no jarring fade-out flash
+    fadeAnim.setValue(0.6);
+    callback();
+    Animated.timing(fadeAnim, { toValue: 1, duration: 180, useNativeDriver: true }).start();
+  };
 
   const handleTabPress = (tabId) => {
     Logger.debug(`📱 Navegando para tab: ${tabId}`);
-    setCurrentTab(tabId);
-    setCurrentScreen(null); // Reset sub-screen when changing tabs
-    setScreenParams(null);
+    fadeTransition(() => {
+      setCurrentTab(tabId);
+      setCurrentScreen(null);
+      setScreenParams(null);
+    });
   };
 
   // Navigation handler for internal screens
   const handleNavigation = (screenName, params = null) => {
     Logger.debug(`📱 Navegação interna para: ${screenName}`);
-    
-    if (screenName === 'Profile') {
-      setCurrentScreen('profile');
-    } else if (screenName === 'ConfigScreenPremium') {
-      setCurrentScreen('config');
-    } else if (screenName === 'GroupsScreen') {
-      setCurrentScreen('groups');
-      setScreenParams(params);
-    } else if (screenName === 'HoursReport') {
-      setCurrentScreen('hoursReport');
-    } else {
-      setCurrentScreen(null);
-      setScreenParams(null);
-    }
+    fadeTransition(() => {
+      if (screenName === 'Profile') {
+        setCurrentScreen('profile');
+      } else if (screenName === 'ConfigScreenPremium') {
+        setCurrentScreen('config');
+      } else if (screenName === 'GroupsScreen') {
+        setCurrentScreen('groups');
+        setScreenParams(params);
+      } else if (screenName === 'HoursReport' || screenName === 'Reports') {
+        setCurrentScreen('reports');
+      } else if (screenName === 'calendar') {
+        setCurrentTab('calendar');
+        setCurrentScreen(null);
+        setScreenParams(null);
+      } else {
+        setCurrentScreen(null);
+        setScreenParams(null);
+      }
+    });
   };
 
   // Back navigation handler
   const handleBackNavigation = () => {
     Logger.debug(`📱 Voltando de navegação interna`);
-    setCurrentScreen(null);
-    setScreenParams(null);
+    fadeTransition(() => {
+      setCurrentScreen(null);
+      setScreenParams(null);
+    });
   };
 
   // Header data configuration
   const getHeaderData = () => {
+    if (currentScreen === 'reports') {
+      return {
+        title: 'Relatórios',
+        subtitle: 'Histórico e totais mensais',
+        showBackButton: true,
+        onBackPress: handleBackNavigation,
+      };
+    }
+
+    // Groups screen (acessível de qualquer tab)
+    if (currentScreen === 'groups') {
+      return {
+        title: 'Grupos',
+        subtitle: 'Seus grupos e membros',
+        showBackButton: true,
+        onBackPress: handleBackNavigation,
+      };
+    }
+
     // Profile screen (from settings)
     if (currentTab === 'settings' && currentScreen === 'profile') {
       return {
@@ -108,7 +146,16 @@ export default function MainScreenPremium() {
 
   // Screen renderer
   const renderCurrentScreen = () => {
-    // Sub-screens
+    // Sub-screens globais (acessíveis de qualquer tab)
+    if (currentScreen === 'groups') {
+      return <GroupsScreen navigation={{ goBack: handleBackNavigation }} focusGroupId={screenParams?.focusGroupId} />;
+    }
+
+    if (currentScreen === 'reports') {
+      return <ReportsScreen />;
+    }
+
+    // Sub-screens da tab settings
     if (currentTab === 'settings') {
       if (currentScreen === 'profile') {
         return <ProfileScreen navigation={{ 
@@ -121,9 +168,6 @@ export default function MainScreenPremium() {
           goBack: handleBackNavigation,
           navigate: handleNavigation 
         }} />;
-      }
-      if (currentScreen === 'groups') {
-        return <GroupsScreen navigation={{ goBack: handleBackNavigation }} focusGroupId={screenParams?.focusGroupId} />;
       }
     }
 
@@ -145,10 +189,10 @@ export default function MainScreenPremium() {
       {/* Fixed Header */}
       <AppHeader {...getHeaderData()} />
       
-      {/* Content Area - No animations, just instant switching */}
-      <View style={styles.content}>
+      {/* Content Area - fade transition on tab/screen change */}
+      <Animated.View style={[styles.content, { opacity: fadeAnim }]}>
         {renderCurrentScreen()}
-      </View>
+      </Animated.View>
 
       {/* Fixed Tab Bar */}
       <TabBarPremium currentTab={currentTab} onTabPress={handleTabPress} />

@@ -525,7 +525,12 @@ export class SoffiaApiService {
   }
 
   // Carregar grupos do usuário
-  static async getGroups(token) {
+  /**
+   * Busca grupos do usuário ou todos os grupos
+   * @param {string} token - Token de autenticação
+   * @param {boolean} all - Se true, busca todos os grupos (não só os do usuário)
+   */
+  static async getGroups(token, all = false) {
     if (this.isMockToken(token)) {
       Logger.info('🧪 TOKEN LOCAL - Usando grupos mockados');
       
@@ -647,11 +652,13 @@ export class SoffiaApiService {
       return mockGroups;
     }
 
-    // API real — busca com paginação (20 por página, busca todas as páginas)
-    const groupsUrl = `${API_BASE_URL}/groups?page=1&limit=100`;
+    // API real — busca grupos (meus ou todos)
+    const groupsUrl = all
+      ? `${API_BASE_URL}/groups?page=1&limit=100&all=true`
+      : `${API_BASE_URL}/groups?page=1&limit=100`;
 
     try {
-      Logger.info(`🌐 Fazendo requisição para grupos: ${groupsUrl}`);
+      Logger.info(`🌐 Fazendo requisição para grupos${all ? ' (todos)' : ' (meus)'}: ${groupsUrl}`);
       
       const response = await fetch(groupsUrl, {
         method: 'GET',
@@ -718,10 +725,92 @@ export class SoffiaApiService {
 
       const data = await response.json();
       Logger.info(`✅ Grupo ${groupId} carregado`);
+      Logger.debug(`📦 Estrutura grupo ${groupId}: manager=${data.data?.manager ? 1 : 0}, assists=${data.data?.assists?.length || 0}, analysts=${data.data?.analysts?.length || 0}, observers=${data.data?.observers?.length || 0}, total_users=${data.data?.total_users || '?'}`);
       return { success: true, data: data.data };
     } catch (error) {
       Logger.error(`❌ Erro ao buscar grupo ${groupId}:`, error.message);
       return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Busca TODOS os membros de um grupo com paginação automática
+   * Usa /groups/{id}/members
+   * @param {string} token - Token de autenticação
+   * @param {string} groupId - ID do grupo
+   * @returns {Promise<Object>} Lista completa de membros
+   */
+  static async getGroupMembers(token, groupId) {
+    if (this.isMockToken(token)) {
+      Logger.info(`🧪 TOKEN LOCAL - Membros mockados do grupo: ${groupId}`);
+      return { success: true, data: [] };
+    }
+
+    const allMembers = [];
+    let page = 1;
+    const limit = 100;
+    let hasMore = true;
+
+    try {
+      while (hasMore) {
+        const url = `${API_BASE_URL}/groups/${groupId}/members?page=${page}&limit=${limit}`;
+        Logger.info(`🌐 Buscando membros do grupo ${groupId} - página ${page}: ${url}`);
+
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: {
+            'Accept': 'application/json',
+            'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Version': '2.0',
+            'Authorization': `Bearer ${token}`,
+            'Cache-Control': 'no-cache',
+            'Origin': 'https://web.soffia.co',
+            'Referer': 'https://web.soffia.co/',
+            'User-Agent': 'CemHoras-Mobile-App/1.0.0',
+          },
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        
+        // Log da estrutura na primeira página para diagnóstico
+        if (page === 1) {
+          Logger.debug(`📦 Estrutura resposta /members: ${JSON.stringify(Object.keys(data.data || data || {}))}`);
+        }
+
+        const items = data.data?.items || data.data || [];
+        
+        if (Array.isArray(items) && items.length > 0) {
+          allMembers.push(...items);
+          Logger.info(`👥 Página ${page}: ${items.length} membros (total acumulado: ${allMembers.length})`);
+          
+          // Verificar se há mais páginas
+          const totalPages = data.data?.total_pages || data.data?.lastPage || data.meta?.last_page || 0;
+          const totalItems = data.data?.total || data.data?.total_items || data.meta?.total || 0;
+          
+          if (totalPages > 0) {
+            hasMore = page < totalPages;
+          } else if (totalItems > 0) {
+            hasMore = allMembers.length < totalItems;
+          } else {
+            // Se retornou exatamente o limite, pode haver mais
+            hasMore = items.length === limit;
+          }
+        } else {
+          hasMore = false;
+        }
+
+        page++;
+      }
+
+      Logger.info(`✅ Total de membros do grupo ${groupId}: ${allMembers.length}`);
+      return { success: true, data: allMembers };
+    } catch (error) {
+      Logger.error(`❌ Erro ao buscar membros do grupo ${groupId}:`, error.message);
+      return { success: false, error: error.message, data: allMembers };
     }
   }
 }

@@ -78,7 +78,7 @@ const MemberCard = ({ member, type }) => {
         <Text style={[styles.memberType, { color: typeIcon.color }]}>{typeLabel}</Text>
       </View>
       
-      <View style={styles.memberActions}>
+      {/* <View style={styles.memberActions}>
         {member.phone && (
           <TouchableOpacity style={styles.actionButton}>
             <Ionicons name="call" size={16} color={COLORS.accent} />
@@ -89,15 +89,16 @@ const MemberCard = ({ member, type }) => {
             <Ionicons name="mail" size={16} color={COLORS.accent} />
           </TouchableOpacity>
         )}
-      </View>
+      </View> */}
     </View>
   );
 };
 
-const GroupCard = ({ group, initialExpanded = false, memberFilter = '' }) => {
+const GroupCard = ({ group, initialExpanded = false, onCardLayout }) => {
   const [expanded, setExpanded] = useState(initialExpanded);
   const [fullMembers, setFullMembers] = useState(null); // null = não carregado
   const [loadingMembers, setLoadingMembers] = useState(false);
+  const [memberSearch, setMemberSearch] = useState('');
   const { token } = useContext(AuthContext);
 
   // Membros parciais do /groups (pode estar truncado)
@@ -114,34 +115,41 @@ const GroupCard = ({ group, initialExpanded = false, memberFilter = '' }) => {
   // Membros a exibir: fullMembers se já carregado, senão parciais
   const displayMembers = fullMembers || partialMembers;
 
-  // Filtrar membros por nome
-  const filteredMembers = memberFilter.trim()
+  // Filtrar membros por nome (busca local)
+  const filteredMembers = memberSearch.trim()
     ? displayMembers.filter(m => {
         const name = (m.name || m.full_name || '').toLowerCase();
-        return name.includes(memberFilter.trim().toLowerCase());
+        return name.includes(memberSearch.trim().toLowerCase());
       })
     : displayMembers;
 
-  // Buscar detalhes completos do grupo ao expandir
+  // Buscar todos os membros do grupo via /groups/{id}/members
   const fetchFullGroupDetails = async () => {
     if (fullMembers || !token || SoffiaApiService.isMockToken(token)) return;
     
     setLoadingMembers(true);
     try {
-      const response = await SoffiaApiService.getGroupById(token, group.id);
-      if (response.success && response.data) {
-        const fullData = response.data;
-        const members = [
-          ...(fullData.manager ? [{ ...fullData.manager, type: 'manager' }] : []),
-          ...(fullData.assists || []).map(m => ({ ...m, type: 'assist' })),
-          ...(fullData.analysts || []).map(m => ({ ...m, type: 'analyst' })),
-          ...(fullData.observers || []).map(m => ({ ...m, type: 'observer' })),
-        ];
+      const response = await SoffiaApiService.getGroupMembers(token, group.id);
+      if (response.success && response.data && response.data.length > 0) {
+        // Mapear campos do /members para o formato esperado pelo MemberCard
+        const members = response.data.map(m => ({
+          id: m.id,
+          name: m.name || m.full_name || '',
+          full_name: m.full_name || m.name || '',
+          photo: m.photo || null,
+          council: m.council || '',
+          email: m.email || '',
+          phone: m.phone || '',
+          role: m.role || m.description || '',
+          type: m.member_type || m.type || 'analyst',
+        }));
         setFullMembers(members);
-        Logger.info(`👥 Grupo ${group.name}: ${members.length} membros carregados via /groups/${group.id}`);
+        Logger.info(`👥 Grupo ${group.name}: ${members.length} membros carregados via /members`);
+      } else {
+        Logger.warn(`⚠️ Nenhum membro retornado para grupo ${group.name}`);
       }
     } catch (error) {
-      Logger.error(`Erro ao buscar detalhes do grupo ${group.id}:`, error);
+      Logger.error(`Erro ao buscar membros do grupo ${group.id}:`, error);
     } finally {
       setLoadingMembers(false);
     }
@@ -163,7 +171,14 @@ const GroupCard = ({ group, initialExpanded = false, memberFilter = '' }) => {
   }, [initialExpanded]);
 
   return (
-    <View style={styles.groupCard}>
+    <View
+      style={styles.groupCard}
+      onLayout={(e) => {
+        if (onCardLayout) {
+          onCardLayout(group.id, e.nativeEvent.layout.y);
+        }
+      }}
+    >
       <TouchableOpacity
         style={styles.groupHeader}
         onPress={handleToggleExpand}
@@ -224,13 +239,35 @@ const GroupCard = ({ group, initialExpanded = false, memberFilter = '' }) => {
           ) : (
             <>
               <Text style={styles.membersTitle}>
-                {memberFilter.trim()
+                {memberSearch.trim()
                   ? `${filteredMembers.length} de ${displayMembers.length} membros`
                   : `Membros (${displayMembers.length})`
                 }
               </Text>
+
+              {/* Busca local de membros dentro do grupo */}
+              {displayMembers.length > 5 && (
+                <View style={styles.memberSearchWrapper}>
+                  <Ionicons name="search" size={16} color={COLORS.textLight} />
+                  <TextInput
+                    style={styles.memberSearchInput}
+                    placeholder="Buscar membro..."
+                    placeholderTextColor={COLORS.textLight}
+                    value={memberSearch}
+                    onChangeText={setMemberSearch}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                  />
+                  {memberSearch.length > 0 && (
+                    <TouchableOpacity onPress={() => setMemberSearch('')}>
+                      <Ionicons name="close-circle" size={16} color={COLORS.textLight} />
+                    </TouchableOpacity>
+                  )}
+                </View>
+              )}
+
               {filteredMembers.length === 0 ? (
-                <Text style={styles.noMembersText}>Nenhum membro encontrado para "{memberFilter}"</Text>
+                <Text style={styles.noMembersText}>Nenhum membro encontrado para "{memberSearch}"</Text>
               ) : (
                 filteredMembers.map((member, index) => (
                   <MemberCard key={`${member.id}-${index}`} member={member} type={member.type} />
@@ -246,19 +283,110 @@ const GroupCard = ({ group, initialExpanded = false, memberFilter = '' }) => {
 
 const GroupsScreen = ({ navigation, focusGroupId = null }) => {
   const { groups: rawGroups, loading, error, loadGroups } = useGroups();
+  const { token } = useContext(AuthContext);
   const [refreshing, setRefreshing] = useState(false);
-  const [activeTab, setActiveTab] = useState('todos'); // 'todos' | 'meus'
-  const [memberFilter, setMemberFilter] = useState('');
+  const [activeTab, setActiveTab] = useState('meus'); // Começa em "Meus Grupos"
+  const [groupFilter, setGroupFilter] = useState('');
   const scrollViewRef = useRef(null);
+  const groupCardPositions = useRef({});
+  const groupsListOffsetY = useRef(0);
+  const hasScrolledToFocus = useRef(false);
+
+  // Todos os grupos (carregados sob demanda ao clicar na aba)
+  const [allGroups, setAllGroups] = useState([]);
+  const [allGroupsLoading, setAllGroupsLoading] = useState(false);
+  const [allGroupsLoaded, setAllGroupsLoaded] = useState(false);
 
   const groups = Array.isArray(rawGroups) ? rawGroups : [];
 
-  // "Meus Grupos" = onde sou admin ou gestor pessoal
-  const meusGrupos = groups.filter(g => g.is_admin || g.is_personal);
-  // "Todos os Grupos" = todos que pertenço (a API já filtra pelos do usuário)
-  const todosGrupos = groups;
+  // "Meus Grupos" = todos os grupos que a API /groups retorna (são os do usuário)
+  const meusGrupos = groups;
 
-  const displayedGroups = activeTab === 'meus' ? meusGrupos : todosGrupos;
+  // Grupos exibidos depende da aba
+  const displayedGroups = activeTab === 'meus' ? meusGrupos : allGroups;
+
+  // Filtrar grupos pelo nome
+  const filteredGroups = groupFilter.trim()
+    ? displayedGroups.filter(g =>
+        g.name.toLowerCase().includes(groupFilter.trim().toLowerCase())
+      )
+    : displayedGroups;
+
+  // Callback para capturar a posição Y de cada GroupCard dentro do groupsList
+  const handleCardLayout = (groupId, y) => {
+    groupCardPositions.current[groupId] = y;
+
+    // Se esse é o card focado, rolar até ele
+    if (focusGroupId && groupId === focusGroupId && !hasScrolledToFocus.current) {
+      hasScrolledToFocus.current = true;
+      // Pequeno delay para garantir que o layout do ScrollView está estabilizado
+      setTimeout(() => {
+        if (scrollViewRef.current) {
+          // y é relativo ao groupsList; somar o offset do groupsList dentro do ScrollView
+          const scrollTarget = groupsListOffsetY.current + y;
+          scrollViewRef.current.scrollTo({
+            y: scrollTarget,
+            animated: true,
+          });
+        }
+      }, 400);
+    }
+  };
+
+  // Callback para capturar o offset Y do container groupsList dentro do ScrollView
+  const handleGroupsListLayout = (e) => {
+    groupsListOffsetY.current = e.nativeEvent.layout.y;
+  };
+
+  // Carregar todos os grupos da organização (sob demanda)
+  const loadAllGroups = async () => {
+    if (allGroupsLoaded || allGroupsLoading) return;
+    setAllGroupsLoading(true);
+    try {
+      // Buscar todos os grupos com ?all=true ou sem filtro de usuário
+      // A API /groups retorna os grupos do usuário; para todos, usar /groups?all=true
+      const response = await SoffiaApiService.getGroups(token, true);
+      if (response?.data?.items) {
+        const normalized = response.data.items
+          .map(g => ({
+            id: g.id,
+            name: g.name || '',
+            color: (g.color || '007AFF').startsWith('#') ? g.color : `#${g.color || '007AFF'}`,
+            is_personal: g.is_personal || false,
+            is_removed: g.is_removed || false,
+            logo: g.logo || null,
+            is_admin: g.is_admin || false,
+            total_users: g.total_users || 0,
+            created_at: g.created_at || null,
+            has_workingtime: g.has_workingtime || false,
+            has_amount: g.has_amount || false,
+            unread_notices: g.unread_notices || 0,
+            institution: g.institution ? { id: g.institution.id, name: g.institution.name || '' } : null,
+            manager: g.manager || null,
+            assists: Array.isArray(g.assists) ? g.assists : [],
+            analysts: Array.isArray(g.analysts) ? g.analysts : [],
+            observers: Array.isArray(g.observers) ? g.observers : [],
+          }))
+          .filter(g => !g.is_removed);
+        setAllGroups(normalized);
+        Logger.info(`🏢 Todos os grupos carregados: ${normalized.length}`);
+      }
+      setAllGroupsLoaded(true);
+    } catch (err) {
+      Logger.error('Erro ao carregar todos os grupos:', err);
+      Alert.alert('Erro', 'Não foi possível carregar todos os grupos');
+    } finally {
+      setAllGroupsLoading(false);
+    }
+  };
+
+  // Ao trocar para aba "Todos", dispara carga sob demanda
+  const handleTabChange = (tab) => {
+    setActiveTab(tab);
+    if (tab === 'todos' && !allGroupsLoaded) {
+      loadAllGroups();
+    }
+  };
 
   // Se tiver focusGroupId, muda para a aba que contém o grupo
   useEffect(() => {
@@ -268,6 +396,7 @@ const GroupsScreen = ({ navigation, focusGroupId = null }) => {
         setActiveTab('meus');
       } else {
         setActiveTab('todos');
+        if (!allGroupsLoaded) loadAllGroups();
       }
     }
   }, [focusGroupId, groups.length]);
@@ -276,6 +405,10 @@ const GroupsScreen = ({ navigation, focusGroupId = null }) => {
     setRefreshing(true);
     try {
       await loadGroups();
+      if (activeTab === 'todos') {
+        setAllGroupsLoaded(false);
+        await loadAllGroups();
+      }
     } catch (error) {
       Alert.alert('Erro', 'Não foi possível atualizar os grupos');
     } finally {
@@ -318,22 +451,8 @@ const GroupsScreen = ({ navigation, focusGroupId = null }) => {
   const renderTabs = () => (
     <View style={styles.tabContainer}>
       <TouchableOpacity
-        style={[styles.tab, activeTab === 'todos' && styles.tabActive]}
-        onPress={() => setActiveTab('todos')}
-      >
-        <Text style={[styles.tabText, activeTab === 'todos' && styles.tabTextActive]}>
-          Todos os Grupos
-        </Text>
-        <View style={[styles.tabBadge, activeTab === 'todos' && styles.tabBadgeActive]}>
-          <Text style={[styles.tabBadgeText, activeTab === 'todos' && styles.tabBadgeTextActive]}>
-            {todosGrupos.length}
-          </Text>
-        </View>
-      </TouchableOpacity>
-
-      <TouchableOpacity
         style={[styles.tab, activeTab === 'meus' && styles.tabActive]}
-        onPress={() => setActiveTab('meus')}
+        onPress={() => handleTabChange('meus')}
       >
         <Text style={[styles.tabText, activeTab === 'meus' && styles.tabTextActive]}>
           Meus Grupos
@@ -343,6 +462,22 @@ const GroupsScreen = ({ navigation, focusGroupId = null }) => {
             {meusGrupos.length}
           </Text>
         </View>
+      </TouchableOpacity>
+
+      <TouchableOpacity
+        style={[styles.tab, activeTab === 'todos' && styles.tabActive]}
+        onPress={() => handleTabChange('todos')}
+      >
+        <Text style={[styles.tabText, activeTab === 'todos' && styles.tabTextActive]}>
+          Todos os Grupos
+        </Text>
+        {allGroupsLoaded && (
+          <View style={[styles.tabBadge, activeTab === 'todos' && styles.tabBadgeActive]}>
+            <Text style={[styles.tabBadgeText, activeTab === 'todos' && styles.tabBadgeTextActive]}>
+              {allGroups.length}
+            </Text>
+          </View>
+        )}
       </TouchableOpacity>
     </View>
   );
@@ -357,7 +492,7 @@ const GroupsScreen = ({ navigation, focusGroupId = null }) => {
       );
     }
 
-    if (error) {
+    if (error && groups.length === 0) {
       return (
         <View style={styles.errorContainer}>
           <MaterialCommunityIcons name="alert-circle" size={48} color={COLORS.error} />
@@ -370,21 +505,12 @@ const GroupsScreen = ({ navigation, focusGroupId = null }) => {
       );
     }
 
-    if (groups.length === 0) {
-      return (
-        <View style={styles.emptyContainer}>
-          <MaterialCommunityIcons name="account-group-outline" size={64} color={COLORS.textLight} />
-          <Text style={styles.emptyTitle}>Nenhum grupo encontrado</Text>
-          <Text style={styles.emptyMessage}>
-            Você ainda não faz parte de nenhum grupo ou plantão.
-          </Text>
-        </View>
-      );
-    }
-
     const emptyTabMessage = activeTab === 'meus'
-      ? 'Você não é administrador de nenhum grupo.'
-      : 'Nenhum grupo encontrado.';
+      ? 'Você não faz parte de nenhum grupo.'
+      : 'Nenhum grupo encontrado na organização.';
+
+    // Loading específico da aba "Todos"
+    const isTabLoading = activeTab === 'todos' && allGroupsLoading;
 
     return (
       <ScrollView
@@ -402,40 +528,49 @@ const GroupsScreen = ({ navigation, focusGroupId = null }) => {
       >
         {renderTabs()}
 
-        {/* Busca/filtro de membros */}
+        {/* Busca/filtro de grupos */}
         <View style={styles.searchContainer}>
           <View style={styles.searchInputWrapper}>
             <Ionicons name="search" size={18} color={COLORS.textLight} style={styles.searchIcon} />
             <TextInput
               style={styles.searchInput}
-              placeholder="Buscar membro por nome..."
+              placeholder="Buscar grupo..."
               placeholderTextColor={COLORS.textLight}
-              value={memberFilter}
-              onChangeText={setMemberFilter}
+              value={groupFilter}
+              onChangeText={setGroupFilter}
               autoCapitalize="none"
               autoCorrect={false}
             />
-            {memberFilter.length > 0 && (
-              <TouchableOpacity onPress={() => setMemberFilter('')} style={styles.clearSearchButton}>
+            {groupFilter.length > 0 && (
+              <TouchableOpacity onPress={() => setGroupFilter('')} style={styles.clearSearchButton}>
                 <Ionicons name="close-circle" size={18} color={COLORS.textLight} />
               </TouchableOpacity>
             )}
           </View>
         </View>
 
-        {displayedGroups.length === 0 ? (
+        {isTabLoading ? (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color={COLORS.accent} />
+            <Text style={styles.loadingText}>Carregando todos os grupos...</Text>
+          </View>
+        ) : filteredGroups.length === 0 ? (
           <View style={styles.emptyTabContainer}>
             <MaterialCommunityIcons name="account-group-outline" size={48} color={COLORS.textLight} />
-            <Text style={styles.emptyTabText}>{emptyTabMessage}</Text>
+            <Text style={styles.emptyTabText}>
+              {groupFilter.trim()
+                ? `Nenhum grupo encontrado para "${groupFilter}"`
+                : emptyTabMessage}
+            </Text>
           </View>
         ) : (
-          <View style={styles.groupsList}>
-            {displayedGroups.map((group) => (
+          <View style={styles.groupsList} onLayout={handleGroupsListLayout}>
+            {filteredGroups.map((group) => (
               <GroupCard
                 key={group.id}
                 group={group}
                 initialExpanded={focusGroupId === group.id}
-                memberFilter={memberFilter}
+                onCardLayout={handleCardLayout}
               />
             ))}
           </View>
@@ -866,6 +1001,22 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     paddingVertical: 12,
     fontStyle: 'italic',
+  },
+  memberSearchWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.background,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginBottom: 10,
+    gap: 6,
+  },
+  memberSearchInput: {
+    flex: 1,
+    fontSize: 13,
+    color: COLORS.text,
+    paddingVertical: 2,
   },
 });
 
