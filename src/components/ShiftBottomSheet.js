@@ -61,9 +61,11 @@ const ShiftBottomSheet = ({
         
         const dateKey = date.toISOString().split('T')[0];
         const savedHours = await SecureStore.getItemAsync(`real_hours_${dateKey}`);
-        
+
         if (savedHours) {
           setRealHours(JSON.parse(savedHours));
+        } else {
+          setRealHours({});
         }
       } catch (error) {
         console.warn('Erro ao carregar horas reais:', error);
@@ -642,25 +644,32 @@ const ShiftBottomSheet = ({
     // Calcular valor correto para split shifts
     const getDisplayValue = () => {
       if (!breakdown) return '0,00';
-      
+
+      const bonusMult = 1
+        + (breakdown.loyaltyPercentage || 0) / 100
+        + (breakdown.generalBonusPercentage || 0) / 100;
+      const extraHoursValue = hoursSummary
+        ? (hoursSummary.differenceMinutes / 60) * (breakdown.hourlyValue || 0) * bonusMult
+        : 0;
+
       // Para split shifts, recalcular valor considerando apenas horas deste mês
       if (shift.splitHours) {
         const hoursThisMonth = shift.splitHours.hoursThisMonth || 0;
         const proportionalBaseValue = (breakdown.hourlyValue || 0) * hoursThisMonth;
-        
+
         // Aplicar bônus proporcionais baseados no valor das horas do split
         let loyaltyBonus = 0;
         let generalBonus = 0;
-        
+
         if (breakdown.loyaltyPercentage) {
           loyaltyBonus = (proportionalBaseValue * breakdown.loyaltyPercentage) / 100;
         }
-        
+
         if (breakdown.generalBonusPercentage) {
           generalBonus = (proportionalBaseValue * breakdown.generalBonusPercentage) / 100;
         }
-        
-        const totalValue = proportionalBaseValue + loyaltyBonus + generalBonus;
+
+        const totalValue = proportionalBaseValue + loyaltyBonus + generalBonus + extraHoursValue;
         console.log('🔍 Split Value Calculation:', {
           hoursThisMonth,
           hourlyValue: breakdown.hourlyValue,
@@ -669,14 +678,15 @@ const ShiftBottomSheet = ({
           loyaltyBonus,
           generalBonusPercentage: breakdown.generalBonusPercentage,
           generalBonus,
+          extraHoursValue,
           totalValue
         });
-        
+
         return formatMoneyCompact(totalValue);
       }
-      
-      // Para plantões normais, usar valor original
-      return formatMoneyCompact(breakdown.finalValue);
+
+      // Para plantões normais, usar valor original + extra
+      return formatMoneyCompact(breakdown.finalValue + extraHoursValue);
     };
 
     return (
@@ -774,7 +784,7 @@ const ShiftBottomSheet = ({
                 <View style={styles.registeredHoursHeaderLeft}>
                   <Ionicons name="checkmark-circle" size={16} color={Colors.success} />
                   <Text style={styles.registeredHoursTitle}>
-                    Horas registradas - {getShiftTypeLabel(shift.label)}
+                    Horas registradas
                   </Text>
                 </View>
                 
@@ -1127,6 +1137,7 @@ const styles = StyleSheet.create({
 
   content: {
     flex: 1,
+    marginBottom: 34
   },
 
   scrollContent: {

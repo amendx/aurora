@@ -120,7 +120,7 @@ export default function MainScreenPremium() {
       case 'home':
         return {
           title: 'Início',
-          subtitle: 'Bem-vindo ao Cem Horas',
+          subtitle: 'Bem-vindo ao Aurora',
           showBackButton: false,
         };
       case 'calendar':
@@ -137,7 +137,7 @@ export default function MainScreenPremium() {
         };
       default:
         return {
-          title: 'Cem Horas',
+          title: 'Aurora',
           subtitle: '',
           showBackButton: false,
         };

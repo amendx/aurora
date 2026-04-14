@@ -1,5 +1,5 @@
 /**
- * Paleta de Cores do App Cem Horas
+ * Paleta de Cores do App Aurora
  * 
  * Cores principais baseadas na paleta profissional:
  * - Charcoal Blue: #34495e (texto principal, elementos críticos)

@@ -136,7 +136,7 @@ const SettingsScreenPremium = ({ navigation }) => {
 
         {/* App Version */}
         <View style={styles.versionContainer}>
-          <Text style={styles.versionText}>Cem Horas v1.0.0</Text>
+          <Text style={styles.versionText}>Aurora v1.0.0</Text>
           <Text style={styles.buildText}>Build 2024.03.10</Text>
         </View>
       </View>

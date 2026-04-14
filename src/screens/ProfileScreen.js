@@ -100,7 +100,7 @@ const ProfileScreen = ({ navigation }) => {
         {/* App Info */}
         <View style={styles.appInfo}>
           <Text style={styles.appInfoText}>
-            Cem Horas v1.0.0
+            Aurora v1.0.0
           </Text>
         </View>
       </View>

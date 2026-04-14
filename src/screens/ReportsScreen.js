@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useContext } from 'react';
+import React, { useState, useEffect, useRef, useContext, useCallback } from 'react';
 import {
   View,
   Text,
@@ -6,6 +6,8 @@ import {
   ScrollView,
   Pressable,
   Animated,
+  Share,
+  Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
@@ -87,15 +89,58 @@ export default function ReportsScreen() {
   const [totals, setTotals] = useState({ hours: 0, value: 0 });
   const [computing, setComputing] = useState(false);
 
+  // Refs for debouncing month navigation
+  const navigationTimeoutRef = useRef(null);
+  const isNavigatingRef = useRef(false);
+  const pendingDateRef = useRef(null);
+
   const month = viewDate.getMonth() + 1;
   const year = viewDate.getFullYear();
 
-  // Request data for viewDate whenever it changes
-  useEffect(() => {
-    loadMonthlyShifts(month, year);
-  }, [month, year]);
+  // Debounced navigation - only load data after user stops clicking
+  const navigateToMonth = useCallback((targetDate) => {
+    // Clear any existing timeout
+    if (navigationTimeoutRef.current) {
+      clearTimeout(navigationTimeoutRef.current);
+    }
+    
+    // Update the UI immediately (optimistic update)
+    setViewDate(targetDate);
+    
+    // Store the pending date for loading
+    pendingDateRef.current = targetDate;
+    isNavigatingRef.current = true;
+    
+    // Wait 500ms after the last click before loading data
+    navigationTimeoutRef.current = setTimeout(() => {
+      const month = pendingDateRef.current.getMonth() + 1;
+      const year = pendingDateRef.current.getFullYear();
+      
+      console.log(`📊 ReportsScreen: Loading data for ${month}/${year} (after navigation settled)`);
+      loadMonthlyShifts(month, year);
+      
+      isNavigatingRef.current = false;
+      pendingDateRef.current = null;
+    }, 500);
+  }, [loadMonthlyShifts]);
 
-  // Recompute rows whenever daysWithShifts or viewDate changes
+  // Load data immediately on mount, then rely on navigateToMonth for subsequent changes
+  useEffect(() => {
+    // Only load on initial mount
+    if (!isNavigatingRef.current) {
+      console.log(`📊 ReportsScreen: Initial load for ${month}/${year}`);
+      loadMonthlyShifts(month, year);
+    }
+    
+    // Cleanup function to clear timeout on unmount
+    return () => {
+      if (navigationTimeoutRef.current) {
+        clearTimeout(navigationTimeoutRef.current);
+      }
+    };
+  }, []); // Only run on mount
+
+  // Recompute rows whenever daysWithShifts changes (after new data arrives)
   useEffect(() => {
     if (!daysWithShifts || daysWithShifts.length === 0) {
       setRows([]);
@@ -103,7 +148,7 @@ export default function ReportsScreen() {
       return;
     }
     buildRows();
-  }, [daysWithShifts, month, year]);
+  }, [daysWithShifts]);
 
   const buildRows = async () => {
     setComputing(true);
@@ -153,6 +198,13 @@ export default function ReportsScreen() {
               const fullHours = getShiftHours(shift.label);
               value = fullHours > 0 ? value * (shift.splitHours.hoursThisMonth / fullHours) : value;
             }
+            // Add extra hours value using the same hourly rate and bonuses
+            if (extraHours !== 0) {
+              const bonusMult = 1
+                + (bd.loyaltyPercentage || 0) / 100
+                + (bd.generalBonusPercentage || 0) / 100;
+              value += extraHours * (bd.hourlyValue || 0) * bonusMult;
+            }
           } catch (_) {}
 
           totalHours += effectiveHours;
@@ -192,19 +244,44 @@ export default function ReportsScreen() {
     } catch (_) { return null; }
   };
 
-  const goToPrev = () => {
+  const goToPrev = useCallback(() => {
     const d = new Date(viewDate);
     d.setMonth(d.getMonth() - 1);
-    setViewDate(d);
-  };
+    navigateToMonth(d);
+  }, [viewDate, navigateToMonth]);
 
-  const goToNext = () => {
+  const goToNext = useCallback(() => {
     const d = new Date(viewDate);
     d.setMonth(d.getMonth() + 1);
-    setViewDate(d);
-  };
+    navigateToMonth(d);
+  }, [viewDate, navigateToMonth]);
 
   const isLoading = loading || computing;
+
+  const exportCSV = async () => {
+    if (rows.length === 0) {
+      Alert.alert('Sem dados', 'Não há plantões para exportar neste mês.');
+      return;
+    }
+    const header = 'Data,Grupo,Turno,Horas Base,Horas Extras,Horas Totais,Valor Estimado,Virada';
+    const lines = rows.map(row => {
+      const date = row.dateStr;
+      const group = `"${(row.shift.group?.name || '').replace(/"/g, '""')}"`;
+      const turn = LABEL_MAP[row.label] || row.label;
+      const base = row.plannedHours.toFixed(2);
+      const extra = row.extraHours.toFixed(2);
+      const total = row.effectiveHours.toFixed(2);
+      const value = row.value.toFixed(2);
+      const split = row.isSplit ? 'Sim' : 'Não';
+      return [date, group, turn, base, extra, total, value, split].join(',');
+    });
+    const csv = [header, ...lines].join('\n');
+    const monthName = MONTH_NAMES[viewDate.getMonth()];
+    const yearNum = viewDate.getFullYear();
+    try {
+      await Share.share({ message: csv, title: `Plantões ${monthName} ${yearNum}.csv` });
+    } catch (_) {}
+  };
 
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
@@ -220,6 +297,14 @@ export default function ReportsScreen() {
           <Ionicons name="chevron-forward" size={20} color={Colors.interactive.active} />
         </Pressable>
       </View>
+
+      {/* Export CSV */}
+      {!isLoading && rows.length > 0 && (
+        <Pressable style={styles.exportButton} onPress={exportCSV}>
+          <Ionicons name="download-outline" size={16} color={Colors.interactive.active} />
+          <Text style={styles.exportButtonText}>Exportar CSV</Text>
+        </Pressable>
+      )}
 
       {/* Totals summary */}
       <View style={styles.summaryCard}>
@@ -368,6 +453,20 @@ const styles = StyleSheet.create({
     fontWeight: Typography.fontWeight.semiBold,
     color: Colors.text.primary,
     textTransform: 'capitalize',
+  },
+
+  exportButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-end',
+    marginTop: Spacing.md,
+    marginRight: Spacing.lg,
+    gap: Spacing.xs,
+  },
+  exportButtonText: {
+    fontSize: Typography.fontSize.footnote,
+    fontWeight: Typography.fontWeight.medium,
+    color: Colors.interactive.active,
   },
 
   summaryCard: {

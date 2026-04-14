@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useContext, useRef } from 'react';
+import React, { useState, useEffect, useContext, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -66,6 +66,11 @@ const CalendarScreenPremium = ({ navigation }) => {
   const [markedDates, setMarkedDates] = useState({});
   const [themeKey, setThemeKey] = useState(0);
   
+  // Refs for debouncing month navigation
+  const navigationTimeoutRef = useRef(null);
+  const isNavigatingRef = useRef(false);
+  const pendingDateRef = useRef(null);
+  
   // Estado para filtros de tipo de plantão
   const [shiftFilters, setShiftFilters] = useState({
     M: true,  // Manhã
@@ -80,13 +85,51 @@ const CalendarScreenPremium = ({ navigation }) => {
   const [shiftValues, setShiftValues] = useState(null);
   const [extraHours, setExtraHours] = useState(0);
 
-  // Carregar dados quando a data mudar — context deduplica por loadedFor
+  // Debounced navigation - only load data after user stops clicking
+  const navigateToMonth = useCallback((targetDate) => {
+    // Clear any existing timeout
+    if (navigationTimeoutRef.current) {
+      clearTimeout(navigationTimeoutRef.current);
+    }
+    
+    // Update the UI immediately (optimistic update)
+    setCurrentDate(targetDate);
+    
+    // Store the pending date for loading
+    pendingDateRef.current = targetDate;
+    isNavigatingRef.current = true;
+    
+    // Wait 500ms after the last click before loading data
+    navigationTimeoutRef.current = setTimeout(() => {
+      const month = pendingDateRef.current.getMonth() + 1;
+      const year = pendingDateRef.current.getFullYear();
+      
+      Logger.debug(`📅 CalendarScreen: Loading data for ${month}/${year} (after navigation settled)`);
+      loadMonthlyShifts(month, year);
+      
+      isNavigatingRef.current = false;
+      pendingDateRef.current = null;
+    }, 500);
+  }, [loadMonthlyShifts]);
+
+  // Load data immediately on mount, then rely on navigateToMonth for subsequent changes
   useEffect(() => {
     const month = currentDate.getMonth() + 1;
     const year = currentDate.getFullYear();
-    Logger.debug(`📅 CalendarScreen: solicitando dados para ${month}/${year}`);
-    loadMonthlyShifts(month, year);
-  }, [currentDate.getMonth(), currentDate.getFullYear()]);
+    
+    // Only load on initial mount
+    if (!isNavigatingRef.current) {
+      Logger.debug(`📅 CalendarScreen: Initial load for ${month}/${year}`);
+      loadMonthlyShifts(month, year);
+    }
+    
+    // Cleanup function to clear timeout on unmount
+    return () => {
+      if (navigationTimeoutRef.current) {
+        clearTimeout(navigationTimeoutRef.current);
+      }
+    };
+  }, []); // Only run on mount
 
   // Carregar configurações de valores
   useEffect(() => {
@@ -367,17 +410,17 @@ const CalendarScreenPremium = ({ navigation }) => {
     }
   };
 
-  const goToPreviousMonth = () => {
+  const goToPreviousMonth = useCallback(() => {
     const newDate = new Date(currentDate);
     newDate.setMonth(newDate.getMonth() - 1);
-    setCurrentDate(newDate);
-  };
+    navigateToMonth(newDate);
+  }, [currentDate, navigateToMonth]);
 
-  const goToNextMonth = () => {
+  const goToNextMonth = useCallback(() => {
     const newDate = new Date(currentDate);
     newDate.setMonth(newDate.getMonth() + 1);
-    setCurrentDate(newDate);
-  };
+    navigateToMonth(newDate);
+  }, [currentDate, navigateToMonth]);
 
   // Gerar estatísticas do mês baseado nos filtros ativos
   const generateStatistics = () => {
@@ -386,7 +429,7 @@ const CalendarScreenPremium = ({ navigation }) => {
         totalDays: 0,
         totalShifts: 0,
         byType: { M: 0, T: 0, N: 0, D: 0 }, // Incluir tipo D para carryovers
-        filteredHours: 0,
+        totalHours: 0,
         extraHours: 0,
         extraHoursFormatted: '0h'
       };
@@ -416,7 +459,7 @@ const CalendarScreenPremium = ({ navigation }) => {
       totalDays: 0,
       totalShifts: 0,
       byType: { M: 0, T: 0, N: 0, D: 0 }, // Incluir tipo D para carryovers
-      filteredHours: 0,
+      totalHours: hoursReport?.realHours || 0, // Usar horas totais (previstas + extras) do contexto
       extraHours: Math.round(extraHours * 100) / 100, // Arredondar para 2 casas decimais
       extraHoursFormatted: formatExtraHours(extraHours)
     };
@@ -446,30 +489,17 @@ const CalendarScreenPremium = ({ navigation }) => {
             if (stats.byType.hasOwnProperty(type)) {
               stats.byType[type]++;
             }
-              
-            // Calcular horas para TODOS os shifts (mesmo aqueles com tipos não mapeados)
-            let hoursPerShift;
-            if (shift.splitHours && shift.splitHours.hoursThisMonth !== undefined) {
-              hoursPerShift = shift.splitHours.hoursThisMonth;
-              console.log(`🔍 Calendar - Split shift found: ${shift.label || 'NO_LABEL'} = ${hoursPerShift}h (from splitHours.hoursThisMonth)`);
-            } else {
-              // Para shifts normais sem split
-              hoursPerShift = type === 'N' ? 12 : 6;
-              console.log(`🔍 Calendar - Regular shift found: ${shift.label || 'NO_LABEL'} = ${hoursPerShift}h (standard for type ${type})`);
-            }
-            
-            stats.filteredHours += hoursPerShift;
           });
         }
       }
     });
 
-    console.log(`🔍 Calendar - Total de horas calculado: ${stats.filteredHours}h`);
+    console.log(`🔍 Calendar - Total de horas do contexto: ${stats.totalHours}h`);
     console.log('🔍 Calendar - Breakdown:', {
       totalShifts: stats.totalShifts,
       daysWithShifts: daysWithVisibleShifts,
       byType: stats.byType,
-      filteredHours: stats.filteredHours
+      totalHours: stats.totalHours
     });
     stats.totalDays = daysWithVisibleShifts;
     return stats;
@@ -545,8 +575,8 @@ const CalendarScreenPremium = ({ navigation }) => {
                 </View>
 
                 <View style={styles.statCard}>
-                  <Text style={styles.statNumber}>{stats.filteredHours}h</Text>
-                  <Text style={styles.statLabel}>Horas</Text>
+                  <Text style={styles.statNumber}>{stats.totalHours}h</Text>
+                  <Text style={styles.statLabel}>Horas totais</Text>
                 </View>
               </>
             )}
@@ -843,13 +873,13 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   statNumber: {
-    fontSize: Typography.fontSize.largeTitle,
+    fontSize: Typography.fontSize.title3, // Era largeTitle (34), agora title3 (20)
     fontWeight: Typography.fontWeight.bold,
     color: Colors.primary,
     marginBottom: 4,
   },
   statLabel: {
-    fontSize: Typography.fontSize.footnote,
+    fontSize: Typography.fontSize.caption2, // Era footnote (13), agora caption2 (11)
     fontWeight: Typography.fontWeight.medium,
     color: Colors.text.secondary,
     textTransform: 'uppercase',

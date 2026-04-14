@@ -98,6 +98,7 @@ export const Typography = {
     footnote: 13,      // iOS Footnote
     caption1: 12,      // iOS Caption 1
     caption2: 11,      // iOS Caption 2
+    caption3: 10,      // Custom smaller caption
   },
   
   // Line Heights

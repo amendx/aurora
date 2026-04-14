@@ -60,9 +60,12 @@ export default function LoginScreen() {
           {/* Logo Section */}
           <View style={styles.logoSection}>
             <View style={styles.logoContainer}>
-              <Ionicons name="time-outline" size={32} color={Colors.primary} />
+              <Image
+                source={require('../../assets/icon.png')}
+                style={{ width: 80, height: 80, resizeMode: 'contain' }}
+                accessibilityLabel="Logo Aurora"
+              />
             </View>
-            <Text style={styles.appName}>Cem Horas</Text>
           </View>
 
           {/* Welcome Section */}
@@ -162,9 +165,9 @@ export default function LoginScreen() {
 
           {/* Secondary Actions */}
           <View style={styles.secondaryActions}>
-            <Pressable style={styles.secondaryButton}>
+            {/* <Pressable style={styles.secondaryButton}>
               <Text style={styles.secondaryButtonText}>Esqueci minha senha</Text>
-            </Pressable>
+            </Pressable> */}
             
             <View style={styles.orDivider}>
               <View style={styles.dividerLine} />
@@ -217,12 +220,12 @@ const styles = StyleSheet.create({
   // Logo Section
   logoSection: {
     alignItems: 'center',
-    marginBottom: Spacing.xxxl,
+    marginBottom: Spacing.md,
   },
   logoContainer: {
     width: 64,
     height: 64,
-    backgroundColor: Colors.background.secondary,
+    // backgroundColor: Colors.background.secondary,
     borderRadius: BorderRadius.lg,
     alignItems: 'center',
     justifyContent: 'center',
@@ -338,7 +341,7 @@ const styles = StyleSheet.create({
   // Secondary Actions
   secondaryActions: {
     alignItems: 'center',
-    marginTop: Spacing.xl,
+    marginTop: Spacing.xs,
   },
   secondaryButton: {
     paddingVertical: Spacing.md,

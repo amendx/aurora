@@ -378,7 +378,7 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   statLabel: {
-    fontSize: Typography.fontSize.caption1,
+    fontSize: Typography.fontSize.caption3,
     fontWeight: Typography.fontWeight.medium,
     color: Colors.text.secondary,
     textTransform: 'uppercase',

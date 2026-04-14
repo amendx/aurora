@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useContext } from 'react';
+import React, { useState, useEffect, useContext, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -91,6 +91,11 @@ const CalendarScreen = () => {
   const [markedDates, setMarkedDates] = useState({});
   const [themeKey, setThemeKey] = useState(0);
   
+  // Refs for debouncing month navigation
+  const navigationTimeoutRef = useRef(null);
+  const isNavigatingRef = useRef(false);
+  const pendingDateRef = useRef(null);
+  
   // Estado para filtros de tipo de plantão
   const [shiftFilters, setShiftFilters] = useState({
     M: true,  // Manhã
@@ -98,18 +103,55 @@ const CalendarScreen = () => {
     N: true   // Noite
   });
 
-  // Carregar dados quando a data mudar
+  // Debounced navigation - only load data after user stops clicking
+  const navigateToMonth = useCallback((targetDate) => {
+    // Clear any existing timeout
+    if (navigationTimeoutRef.current) {
+      clearTimeout(navigationTimeoutRef.current);
+    }
+    
+    // Update the UI immediately (optimistic update)
+    setCurrentDate(targetDate);
+    
+    // Store the pending date for loading
+    pendingDateRef.current = targetDate;
+    isNavigatingRef.current = true;
+    
+    // Wait 500ms after the last click before loading data
+    navigationTimeoutRef.current = setTimeout(() => {
+      const month = pendingDateRef.current.getMonth() + 1;
+      const year = pendingDateRef.current.getFullYear();
+      
+      if (!hasDataFor(month, year)) {
+        console.log(`📅 CalendarScreen: Loading data for ${month}/${year} (after navigation settled)`);
+        loadMonthlyShifts(month, year);
+      } else {
+        console.log(`📅 CalendarScreen: Using cached data for ${month}/${year}`);
+      }
+      
+      isNavigatingRef.current = false;
+      pendingDateRef.current = null;
+    }, 500);
+  }, [hasDataFor, loadMonthlyShifts]);
+
+  // Load data immediately on mount, then rely on navigateToMonth for subsequent changes
   useEffect(() => {
     const month = currentDate.getMonth() + 1;
     const year = currentDate.getFullYear();
     
-    if (!hasDataFor(month, year)) {
-      console.log(`📅 CalendarScreen: Carregando dados para ${month}/${year}`);
+    // Only load on initial mount if we don't have data
+    if (!hasDataFor(month, year) && !isNavigatingRef.current) {
+      console.log(`📅 CalendarScreen: Initial load for ${month}/${year}`);
       loadMonthlyShifts(month, year);
-    } else {
-      console.log(`📅 CalendarScreen: Usando dados em cache para ${month}/${year}`);
     }
-  }, [currentDate]);
+    
+    // Cleanup function to clear timeout on unmount
+    return () => {
+      if (navigationTimeoutRef.current) {
+        clearTimeout(navigationTimeoutRef.current);
+      }
+    };
+  }, []); // Only run on mount
 
   // Atualizar marcações quando os dados mudarem
   useEffect(() => {
@@ -219,17 +261,17 @@ const CalendarScreen = () => {
     );
   };
 
-  const goToPreviousMonth = () => {
+  const goToPreviousMonth = useCallback(() => {
     const newDate = new Date(currentDate);
     newDate.setMonth(newDate.getMonth() - 1);
-    setCurrentDate(newDate);
-  };
+    navigateToMonth(newDate);
+  }, [currentDate, navigateToMonth]);
 
-  const goToNextMonth = () => {
+  const goToNextMonth = useCallback(() => {
     const newDate = new Date(currentDate);
     newDate.setMonth(newDate.getMonth() + 1);
-    setCurrentDate(newDate);
-  };
+    navigateToMonth(newDate);
+  }, [currentDate, navigateToMonth]);
 
   // Gerar estatísticas do mês baseado nos filtros ativos
   const generateStatistics = () => {
@@ -238,7 +280,7 @@ const CalendarScreen = () => {
         totalDays: 0,
         totalShifts: 0,
         byType: { M: 0, T: 0, N: 0 },
-        filteredHours: 0
+        totalHours: 0
       };
     }
 
@@ -246,7 +288,7 @@ const CalendarScreen = () => {
       totalDays: 0,
       totalShifts: 0,
       byType: { M: 0, T: 0, N: 0 },
-      filteredHours: 0
+      totalHours: hoursReport?.realHours || 0 // Usar horas totais (previstas + extras) do contexto
     };
 
     daysWithShifts.forEach(day => {
@@ -267,9 +309,6 @@ const CalendarScreen = () => {
             const type = shift.label.charAt(0);
             if (stats.byType[type] !== undefined) {
               stats.byType[type]++;
-              // Calcular horas baseado no tipo (assumindo M=6h, T=6h, N=12h)
-              const hoursPerShift = type === 'N' ? 12 : 6;
-              stats.filteredHours += hoursPerShift;
             }
           });
         }
@@ -361,8 +400,8 @@ const CalendarScreen = () => {
                   <Text style={[styles.statLabel, isDarkMode && styles.textSecondaryDark]}>Total de plantões</Text>
                 </View>
                 <View style={styles.statItem}>
-                  <Text style={[styles.statNumber, isDarkMode && styles.textDark]}>{stats.filteredHours}h</Text>
-                  <Text style={[styles.statLabel, isDarkMode && styles.textSecondaryDark]}>Horas filtradas</Text>
+                  <Text style={[styles.statNumber, isDarkMode && styles.textDark]}>{stats.totalHours}h</Text>
+                  <Text style={[styles.statLabel, isDarkMode && styles.textSecondaryDark]}>Horas totais</Text>
                 </View>
               </View>
             )}
@@ -590,12 +629,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   statNumber: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: 'bold',
     color: COLORS.SHIFTS_1,
   },
   statLabel: {
-    fontSize: 11,
+    fontSize: 10,
     color: COLORS.TEXT_SECONDARY,
     textAlign: 'center',
   },

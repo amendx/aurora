@@ -1,4 +1,4 @@
-# Cem Horas - React Native Expo App
+# Aurora - React Native Expo App
 
 ## Project Overview
 React Native Expo mobile application for iOS and Android integration with Soffia API.

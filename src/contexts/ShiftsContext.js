@@ -25,6 +25,7 @@ export const ShiftsProvider = ({ children }) => {
   // Helper: parse "19h00 - 07h00 (N)" and return split info for month-boundary night shifts
   const computeSplitHours = (timeStr) => {
     if (!timeStr) return null;
+    
     let parts = timeStr.split(' – ');
     if (parts.length !== 2) parts = timeStr.split(' - ');
     if (parts.length !== 2) return null;
@@ -36,6 +37,7 @@ export const ShiftsProvider = ({ children }) => {
 
     const startMin = sh * 60 + sm;
     const endMin = eh * 60 + em;
+    
     if (endMin >= startMin) return null; // doesn't cross midnight
 
     const minutesThisMonth = 24 * 60 - startMin;
@@ -207,10 +209,16 @@ export const ShiftsProvider = ({ children }) => {
       // ── Day-1 carryover: inject derived shift from previous month's last night ──
       // Check the API monthly response for "previous" month's last day
       const prevDays = monthlyData.data?.previous?.days;
+      
       if (prevDays && Array.isArray(prevDays)) {
-        const prevLastDay = [...prevDays].sort((a, b) =>
-          parseInt(b.date.split('-')[2]) - parseInt(a.date.split('-')[2])
-        )[0];
+        // Get the actual last day of the previous month (not just the last day with shifts)
+        const prevMonth = month === 1 ? 12 : month - 1;
+        const prevYear = month === 1 ? year - 1 : year;
+        const lastDayOfPrevMonth = new Date(prevYear, prevMonth, 0).getDate(); // Day 0 = last day of previous month
+        const expectedLastDay = `${prevYear}-${String(prevMonth).padStart(2, '0')}-${String(lastDayOfPrevMonth).padStart(2, '0')}`;
+        
+        // Only look for carryover if the actual last day of the month has shifts
+        const prevLastDay = prevDays.find(d => d.date === expectedLastDay);
 
         if (prevLastDay) {
           // Try to get the actual shift detail for that day from the API
@@ -225,18 +233,28 @@ export const ShiftsProvider = ({ children }) => {
                 .map(s => ({ ...s, date: prevLastDay.date }));
             }
           } else {
+            Logger.info(`🔍 CARRYOVER: Fetching daily shifts for ${prevLastDay.date}`);
             const dateObj = new Date(prevLastDay.date + 'T12:00:00.000Z');
             const resp = await SoffiaApiService.getDailyShifts(token, dateObj);
+            Logger.info(`🔍 CARRYOVER: Daily API response: ${resp.success ? 'success' : 'failed'}, ${resp.data?.length || 0} shifts`);
+            
             if (resp.success && resp.data) {
+              const allShifts = resp.data;
+              Logger.info(`🔍 CARRYOVER: All shifts on ${prevLastDay.date}: ${allShifts.map(s => `[${s.label}] ${s.time}`).join(', ')}`);
+              
               prevNightShifts = resp.data
                 .filter(s => (s.label || '').charAt(0) === 'N')
                 .map(s => ({ ...s, date: prevLastDay.date }));
             }
           }
-
+          
           for (const prevShift of prevNightShifts) {
+            
             const split = computeSplitHours(prevShift.time || prevShift.schedule || '');
-            if (!split) continue;
+            
+            if (!split) {
+              continue;
+            }
 
             // Build the carryover end time string, e.g. "00h00 - 07h00"
             const normalize = (t) => t.replace('h', ':').replace(/\s*\([^)]*\)/, '').trim();
@@ -285,7 +303,11 @@ export const ShiftsProvider = ({ children }) => {
 
             Logger.info(`🌙 Carryover shift injected on ${year}-${String(month).padStart(2,'0')}-01: ${split.hoursNextMonth}h (${carryoverTime})`);
           }
+        } else {
+          Logger.info(`🔍 CARRYOVER: No prevLastDay found in previous month data`);
         }
+      } else {
+        Logger.info(`🔍 CARRYOVER: No previous month data available`);
       }
       // ────────────────────────────────────────────────────────────────────────
 
@@ -329,10 +351,43 @@ export const ShiftsProvider = ({ children }) => {
       
       const standardHours = realBreakdown.M.hours + realBreakdown.T.hours + realBreakdown.N.hours;
       
-      // TODO: Calcular horas extras registradas pelo usuário
-      // Por enquanto, realHours = standardHours (sem extras)
-      // Quando implementarmos o cálculo de extras, será: standardHours + totalExtras
-      const realHours = standardHours; // Será atualizado em futuras versões
+      // Calcular horas extras registradas pelo usuário
+      let totalExtras = 0;
+      try {
+        for (const dayData of daysWithShifts) {
+          for (const shift of dayData.shifts) {
+            const dateStr = dayData.date;
+            const shiftId = shift.id;
+            
+            // Tentar carregar horas reais salvas para este plantão específico
+            const realHoursKey = `real_hours_${dateStr}_${shiftId}`;
+            const savedRealHours = await StorageService.getItem(realHoursKey);
+            
+            if (savedRealHours) {
+              try {
+                const realHoursData = JSON.parse(savedRealHours);
+                if (realHoursData && realHoursData.realHours) {
+                  // Calcular horas previstas para este plantão
+                  const shiftLabel = shift.label?.charAt(0);
+                  const plannedHours = shiftLabel === 'N' ? 12 : 6;
+                  
+                  // Calcular diferença (horas extras)
+                  const extraHours = realHoursData.realHours - plannedHours;
+                  if (extraHours > 0) {
+                    totalExtras += extraHours;
+                  }
+                }
+              } catch (parseError) {
+                Logger.warn(`Erro ao parsear horas reais para ${realHoursKey}:`, parseError);
+              }
+            }
+          }
+        }
+      } catch (error) {
+        Logger.warn('Erro ao calcular horas extras:', error);
+      }
+      
+      const realHours = standardHours + totalExtras;
 
       const hoursReport = {
         totalShifts,

@@ -3,8 +3,8 @@ import * as SecureStore from 'expo-secure-store';
 
 // Configurações padrão (caso não haja configuração salva)
 const DEFAULT_VALUES = {
-  weekday: { day: 130, night: 140 },
-  weekend: { day: 150, night: 160 },
+  weekday: { day: 130, night: 143 },
+  weekend: { day: 170, night: 185 },
 };
 
 const CONFIG_KEY = 'shift_configurations';
@@ -90,17 +90,17 @@ export const shouldUseWeekendValue = (dateString, shiftLabel, fridayNightAsWeeke
 // Função para determinar o período do plantão baseado no label
 export const getShiftPeriod = (shiftLabel) => {
   if (!shiftLabel) return 'day'; // padrão
-  
+
   const type = shiftLabel.charAt(0).toUpperCase();
-  return type === 'N' ? 'night' : 'day'; // N = noite, M/T = dia
+  return (type === 'N' || type === 'D') ? 'night' : 'day'; // N/D = noite, M/T = dia
 };
 
 // Função para calcular horas do plantão baseado no tipo
 export const getShiftHours = (shiftLabel) => {
   if (!shiftLabel) return 6; // padrão
-  
+
   const type = shiftLabel.charAt(0).toUpperCase();
-  return type === 'N' ? 12 : 6; // Noite = 12h, Manhã/Tarde = 6h
+  return (type === 'N' || type === 'D') ? 12 : 6; // N/D = 12h, Manhã/Tarde = 6h
 };
 
 // Função para verificar se bônus é aplicável baseado no mês

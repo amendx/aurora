@@ -44,7 +44,7 @@ export default function TabNavigator({ navigation }) {
         };
       default:
         return {
-          title: 'Cem Horas',
+          title: 'Aurora',
           showBackButton: false,
         };
     }

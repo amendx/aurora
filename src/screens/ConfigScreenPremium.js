@@ -15,8 +15,8 @@ import { Colors, Typography, Spacing, Shadows, BorderRadius } from '../constants
 
 export default function ConfigScreenPremium({ navigation }) {
   const [hourValues, setHourValues] = useState({
-    weekday: { day: 130, night: 140 },
-    weekend: { day: 150, night: 160 },
+    weekday: { day: 130, night: 143 },
+    weekend: { day: 170, night: 185 },
   });
 
   // Carregar configurações salvas quando o componente for montado
@@ -147,8 +147,8 @@ export default function ConfigScreenPremium({ navigation }) {
           style: 'destructive',
           onPress: () => {
             setHourValues({
-              weekday: { day: 130, night: 140 },
-              weekend: { day: 150, night: 160 },
+              weekday: { day: 130, night: 143 },
+              weekend: { day: 170, night: 185 },
             });
             setLoyaltyEnabled(false);
             setLoyaltyOptions([

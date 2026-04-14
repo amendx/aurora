@@ -1,10 +1,10 @@
-# Cem Horas
+# Aurora
 
 Um aplicativo mobile React Native desenvolvido para integração com a API Soffia. Este projeto é uma Prova de Conceito (POC) focada em funcionalidades de login e logout.
 
 ## 📱 Sobre o Aplicativo
 
-O "Cem Horas" (também conhecido como "Senhoras" pela sonoridade) é um app híbrido que funciona em iOS e Android, desenvolvido para integrar com o sistema Soffia através de sua API.
+O "Aurora" é um app híbrido que funciona em iOS e Android, desenvolvido para integrar com o sistema Soffia através de sua API.
 
 ### Funcionalidades Implementadas
 

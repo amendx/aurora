@@ -39,7 +39,7 @@ export const formatMoneyCompact = (value) => {
 };
 
 /**
- * Formata valor por hora (ex: "R$ 140/h")
+ * Formata valor por hora (ex: "R$ 143/h")
  * @param {number} value - Valor numérico
  * @returns {string} - Valor formatado por hora
  */

@@ -86,7 +86,7 @@ export default function LoginScreen() {
       >
         <View style={styles.content}>
           <View style={styles.header}>
-            <Text style={styles.title}>Cem Horas</Text>
+            <Text style={styles.title}>Aurora</Text>
             <Text style={styles.subtitle}>Acesse sua conta Soffia</Text>
           </View>
 
