@@ -32,7 +32,7 @@ class Logger {
   }
 
   static loginSuccess(email, userData) {
-    this.info(`✅ Login realizado com sucesso - Usuário: ${email}`, userData);
+    this.info(`✅ Login realizado com sucesso - Usuário: ${email}`);
   }
 
   static loginError(email, error, url) {

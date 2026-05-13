@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useState, useContext } from 'react';
 import {
   View,
   Text,
@@ -10,40 +10,143 @@ import {
   ScrollView,
   TouchableOpacity,
   Alert,
+  Image,
+  Modal,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
-import { Colors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
-import { calculateShiftValueWithBreakdown, calculateShiftValue } from '../utils/ShiftValueCalculator';
+import { useColors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
+import { calculateShiftValueWithBreakdown, calculateShiftValue, getFullShiftConfig, computeShiftValue } from '../utils/ShiftValueCalculator';
 import { formatMoney, formatMoneyCompact, formatHourlyRate } from '../utils/MoneyFormatter';
 import HoursEditModal from './HoursEditModal';
+import TimeUtils from '../utils/TimeUtils';
+import { useGroups } from '../contexts/GroupsContext';
+import { AuthContext } from '../context/AuthContext';
+import { getGroupVisibility } from '../utils/GroupVisibilityConfig';
+import { getGroupColors } from '../utils/GroupColorConfig';
+import TodayCoworkersService from '../services/TodayCoworkersService';
+
+// ── CoworkerAvatar ─────────────────────────────────────────────────────────────
+// Small circular avatar with photo or initials fallback.
+// Defined outside ShiftBottomSheet so it gets its own stable render identity.
+
+const _initials = (name) =>
+  (name || '?')
+    .split(' ')
+    .filter(Boolean)
+    .slice(0, 2)
+    .map(w => w.charAt(0))
+    .join('')
+    .toUpperCase();
+
+const CoworkerAvatar = ({ person }) => {
+  const C = useColors();
+  const [imgFailed, setImgFailed] = useState(false);
+  const initials = _initials(person.name);
+  const firstName = (person.name || '').split(' ')[0];
+
+  return (
+    <View style={makeAvatarStyles(C).item}>
+      {person.photo && !imgFailed ? (
+        <Image
+          source={{ uri: person.photo }}
+          style={makeAvatarStyles(C).photo}
+          onError={() => setImgFailed(true)}
+        />
+      ) : (
+        <View style={makeAvatarStyles(C).fallback}>
+          <Text style={makeAvatarStyles(C).initials}>{initials}</Text>
+        </View>
+      )}
+      <Text style={makeAvatarStyles(C).name} numberOfLines={1}>{firstName}</Text>
+    </View>
+  );
+};
+
+const makeAvatarStyles = (C) => ({
+  item: {
+    alignItems: 'center',
+    width: 52,
+    marginRight: Spacing.sm,
+  },
+  photo: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: C.border.light,
+  },
+  fallback: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: C.primary + '20',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  initials: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: C.primary,
+  },
+  name: {
+    fontSize: 10,
+    color: C.text.secondary,
+    marginTop: 3,
+    maxWidth: 50,
+    textAlign: 'center',
+  },
+});
+
+/** Placeholder avatar for an open vacancy slot */
+const VacancySlot = () => {
+  const C = useColors();
+  const av = makeAvatarStyles(C);
+  return (
+    <View style={av.item}>
+      <View style={[av.fallback, { backgroundColor: C.warning + '18', borderWidth: 1.5, borderColor: C.warning + '60', borderStyle: 'dashed' }]}>
+        <Ionicons name="star-outline" size={16} color={C.warning} />
+      </View>
+      <Text style={[av.name, { color: C.warning }]} numberOfLines={1}>Vago</Text>
+    </View>
+  );
+};
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 const BOTTOM_SHEET_MAX_HEIGHT = SCREEN_HEIGHT * 0.75;
 const BOTTOM_SHEET_MIN_HEIGHT = 0;
 
-const ShiftBottomSheet = ({ 
-  isVisible, 
-  onClose, 
-  shifts, 
+const ShiftBottomSheet = ({
+  isVisible,
+  onClose,
+  shifts,
   selectedDate,
   calculateShiftValue,
-  onHoursChanged, // Novo callback para notificar mudanças nas horas
-  onNavigateToGroup, // Callback para navegar ao grupo ao clicar no nome
+  onHoursChanged,
+  onNavigateToGroup,
 }) => {
+  const C = useColors();
+  const s = makeStyles(C);
+
   const translateY = useRef(new Animated.Value(BOTTOM_SHEET_MAX_HEIGHT)).current;
   const backdropOpacity = useRef(new Animated.Value(0)).current;
   const [shiftBreakdowns, setShiftBreakdowns] = useState({});
-  const [realHours, setRealHours] = useState({}); // Armazenar horas reais por plantão
-  const [editingShift, setEditingShift] = useState(null); // Shift sendo editado no modal
+  const [realHours, setRealHours] = useState({});
+  const [editingShift, setEditingShift] = useState(null);
+  const [fractionalExtra, setFractionalExtra] = useState(true);
+
+  // ── "Quem está também" state ────────────────────────────────────────────────
+  const { user } = useContext(AuthContext);
+  const { coworkersById, groupsById } = useGroups();
+  const [enabledGroupIds, setEnabledGroupIds] = useState(null);
+  const [groupColors, setGroupColors] = useState({});
+  const [coworkersModal, setCoworkersModal] = useState(null);
 
   // Carregar horas reais salvas
   useEffect(() => {
     const loadRealHours = async () => {
       if (!shifts || !selectedDate) return;
-      
+
       try {
-        // Garantir que selectedDate é válido
         let date;
         if (selectedDate instanceof Date) {
           date = selectedDate;
@@ -53,12 +156,12 @@ const ShiftBottomSheet = ({
           console.warn('selectedDate inválido ou vazio:', selectedDate);
           return;
         }
-        
+
         if (isNaN(date.getTime())) {
           console.warn('selectedDate inválido após conversão:', selectedDate);
           return;
         }
-        
+
         const dateKey = date.toISOString().split('T')[0];
         const savedHours = await SecureStore.getItemAsync(`real_hours_${dateKey}`);
 
@@ -71,27 +174,16 @@ const ShiftBottomSheet = ({
         console.warn('Erro ao carregar horas reais:', error);
       }
     };
-    
+
     if (isVisible) {
       loadRealHours();
     }
   }, [shifts, selectedDate, isVisible]);
 
-  // LIMPEZA AUTOMÁTICA REMOVIDA COMPLETAMENTE
-  // Não limpar dados automaticamente para permitir testes
-  /*
-  useEffect(() => {
-    const initializeClearData = async () => {
-      // Removido para permitir teste das horas extras
-    };
-    initializeClearData();
-  }, []);
-  */
 
   // Salvar horas reais
   const saveRealHours = async (newRealHours) => {
     try {
-      // Garantir que selectedDate é válido
       let date;
       if (selectedDate instanceof Date) {
         date = selectedDate;
@@ -101,17 +193,16 @@ const ShiftBottomSheet = ({
         console.error('selectedDate inválido ou vazio para salvar:', selectedDate);
         return;
       }
-      
+
       if (isNaN(date.getTime())) {
         console.error('selectedDate inválido após conversão para salvar:', selectedDate);
         return;
       }
-      
+
       const dateKey = date.toISOString().split('T')[0];
       await SecureStore.setItemAsync(`real_hours_${dateKey}`, JSON.stringify(newRealHours));
       setRealHours(newRealHours);
-      
-      // Notificar o componente pai sobre a mudança nas horas
+
       if (onHoursChanged) {
         onHoursChanged(dateKey, newRealHours);
       }
@@ -126,9 +217,8 @@ const ShiftBottomSheet = ({
       console.error('❌ Tentativa de abrir editor com índice inválido:', { shiftIndex, shiftsLength: shifts?.length });
       return;
     }
-    
+
     setEditingShift(shiftIndex);
-    console.log('📝 Abrindo editor para shift index:', shiftIndex);
   };
 
   // Salvar horas do modal
@@ -145,30 +235,19 @@ const ShiftBottomSheet = ({
 
     const shift = shifts[shiftIndex];
     const newRealHours = { ...realHours };
-    
-    // Nova estrutura com identificação específica do plantão
+
     newRealHours[shiftIndex] = {
       ...hours,
-      shiftId: shift.id || `${shift.label}_${shiftIndex}`, // ID único do plantão
-      shiftType: shift.label || 'M', // M, T, N
-      shiftTime: shift.time || 'Horário não informado', // Horário previsto (ex: "07:00 - 13:00 (M)")
+      shiftId: shift.id || `${shift.label}_${shiftIndex}`,
+      shiftType: shift.label || 'M',
+      shiftTime: shift.time || 'Horário não informado',
       groupName: shift.group?.name || 'Sem grupo',
       institutionName: shift.group?.institution?.name || 'Sem instituição',
-      registeredAt: new Date().toISOString(), // Timestamp do registro
+      registeredAt: new Date().toISOString(),
     };
-    
+
     saveRealHours(newRealHours);
     setEditingShift(null);
-    
-    // Log detalhado do que foi salvo
-    console.log('💾 Horas registradas para plantão:', {
-      shiftIndex,
-      shiftType: shift.label,
-      group: shift.group?.name,
-      institution: shift.group?.institution?.name,
-      hours: hours,
-      savedData: newRealHours[shiftIndex]
-    });
   };
 
   // Confirmar limpeza de horas
@@ -200,76 +279,33 @@ const ShiftBottomSheet = ({
     const newRealHours = { ...realHours };
     delete newRealHours[shiftIndex];
     saveRealHours(newRealHours);
-    
-    console.log('🧹 Horas limpas para shift index:', shiftIndex);
-  };
-
-  // Função para limpar TODOS os dados de horas extras salvos (para debug/reset)
-  const clearAllSavedHours = async () => {
-    try {
-      // Obter todas as chaves do SecureStore que contenham 'real_hours_'
-      const keysToDelete = [];
-      
-      // Como não podemos listar chaves no SecureStore, vamos tentar limpar
-      // algumas datas conhecidas dos últimos meses
-      const today = new Date();
-      for (let i = 0; i < 90; i++) { // Últimos 90 dias
-        const date = new Date(today);
-        date.setDate(date.getDate() - i);
-        const dateKey = date.toISOString().split('T')[0];
-        keysToDelete.push(`real_hours_${dateKey}`);
-      }
-
-      // Deletar todas as chaves
-      await Promise.all(
-        keysToDelete.map(async (key) => {
-          try {
-            await SecureStore.deleteItemAsync(key);
-          } catch (error) {
-            // Ignorar erros de chaves que não existem
-          }
-        })
-      );
-
-      console.log('✅ Todos os dados de horas extras foram limpos');
-      
-      // Limpar estado local também
-      setRealHours({});
-      
-    } catch (error) {
-      console.error('❌ Erro ao limpar dados:', error);
-    }
   };
 
   // Calcular diferença de horas para exibição
   const getHoursSummary = (shift, shiftIndex) => {
-    // Validações robustas
     if (!shift || typeof shiftIndex !== 'number' || shiftIndex < 0) {
-      console.log('🔍 getHoursSummary - Parâmetros inválidos:', { shift: !!shift, shiftIndex });
       return null;
     }
 
     const shiftRealHours = realHours[shiftIndex];
     if (!shiftRealHours || typeof shiftRealHours !== 'object') {
-      console.log('🔍 getHoursSummary - Sem horas reais para index:', shiftIndex);
       return null;
     }
 
     if (!shiftRealHours.startTime || !shiftRealHours.endTime) {
-      console.log('🔍 getHoursSummary - Horários incompletos:', { 
-        startTime: shiftRealHours.startTime, 
-        endTime: shiftRealHours.endTime 
+      console.log('🔍 getHoursSummary - Horários incompletos:', {
+        startTime: shiftRealHours.startTime,
+        endTime: shiftRealHours.endTime
       });
       return null;
     }
 
     const shiftTime = shift.time || '';
     console.log('🔍 getHoursSummary - shiftTime original:', shiftTime);
-    
-    // Aceitar tanto hífen (-) quanto travessão (–) como separador
+
     let timeParts = shiftTime.split(' – ');
     if (timeParts.length !== 2) {
-      timeParts = shiftTime.split(' - '); // Tentar com hífen simples
+      timeParts = shiftTime.split(' - ');
     }
     if (timeParts.length !== 2) {
       console.log('🔍 getHoursSummary - Não conseguiu dividir o horário:', timeParts);
@@ -278,7 +314,7 @@ const ShiftBottomSheet = ({
 
     const [predictedStart, predictedEnd] = timeParts.map(time => time.replace(/\s*\([^)]*\)/, '').trim());
     console.log('🔍 getHoursSummary - Horários extraídos:', { predictedStart, predictedEnd });
-    
+
     const predictedDurationMin = calculateDuration(predictedStart, predictedEnd);
     const realDurationMin = calculateDuration(shiftRealHours.startTime, shiftRealHours.endTime);
 
@@ -296,8 +332,13 @@ const ShiftBottomSheet = ({
       return null;
     }
 
-    const differenceMin = realDurationMin - predictedDurationMin;
-    
+    const rawDiff = realDurationMin - predictedDurationMin;
+    const differenceMin = fractionalExtra
+      ? rawDiff
+      : rawDiff >= 0
+        ? Math.floor(rawDiff / 60) * 60
+        : rawDiff;
+
     console.log('🔍 getHoursSummary - Diferença final:', {
       realDurationMin,
       predictedDurationMin,
@@ -308,10 +349,10 @@ const ShiftBottomSheet = ({
     return {
       startTime: shiftRealHours.startTime,
       endTime: shiftRealHours.endTime,
-      predictedHours: predictedDurationMin / 60, // Converter para horas apenas para display
+      predictedHours: predictedDurationMin / 60,
       realHours: realDurationMin / 60,
-      difference: differenceMin / 60, // Diferença em horas para display
-      differenceMinutes: differenceMin // Manter diferença em minutos para precisão
+      difference: differenceMin / 60,
+      differenceMinutes: differenceMin
     };
   };
 
@@ -319,48 +360,46 @@ const ShiftBottomSheet = ({
   const calculateDuration = (startTime, endTime) => {
     try {
       console.log('🔍 calculateDuration - Input:', { startTime, endTime });
-      
-      // Normalizar formato dos horários (tanto "07h00" quanto "07:00")
+
       const normalizeTime = (time) => {
         const normalized = time.replace('h', ':');
         console.log('🔍 calculateDuration - Normalizado:', time, '->', normalized);
         return normalized;
       };
-      
+
       const normalizedStart = normalizeTime(startTime);
       const normalizedEnd = normalizeTime(endTime);
-      
+
       const [startHour, startMin] = normalizedStart.split(':').map(Number);
       const [endHour, endMin] = normalizedEnd.split(':').map(Number);
-      
+
       console.log('🔍 calculateDuration - Componentes:', {
         startHour, startMin, endHour, endMin,
         startValid: !isNaN(startHour) && !isNaN(startMin),
         endValid: !isNaN(endHour) && !isNaN(endMin)
       });
-      
+
       if (isNaN(startHour) || isNaN(startMin) || isNaN(endHour) || isNaN(endMin)) {
         console.log('🔍 calculateDuration - Valores inválidos detectados');
         return null;
       }
-      
+
       const startTotalMin = startHour * 60 + startMin;
       let endTotalMin = endHour * 60 + endMin;
-      
-      // Se horário de fim é menor que início, considerar passagem de dia
+
       if (endTotalMin < startTotalMin) {
         endTotalMin += 24 * 60;
         console.log('🔍 calculateDuration - Detectada passagem de dia');
       }
-      
+
       const duration = endTotalMin - startTotalMin;
       console.log('🔍 calculateDuration - Resultado:', {
         startTotalMin,
         endTotalMin,
         duration
       });
-      
-      return duration; // Retorna em minutos para preservar precisão
+
+      return duration;
     } catch (error) {
       console.error('🔍 calculateDuration - Erro:', error);
       return null;
@@ -370,30 +409,30 @@ const ShiftBottomSheet = ({
   // Formatar duração em horas e minutos
   const formatDuration = (hours) => {
     if (hours === null || isNaN(hours)) return '0h';
-    
+
     const wholeHours = Math.floor(hours);
     const minutes = Math.round((hours - wholeHours) * 60);
-    
+
     if (minutes === 0) {
       return `${wholeHours}h`;
     }
-    
+
     return `${wholeHours}h${minutes.toString().padStart(2, '0')}`;
   };
 
   // Formatar diferença de minutos de forma precisa
   const formatMinutesDifference = (minutes) => {
     console.log('🔍 formatMinutesDifference - Input:', minutes);
-    
+
     if (!minutes || minutes === 0) {
       console.log('🔍 formatMinutesDifference - Retornando 0min');
       return '0min';
     }
-    
+
     const absMinutes = Math.abs(minutes);
     const hours = Math.floor(absMinutes / 60);
     const remainingMinutes = absMinutes % 60;
-    
+
     let result;
     if (hours === 0) {
       result = `${remainingMinutes}min`;
@@ -402,7 +441,7 @@ const ShiftBottomSheet = ({
     } else {
       result = `${hours}h${remainingMinutes.toString().padStart(2, '0')}`;
     }
-    
+
     console.log('🔍 formatMinutesDifference - Output:', {
       minutes,
       absMinutes,
@@ -410,15 +449,15 @@ const ShiftBottomSheet = ({
       remainingMinutes,
       result
     });
-    
+
     return result;
   };
+
   // Carregar breakdowns quando shifts ou data mudarem
   useEffect(() => {
     const loadBreakdowns = async () => {
       if (!shifts || !selectedDate) return;
-      
-      // Converter selectedDate para string no formato esperado pela função
+
       let dateString;
       try {
         if (selectedDate instanceof Date) {
@@ -426,7 +465,7 @@ const ShiftBottomSheet = ({
             console.warn('selectedDate é um Date inválido:', selectedDate);
             return;
           }
-          dateString = selectedDate.toISOString().split('T')[0]; // YYYY-MM-DD
+          dateString = selectedDate.toISOString().split('T')[0];
         } else if (typeof selectedDate === 'string' && selectedDate.trim() !== '') {
           dateString = selectedDate.trim();
         } else {
@@ -437,12 +476,11 @@ const ShiftBottomSheet = ({
         console.warn('Erro ao processar selectedDate:', error, selectedDate);
         return;
       }
-      
+
       const breakdowns = {};
       for (let i = 0; i < shifts.length; i++) {
         const shift = shifts[i];
         try {
-          // Passar dateString em vez de selectedDate
           const result = await calculateShiftValueWithBreakdown(shift, dateString, 0);
           breakdowns[i] = result;
         } catch (error) {
@@ -458,7 +496,7 @@ const ShiftBottomSheet = ({
       }
       setShiftBreakdowns(breakdowns);
     };
-    
+
     if (isVisible) {
       loadBreakdowns();
     }
@@ -466,7 +504,6 @@ const ShiftBottomSheet = ({
 
   useEffect(() => {
     if (isVisible) {
-      // Animar para cima
       Animated.parallel([
         Animated.timing(translateY, {
           toValue: 0,
@@ -480,7 +517,6 @@ const ShiftBottomSheet = ({
         }),
       ]).start();
     } else {
-      // Animar para baixo
       Animated.parallel([
         Animated.timing(translateY, {
           toValue: BOTTOM_SHEET_MAX_HEIGHT,
@@ -493,32 +529,41 @@ const ShiftBottomSheet = ({
           useNativeDriver: true,
         }),
       ]).start();
-      
-      // Reset editing modal when closing
+
       setEditingShift(null);
+    }
+
+    if (isVisible) {
+      getFullShiftConfig().then(cfg => {
+        setFractionalExtra(cfg.fractionalExtraHours ?? true);
+      });
+      if (user?.id) {
+        getGroupVisibility(user.id).then(config => {
+          setEnabledGroupIds(config ? config.enabledGroupIds : null);
+        });
+        getGroupColors(user.id).then(colors => {
+          setGroupColors(colors || {});
+        });
+      }
     }
   }, [isVisible]);
 
   const panResponder = PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: (_, gestureState) => {
-      // Só capturar swipe para baixo (fechar) — nunca roubar scroll para cima
       const isDownward = gestureState.dy > 10;
       const isMoreVertical = Math.abs(gestureState.dy) > Math.abs(gestureState.dx);
       return isDownward && isMoreVertical;
     },
     onPanResponderMove: (_, gestureState) => {
-      // Só permitir movimento para baixo (fechar)
       if (gestureState.dy > 0) {
         translateY.setValue(gestureState.dy);
       }
     },
     onPanResponderRelease: (_, gestureState) => {
       if (gestureState.dy > 100 || gestureState.vy > 0.5) {
-        // Fechar se arrastou mais de 100px ou velocidade > 0.5
         onClose();
       } else {
-        // Voltar para posição original
         Animated.timing(translateY, {
           toValue: 0,
           duration: 200,
@@ -528,52 +573,35 @@ const ShiftBottomSheet = ({
     },
   });
 
-  const formatDate = (dateString) => {
-    const date = new Date(dateString);
-    const day = date.getDate();
-    const month = date.toLocaleDateString('pt-BR', { month: 'long' });
-    const year = date.getFullYear();
-    
-    return `${day} de ${month}, ${year}`;
-  };
-
   const formatDateHeader = (dateInput) => {
     if (!dateInput) return '';
-    
+
     try {
       let date;
-      
-      // Se for um objeto Date, usar diretamente
+
       if (dateInput instanceof Date) {
         date = dateInput;
-      } 
-      // Se for string, tentar parsear
-      else if (typeof dateInput === 'string') {
+      } else if (typeof dateInput === 'string') {
         if (dateInput.includes('-')) {
-          // Formato YYYY-MM-DD
           const [year, month, day] = dateInput.split('-');
           date = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
         } else {
-          // Outros formatos de string
           date = new Date(dateInput);
         }
-      }
-      // Fallback
-      else {
+      } else {
         date = new Date(dateInput);
       }
-      
-      // Verificar se a data é válida
+
       if (isNaN(date.getTime())) {
         return 'Data inválida';
       }
-      
+
       const weekday = date.toLocaleDateString('pt-BR', { weekday: 'long' });
-      const dayMonth = date.toLocaleDateString('pt-BR', { 
+      const dayMonth = date.toLocaleDateString('pt-BR', {
         day: 'numeric',
         month: 'long'
       });
-      
+
       return `${weekday.charAt(0).toUpperCase() + weekday.slice(1)}, ${dayMonth}`;
     } catch (error) {
       console.warn('Erro ao formatar data do header:', error);
@@ -588,32 +616,114 @@ const ShiftBottomSheet = ({
 
   const getShiftTypeLabel = (label) => {
     if (!label) return 'Plantão';
-    
+
     const typeMap = {
       'M': 'Manhã',
-      'T': 'Tarde', 
+      'T': 'Tarde',
       'N': 'Noite'
     };
-    
+
     const type = label.charAt(0);
     return typeMap[type] || label;
   };
 
   const getShiftTypeColor = (label) => {
-    if (!label) return Colors.primary;
-    
+    if (!label) return C.primary;
+
     const colorMap = {
-      'M': Colors.success,
-      'T': Colors.primary,
-      'N': Colors.warning
+      'M': C.success,
+      'T': C.primary,
+      'N': C.warning
     };
-    
+
     const type = label.charAt(0);
-    return colorMap[type] || Colors.primary;
+    return colorMap[type] || C.primary;
   };
 
+  // ── Helpers for "Quem está também" ─────────────────────────────────────────
+
+  const _getCoworkersForShift = (shift) => {
+    if (shift?.id && TodayCoworkersService.hasEntry(shift.id)) {
+      return TodayCoworkersService.getCoworkers(shift.id);
+    }
+
+    const selfId = user?.id ? String(user.id) : null;
+
+    const raw = [
+      ...(shift?.originalData?.coworkers || []),
+      ...(shift?.originalData?.vacancy?.coworkers || []),
+    ];
+    const seen = new Set();
+    const persons = [];
+    for (const p of raw) {
+      if (!p?.id) continue;
+      const pid = String(p.id);
+      if (seen.has(pid)) continue;
+      if (selfId && pid === selfId) continue;
+      seen.add(pid);
+      persons.push(coworkersById?.[pid] || coworkersById?.[p.id] || p);
+    }
+
+    if (persons.length === 0) return [];
+
+    if (enabledGroupIds && shift?.group?.id != null) {
+      const allowed = enabledGroupIds.some(id => String(id) === String(shift.group.id));
+      if (!allowed) return [];
+    }
+
+    return persons;
+  };
+
+  const _getCoworkersByGroupForShift = (shift, flatPersons) => {
+    if (shift?.id && TodayCoworkersService.hasEntry(shift.id)) {
+      const grouped = TodayCoworkersService.getCoworkersByGroup(shift.id);
+      if (grouped.length > 0) return grouped;
+    }
+    if (flatPersons.length === 0) return [];
+    return [{
+      groupId: String(shift?.group?.id ?? ''),
+      groupName: shift?.group?.name || '',
+      institutionName: shift?.group?.institution?.name || '',
+      coworkers: flatPersons,
+    }];
+  };
+
+  const _getVacanciesByGroupForShift = (shift) => {
+    if (shift?.id && TodayCoworkersService.hasEntry(shift.id)) {
+      return TodayCoworkersService.getVacanciesByGroup(shift.id);
+    }
+    return [];
+  };
+
+  const _resolveGroupColor = (groupId) => {
+    const custom = groupColors[String(groupId)];
+    if (custom) return custom.startsWith('#') ? custom : '#' + custom;
+    const fromContext = groupsById?.[groupId]?.color;
+    if (fromContext) return fromContext.startsWith('#') ? fromContext : '#' + fromContext;
+    return null;
+  };
+
+  const openCoworkersModal = (shift, persons) => {
+    const institution = shift?.group?.institution?.name || '';
+    const label = { M: 'Manhã', T: 'Tarde', N: 'Noite' }[shift?.label] || shift?.label || '';
+    const rawGroups = _getCoworkersByGroupForShift(shift, persons);
+    const coworkersByGroup = rawGroups.map(g => ({
+      ...g,
+      groupColor: _resolveGroupColor(g.groupId) || g.groupColor || null,
+    }));
+    const vacanciesByGroup = _getVacanciesByGroupForShift(shift);
+    setCoworkersModal({
+      coworkers: persons,
+      coworkersByGroup,
+      vacanciesByGroup,
+      title: institution || label,
+      subtitle: institution ? label : '',
+    });
+  };
+
+  // ── End "Quem está também" helpers ──────────────────────────────────────────
+
   const renderShiftCard = (shift, index) => {
-    // Validações robustas
     if (!shift || typeof index !== 'number' || index < 0) {
       console.error('❌ renderShiftCard - Parâmetros inválidos:', { shift: !!shift, index });
       return null;
@@ -625,359 +735,361 @@ const ShiftBottomSheet = ({
     const hoursSummary = getHoursSummary(shift, index);
     const hasRegisteredHours = hoursSummary !== null;
 
-    // Log detalhado para debug
-    console.log('🔍 renderShiftCard - Shift', index, ':', {
-      shiftType,
-      hasRegisteredHours,
-      hoursSummary: hoursSummary ? {
-        startTime: hoursSummary.startTime,
-        endTime: hoursSummary.endTime,
-        differenceMinutes: hoursSummary.differenceMinutes,
-        difference: hoursSummary.difference,
-        predictedHours: hoursSummary.predictedHours,
-        realHours: hoursSummary.realHours
-      } : null,
-      shiftTime: shift.time,
-      realHours: realHours[index]
-    });
-
-    // Calcular valor correto para split shifts
     const getDisplayValue = () => {
       if (!breakdown) return '0,00';
 
-      const bonusMult = 1
-        + (breakdown.loyaltyPercentage || 0) / 100
-        + (breakdown.generalBonusPercentage || 0) / 100;
-      const extraHoursValue = hoursSummary
-        ? (hoursSummary.differenceMinutes / 60) * (breakdown.hourlyValue || 0) * bonusMult
-        : 0;
+      const baseMin = shift.splitHours
+        ? (shift.splitHours.minutesThisMonth ?? Math.round((shift.splitHours.hoursThisMonth || 0) * 60))
+        : (breakdown.standardMinutes || (breakdown.hours || 0) * 60);
 
-      // Para split shifts, recalcular valor considerando apenas horas deste mês
-      if (shift.splitHours) {
-        const hoursThisMonth = shift.splitHours.hoursThisMonth || 0;
-        const proportionalBaseValue = (breakdown.hourlyValue || 0) * hoursThisMonth;
+      const extraMin = (hoursSummary && hoursSummary.differenceMinutes) || 0;
+      const totalMin = baseMin + extraMin;
 
-        // Aplicar bônus proporcionais baseados no valor das horas do split
-        let loyaltyBonus = 0;
-        let generalBonus = 0;
-
-        if (breakdown.loyaltyPercentage) {
-          loyaltyBonus = (proportionalBaseValue * breakdown.loyaltyPercentage) / 100;
-        }
-
-        if (breakdown.generalBonusPercentage) {
-          generalBonus = (proportionalBaseValue * breakdown.generalBonusPercentage) / 100;
-        }
-
-        const totalValue = proportionalBaseValue + loyaltyBonus + generalBonus + extraHoursValue;
-        console.log('🔍 Split Value Calculation:', {
-          hoursThisMonth,
-          hourlyValue: breakdown.hourlyValue,
-          proportionalBaseValue,
-          loyaltyPercentage: breakdown.loyaltyPercentage,
-          loyaltyBonus,
-          generalBonusPercentage: breakdown.generalBonusPercentage,
-          generalBonus,
-          extraHoursValue,
-          totalValue
-        });
-
-        return formatMoneyCompact(totalValue);
-      }
-
-      // Para plantões normais, usar valor original + extra
-      return formatMoneyCompact(breakdown.finalValue + extraHoursValue);
+      return formatMoneyCompact(computeShiftValue(breakdown, totalMin));
     };
 
     return (
-      <View key={index} style={styles.shiftCard}>
+      <View key={index} style={s.shiftCard}>
         {/* Header do Card com Tipo e Valor */}
-        <View style={styles.shiftHeader}>
-          <View style={[styles.shiftTypeBadge, { backgroundColor: shiftColor + '15', borderColor: shiftColor + '30' }]}>
-            <Text style={[styles.shiftTypeText, { color: shiftColor }]}>
+        <View style={s.shiftHeader}>
+          <View style={[s.shiftTypeBadge, { backgroundColor: shiftColor + '15', borderColor: shiftColor + '30' }]}>
+            <Text style={[s.shiftTypeText, { color: shiftColor }]}>
               {shiftType}
             </Text>
           </View>
 
           {shift.splitHours && (
-            <View style={[styles.shiftTypeBadge, styles.splitInlineBadge]}>
-              <Text style={[styles.shiftTypeText, { color: Colors.info }]}>
+            <View style={[s.shiftTypeBadge, s.splitInlineBadge]}>
+              <Text style={[s.shiftTypeText, { color: C.info }]}>
                 {shift.splitHours.hoursThisMonth}h mês
               </Text>
             </View>
           )}
 
-          <View style={styles.shiftValueContainer}>
-            <Text style={styles.shiftValueText}>
+          <View style={s.shiftValueContainer}>
+            <Text style={s.shiftValueText}>
               R$ {getDisplayValue()}
             </Text>
-            <Text style={styles.shiftValueLabel}>valor estimado</Text>
+            <Text style={s.shiftValueLabel}>valor estimado</Text>
           </View>
         </View>
 
         {/* Detalhes do Plantão com Botão Integrado */}
-        <View style={styles.shiftDetails}>
-          <View style={styles.detailsContent}>
-            <View style={styles.detailsLeft}>
-              <View style={styles.shiftDetailRow}>
-                <Ionicons name="time-outline" size={18} color={Colors.text.tertiary} />
-                <Text style={styles.shiftDetailText}>
+        <View style={s.shiftDetails}>
+          <View style={s.detailsContent}>
+            <View style={s.detailsLeft}>
+              <View style={s.shiftDetailRow}>
+                <Ionicons name="time-outline" size={18} color={C.text.tertiary} />
+                <Text style={s.shiftDetailText}>
                   {formatTime(shift.time)}
                 </Text>
               </View>
 
               {shift.group?.institution?.name && (
-                <View style={styles.shiftDetailRow}>
-                  <Ionicons name="location-outline" size={18} color={Colors.text.tertiary} />
-                  <Text style={styles.shiftDetailText}>
+                <View style={s.shiftDetailRow}>
+                  <Ionicons name="location-outline" size={18} color={C.text.tertiary} />
+                  <Text style={s.shiftDetailText}>
                     {shift.group.institution.name}
                   </Text>
                 </View>
               )}
 
               {shift.group?.name && (
-                <TouchableOpacity 
-                  style={styles.shiftDetailRow}
-                  onPress={() => {
-                    if (onNavigateToGroup && shift.group) {
-                      onNavigateToGroup(shift.group);
-                    }
-                  }}
-                  activeOpacity={onNavigateToGroup ? 0.6 : 1}
-                  disabled={!onNavigateToGroup}
-                >
-                  <Ionicons name="people-outline" size={18} color={Colors.text.tertiary} />
-                  <Text style={[styles.shiftDetailText, styles.groupText]}>
+                <View style={s.shiftDetailRow}>
+                  {(() => {
+                    const groupColor = _resolveGroupColor(shift.group?.id);
+                    return groupColor
+                      ? <View style={[s.groupColorDot, { backgroundColor: groupColor }]} />
+                      : <Ionicons name="people-outline" size={18} color={C.text.tertiary} />;
+                  })()}
+                  <Text style={[s.shiftDetailText, s.groupText, _resolveGroupColor(shift.group?.id) ? {
+                    color: _resolveGroupColor(shift.group?.id),
+                  } : null]}>
                     {shift.group.name}
                   </Text>
-                  {onNavigateToGroup && (
-                    <Ionicons name="chevron-forward" size={16} color={Colors.text.tertiary} />
-                  )}
-                </TouchableOpacity>
+                </View>
               )}
             </View>
 
             {/* Botão de Ação Integrado */}
-            <TouchableOpacity 
+            <TouchableOpacity
               style={[
-                styles.compactActionButton,
-                hasRegisteredHours && styles.compactActionButtonActive
+                s.compactActionButton,
+                hasRegisteredHours && s.compactActionButtonActive
               ]}
               onPress={() => openHoursEditor(index)}
             >
-              <Ionicons 
-                name={hasRegisteredHours ? "create-outline" : "time-outline"} 
-                size={16} 
-                color={hasRegisteredHours ? Colors.primary : Colors.text.tertiary}
+              <Ionicons
+                name={hasRegisteredHours ? "create-outline" : "time-outline"}
+                size={16}
+                color={hasRegisteredHours ? C.primary : C.text.tertiary}
               />
             </TouchableOpacity>
           </View>
         </View>
 
-        {/* Seção de Horas Registradas - Nova estrutura visual */}
+        {/* Seção de Horas Registradas */}
         {hasRegisteredHours && (
           <>
-            <View style={styles.divider} />
-            
-            <View style={styles.registeredHoursSection}>
-              <View style={styles.registeredHoursHeader}>
-                <View style={styles.registeredHoursHeaderLeft}>
-                  <Ionicons name="checkmark-circle" size={16} color={Colors.success} />
-                  <Text style={styles.registeredHoursTitle}>
-                    Horas registradas
-                  </Text>
+            <View style={s.divider} />
+            <View style={s.registeredHoursSection}>
+              <View style={s.registeredHoursHeader}>
+                <View style={s.registeredHoursHeaderLeft}>
+                  <Ionicons name="checkmark-circle" size={16} color={C.success} />
+                  <Text style={s.registeredHoursTitle}>Horas registradas</Text>
                 </View>
-                
-                {/* Botão de Limpar */}
-                <TouchableOpacity 
-                  style={styles.clearButton}
-                  onPress={() => confirmClearHours(index)}
-                >
-                  <Ionicons name="trash-outline" size={14} color={Colors.error} />
-                  <Text style={styles.clearButtonText}>Limpar</Text>
-                </TouchableOpacity>
+
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: Spacing.sm }}>
+                  {hoursSummary.differenceMinutes !== 0 && (
+                    <View style={[
+                      s.extrasIndicator,
+                      { marginBottom: 0, marginTop: 0,
+                        backgroundColor: hoursSummary.differenceMinutes > 0 ? C.success + '15' : C.error + '15',
+                        borderColor:     hoursSummary.differenceMinutes > 0 ? C.success + '30' : C.error + '30',
+                      }
+                    ]}>
+                      <Ionicons
+                        name={hoursSummary.differenceMinutes > 0 ? 'trending-up-outline' : 'trending-down-outline'}
+                        size={13}
+                        color={hoursSummary.differenceMinutes > 0 ? C.success : C.error}
+                      />
+                      <Text style={[s.extrasText, { color: hoursSummary.differenceMinutes > 0 ? C.success : C.error }]}>
+                        {hoursSummary.differenceMinutes > 0 ? '+' : '-'}{formatMinutesDifference(Math.abs(hoursSummary.differenceMinutes))}
+                      </Text>
+                    </View>
+                  )}
+
+                  <TouchableOpacity style={s.clearButton} onPress={() => confirmClearHours(index)}>
+                    <Ionicons name="trash-outline" size={14} color={C.error} />
+                    <Text style={s.clearButtonText}>Limpar</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
-              
-              {/* Informações específicas do plantão registrado */}
-              <View style={styles.registeredHoursDetails}>
-                <View style={styles.registeredHoursDisplay}>
-                  <Text style={styles.registeredHoursTime}>
+
+              <View style={s.registeredHoursDetails}>
+                <View style={s.registeredHoursDisplay}>
+                  <Text style={s.registeredHoursTime}>
                     {hoursSummary.startTime} – {hoursSummary.endTime}
                   </Text>
                 </View>
-                
-                {/* Informações contextuais do plantão */}
-                <View style={styles.shiftContextInfo}>
-                  {/* {shift.group?.name && (
-                    <Text style={styles.contextInfoText}>
-                      📍 {shift.group.name}
-                    </Text>
-                  )} */}
+                <View style={s.shiftContextInfo}>
                   {realHours[index]?.registeredAt && (
-                    <Text style={styles.contextInfoText}>
+                    <Text style={s.contextInfoText}>
                       🕐 Registrado em {(() => {
                         try {
                           const date = new Date(realHours[index].registeredAt);
                           return !isNaN(date.getTime()) ? date.toLocaleDateString('pt-BR') : 'Data inválida';
-                        } catch (error) {
-                          console.warn('Erro ao formatar data de registro:', error);
-                          return 'Data inválida';
-                        }
+                        } catch (error) { return 'Data inválida'; }
                       })()}
                     </Text>
                   )}
                 </View>
               </View>
-
-              {/* Extras em destaque com formatação precisa */}
-              {hoursSummary.differenceMinutes !== 0 && (
-                <View style={[
-                  styles.extrasIndicator,
-                  {
-                    backgroundColor: hoursSummary.differenceMinutes > 0 
-                      ? Colors.success + '15'
-                      : Colors.error + '15',
-                    borderColor: hoursSummary.differenceMinutes > 0 
-                      ? Colors.success + '30'
-                      : Colors.error + '30'
-                  }
-                ]}>
-                  <View style={styles.extrasContent}>
-                    <Ionicons 
-                      name={hoursSummary.differenceMinutes > 0 ? "trending-up-outline" : "trending-down-outline"} 
-                      size={14} 
-                      color={hoursSummary.differenceMinutes > 0 ? Colors.success : Colors.error}
-                    />
-                    <Text style={[
-                      styles.extrasText,
-                      {
-                        color: hoursSummary.differenceMinutes > 0 
-                          ? Colors.success
-                          : Colors.error
-                      }
-                    ]}>
-                      {hoursSummary.differenceMinutes > 0 ? 'Extras: +' : 'Faltou: -'}{formatMinutesDifference(Math.abs(hoursSummary.differenceMinutes))}
-                    </Text>
-                  </View>
-                </View>
-              )}
             </View>
           </>
         )}
 
-        {/* Composição do Valor - Estilo clean como horas registradas */}
+        {/* Quem está também — compact tap-to-detail */}
+        {(() => {
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+          const shiftDate = new Date(shift.date + 'T00:00:00');
+          const isPast = shiftDate < today;
+          const isFuture = shiftDate > today;
+
+          if (isFuture && !TodayCoworkersService.hasEntry(shift.id)) return null;
+
+          const shiftCoworkers = _getCoworkersForShift(shift);
+          const vacancies = isPast ? [] : _getVacanciesByGroupForShift(shift);
+          const totalVacancies = vacancies.reduce((acc, v) => acc + (v.available ?? 0), 0);
+          if (shiftCoworkers.length === 0 && totalVacancies === 0) return null;
+
+          const MAX_PREVIEW = 4;
+          const hasVacancies = totalVacancies > 0;
+          const maxPersons = hasVacancies ? MAX_PREVIEW - 1 : MAX_PREVIEW;
+          const personPreview = shiftCoworkers.slice(0, maxPersons);
+          const vacancyPreview = hasVacancies ? 1 : 0;
+          const personOverflow = shiftCoworkers.length - personPreview.length;
+          const vacancyOverflow = totalVacancies - vacancyPreview;
+          const overflow = personOverflow + vacancyOverflow;
+
+          return (
+            <>
+              <View style={s.divider} />
+              <TouchableOpacity
+                style={s.registeredHoursSection}
+                onPress={() => openCoworkersModal(shift, shiftCoworkers)}
+                activeOpacity={0.7}
+              >
+                <View style={s.registeredHoursHeader}>
+                  <View style={s.registeredHoursHeaderLeft}>
+                    <Ionicons name="people-outline" size={16} color={C.primary} />
+                    <Text style={s.registeredHoursTitle}>
+                      Quem está também ({shiftCoworkers.length}{totalVacancies > 0 ? ` + ${totalVacancies} vaga${totalVacancies > 1 ? 's' : ''}` : ''})
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={16} color={C.text.tertiary} />
+                </View>
+                <View style={s.coworkersRow}>
+                  {personPreview.map(person => (
+                    <CoworkerAvatar key={person.id} person={person} />
+                  ))}
+                  {Array.from({ length: vacancyPreview }).map((_, i) => (
+                    <VacancySlot key={`vacancy-${i}`} />
+                  ))}
+                  {overflow > 0 && (
+                    <View style={s.coworkerOverflow}>
+                      <View style={s.coworkerOverflowCircle}>
+                        <Text style={s.coworkerOverflowText}>+{overflow}</Text>
+                      </View>
+                    </View>
+                  )}
+                </View>
+              </TouchableOpacity>
+            </>
+          );
+        })()}
+
+        {/* Composição do Valor */}
         {breakdown && (
           <>
-            <View style={styles.divider} />
-            
-            <View style={styles.registeredHoursSection}>
-              <View style={styles.registeredHoursHeader}>
-                <View style={styles.registeredHoursHeaderLeft}>
-                  <Ionicons name="calculator-outline" size={16} color={Colors.primary} />
-                  <Text style={styles.registeredHoursTitle}>
+            <View style={s.divider} />
+
+            <View style={s.registeredHoursSection}>
+              <View style={s.registeredHoursHeader}>
+                <View style={s.registeredHoursHeaderLeft}>
+                  <Ionicons name="calculator-outline" size={16} color={C.primary} />
+                  <Text style={s.registeredHoursTitle}>
                     Composição do valor
                   </Text>
                 </View>
               </View>
-              
-              <View style={styles.valueCalculationDetails}>
-                {/* Para split shifts, mostrar apenas cálculo das horas do mês atual */}
+
+              <View style={s.valueCalculationDetails}>
                 {shift.splitHours ? (
                   <>
-                    {/* Apenas horas deste mês (não mostrar próximo mês) */}
-                    <View style={styles.valueCalculationRow}>
-                      <Text style={[styles.valueCalculationText, { color: Colors.info }]}>
+                    <View style={s.valueCalculationRow}>
+                      <Text style={[s.valueCalculationText, { color: C.info }]}>
                         {formatHourlyRate(breakdown.hourlyValue)} × {shift.splitHours.hoursThisMonth}h (split - este mês)
                         {breakdown.weekend && breakdown.isNaturalWeekend ? ' (FDS)' : ''}
                         {breakdown.isFridayNight ? ' (Sexta N)' : ''}
                       </Text>
-                      <Text style={[styles.valueCalculationAmount, { color: Colors.info }]}>
+                      <Text style={[s.valueCalculationAmount, { color: C.info }]}>
                         R$ {formatMoneyCompact((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth)}
                       </Text>
                     </View>
-                    
-                    {/* Bônus de fidelização para split (proporcional às horas do split) */}
+
                     {breakdown.loyaltyPercentage > 0 && (
-                      <View style={styles.valueCalculationRow}>
-                        <Text style={[styles.valueCalculationText, { color: Colors.primary }]}>
+                      <View style={s.valueCalculationRow}>
+                        <Text style={[s.valueCalculationText, { color: C.primary }]}>
                           + Fidelização {breakdown.loyaltyPercentage}% (sobre {shift.splitHours.hoursThisMonth}h)
                         </Text>
-                        <Text style={[styles.valueCalculationAmount, { color: Colors.primary }]}>
+                        <Text style={[s.valueCalculationAmount, { color: C.primary }]}>
                           R$ {formatMoneyCompact(((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth * breakdown.loyaltyPercentage) / 100)}
                         </Text>
                       </View>
                     )}
-                    
-                    {/* Bônus geral para split (proporcional às horas do split) */}
+
                     {breakdown.generalBonusPercentage > 0 && (
-                      <View style={styles.valueCalculationRow}>
-                        <Text style={[styles.valueCalculationText, { color: Colors.success }]}>
+                      <View style={s.valueCalculationRow}>
+                        <Text style={[s.valueCalculationText, { color: C.success }]}>
                           + Bônus {breakdown.generalBonusPercentage}% (sobre {shift.splitHours.hoursThisMonth}h)
                         </Text>
-                        <Text style={[styles.valueCalculationAmount, { color: Colors.success }]}>
+                        <Text style={[s.valueCalculationAmount, { color: C.success }]}>
                           R$ {formatMoneyCompact(((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth * breakdown.generalBonusPercentage) / 100)}
+                        </Text>
+                      </View>
+                    )}
+
+                    {hoursSummary && hoursSummary.differenceMinutes !== 0 && (
+                      <View style={s.valueCalculationRow}>
+                        <Text style={[s.valueCalculationText, {
+                          color: hoursSummary.differenceMinutes > 0 ? C.success : C.error
+                        }]}>
+                          {hoursSummary.differenceMinutes > 0 ? '+ ' : '- '}
+                          Horas {hoursSummary.differenceMinutes > 0 ? 'extras' : 'faltantes'}: {
+                            TimeUtils.minutesToDisplay(Math.abs(hoursSummary.differenceMinutes))
+                          }
+                        </Text>
+                        <Text style={[s.valueCalculationAmount, {
+                          color: hoursSummary.differenceMinutes > 0 ? C.success : C.error
+                        }]}>
+                          {hoursSummary.differenceMinutes > 0 ? '+' : '-'} R$ {
+                            formatMoneyCompact(Math.abs((hoursSummary.differenceMinutes / 60) * (breakdown.hourlyValue || 0) * (
+                              1 + (breakdown.loyaltyPercentage || 0) / 100 + (breakdown.generalBonusPercentage || 0) / 100
+                            )))
+                          }
                         </Text>
                       </View>
                     )}
                   </>
                 ) : (
-                  /* Cálculo normal para plantões não-split */
                   <>
-                    <View style={styles.valueCalculationRow}>
-                      <Text style={styles.valueCalculationText}>
+                    <View style={s.valueCalculationRow}>
+                      <Text style={s.valueCalculationText}>
                         {formatHourlyRate(breakdown.hourlyValue)} × {breakdown.hours || 0}h
                         {breakdown.weekend && breakdown.isNaturalWeekend ? ' (FDS)' : ''}
                         {breakdown.isFridayNight ? ' (Sexta N)' : ''}
                       </Text>
-                      <Text style={styles.valueCalculationAmount}>
+                      <Text style={s.valueCalculationAmount}>
                         R$ {formatMoneyCompact(breakdown.baseValue) || '0,00'}
                       </Text>
                     </View>
-                    
-                    {/* Bônus de fidelização para plantões normais */}
+
                     {breakdown.loyaltyBonus > 0 && (
-                      <View style={styles.valueCalculationRow}>
-                        <Text style={[styles.valueCalculationText, { color: Colors.primary }]}>
+                      <View style={s.valueCalculationRow}>
+                        <Text style={[s.valueCalculationText, { color: C.primary }]}>
                           + Fidelização {breakdown.loyaltyPercentage}%
                         </Text>
-                        <Text style={[styles.valueCalculationAmount, { color: Colors.primary }]}>
+                        <Text style={[s.valueCalculationAmount, { color: C.primary }]}>
                           R$ {formatMoneyCompact(breakdown.loyaltyBonus)}
                         </Text>
                       </View>
                     )}
-                    
-                    {/* Bônus geral para plantões normais */}
+
                     {breakdown.generalBonus > 0 && (
-                      <View style={styles.valueCalculationRow}>
-                        <Text style={[styles.valueCalculationText, { color: Colors.success }]}>
+                      <View style={s.valueCalculationRow}>
+                        <Text style={[s.valueCalculationText, { color: C.success }]}>
                           + Bônus {breakdown.generalBonusPercentage}%
                         </Text>
-                        <Text style={[styles.valueCalculationAmount, { color: Colors.success }]}>
+                        <Text style={[s.valueCalculationAmount, { color: C.success }]}>
                           R$ {formatMoneyCompact(breakdown.generalBonus)}
+                        </Text>
+                      </View>
+                    )}
+
+                    {hoursSummary && hoursSummary.differenceMinutes !== 0 && (
+                      <View style={s.valueCalculationRow}>
+                        <Text style={[s.valueCalculationText, {
+                          color: hoursSummary.differenceMinutes > 0 ? C.success : C.error
+                        }]}>
+                          {hoursSummary.differenceMinutes > 0 ? '+ ' : '- '}
+                          Horas {hoursSummary.differenceMinutes > 0 ? 'extras' : 'faltantes'}: {
+                            TimeUtils.minutesToDisplay(Math.abs(hoursSummary.differenceMinutes))
+                          }
+                        </Text>
+                        <Text style={[s.valueCalculationAmount, {
+                          color: hoursSummary.differenceMinutes > 0 ? C.success : C.error
+                        }]}>
+                          {hoursSummary.differenceMinutes > 0 ? '+' : '-'} R$ {
+                            formatMoneyCompact(Math.abs((hoursSummary.differenceMinutes / 60) * (breakdown.hourlyValue || 0) * (
+                              1 + (breakdown.loyaltyPercentage || 0) / 100 + (breakdown.generalBonusPercentage || 0) / 100
+                            )))
+                          }
                         </Text>
                       </View>
                     )}
                   </>
                 )}
-                
-                {/* Observação sobre sexta-feira */}
+
                 {breakdown.isFridayNight && (
-                  <View style={styles.shiftContextInfo}>
-                    <Text style={[styles.contextInfoText, { color: Colors.warning }]}>
+                  <View style={s.shiftContextInfo}>
+                    <Text style={[s.contextInfoText, { color: C.warning }]}>
                     - Sexta-feira (N) - aplicando valor de FDS
                     </Text>
                   </View>
                 )}
               </View>
-              
-              {/* Linha de origem dos valores - FORA do registeredHoursDetails */}
-              {/* <View style={styles.valueSourceContainer}>
-                <Text style={styles.valueSourceText}>
-                  {breakdown.hours || 0}h × R$ {breakdown.hourlyValue?.toFixed(0) || '0'}
-                  {breakdown.loyaltyBonus > 0 && ` | + ${breakdown.loyaltyPercentage}% fidelização`}
-                  {breakdown.generalBonus > 0 && ` | + ${breakdown.generalBonusPercentage}% bônus`}
-                </Text>
-              </View> */}
             </View>
           </>
         )}
@@ -988,66 +1100,189 @@ const ShiftBottomSheet = ({
   if (!isVisible) return null;
 
   return (
-    <View style={styles.container}>
+    <View style={s.container}>
       {/* Backdrop */}
-      <Animated.View 
+      <Animated.View
         style={[
-          styles.backdrop, 
+          s.backdrop,
           { opacity: backdropOpacity }
         ]}
       >
-        <Pressable style={styles.backdropPressable} onPress={onClose} />
+        <Pressable style={s.backdropPressable} onPress={onClose} />
       </Animated.View>
 
       {/* Bottom Sheet */}
       <Animated.View
         style={[
-          styles.bottomSheet,
+          s.bottomSheet,
           { transform: [{ translateY }] }
         ]}
       >
         {/* Área de gesto para fechar - apenas handle e header */}
-        <View style={styles.gestureArea} {...panResponder.panHandlers}>
+        <View style={s.gestureArea} {...panResponder.panHandlers}>
           {/* Handle */}
-          <View style={styles.handle} />
+          <View style={s.handle} />
 
           {/* Header */}
-          <View style={styles.header}>
-            <View style={styles.headerContent}>
-              <Text style={styles.dateTitle}>{formatDateHeader(selectedDate)}</Text>
-              <Text style={styles.shiftsCountText}>
+          <View style={s.header}>
+            <View style={s.headerContent}>
+              <Text style={s.dateTitle}>{formatDateHeader(selectedDate)}</Text>
+              <Text style={s.shiftsCountText}>
                 {shifts.length} {shifts.length === 1 ? 'plantão agendado' : 'plantões agendados'}
               </Text>
             </View>
-            
-            <Pressable style={styles.closeButton} onPress={onClose}>
-              <Ionicons name="close" size={24} color={Colors.text.secondary} />
+
+            <Pressable style={s.closeButton} onPress={onClose}>
+              <Ionicons name="close" size={24} color={C.text.secondary} />
             </Pressable>
           </View>
         </View>
 
         {/* Content */}
-        <ScrollView 
-          style={styles.content}
+        <ScrollView
+          style={s.content}
           showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.scrollContent}
-          bounces={false} // Remove bounce para evitar conflito
-          scrollEventThrottle={16} // Melhora performance
-          keyboardShouldPersistTaps="handled" // Melhora interação
-          nestedScrollEnabled={true} // Permite scroll aninhado no Android
-          overScrollMode="never" // Android: evita overscroll
+          contentContainerStyle={s.scrollContent}
+          bounces={false}
+          scrollEventThrottle={16}
+          keyboardShouldPersistTaps="handled"
+          nestedScrollEnabled={true}
+          overScrollMode="never"
         >
           {shifts && shifts.length > 0 ? (
             shifts.map((shift, index) => renderShiftCard(shift, index))
           ) : (
-            <View style={styles.emptyState}>
-              <Ionicons name="calendar-outline" size={48} color={Colors.text.tertiary} />
-              <Text style={styles.emptyTitle}>Nenhum plantão</Text>
-              <Text style={styles.emptySubtitle}>Não há plantões agendados para este dia</Text>
+            <View style={s.emptyState}>
+              <Ionicons name="calendar-outline" size={48} color={C.text.tertiary} />
+              <Text style={s.emptyTitle}>Nenhum plantão</Text>
+              <Text style={s.emptySubtitle}>Não há plantões agendados para este dia</Text>
             </View>
           )}
         </ScrollView>
       </Animated.View>
+
+      {/* Modal — Quem está também (detalhe) */}
+      <Modal
+        visible={coworkersModal !== null}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setCoworkersModal(null)}
+      >
+        <Pressable style={s.modalBackdrop} onPress={() => setCoworkersModal(null)} />
+        <View style={s.modalSheet}>
+          {/* Header */}
+          <View style={s.modalHeader}>
+            <View style={s.handle} />
+            <View style={s.modalTitleRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={s.modalTitle}>{coworkersModal?.title}</Text>
+                {coworkersModal?.subtitle ? (
+                  <Text style={s.modalSubtitle}>{coworkersModal.subtitle}</Text>
+                ) : null}
+              </View>
+              <Pressable onPress={() => setCoworkersModal(null)} style={s.modalClose}>
+                <Ionicons name="close" size={22} color={C.text.secondary} />
+              </Pressable>
+            </View>
+          </View>
+
+          {/* List — grouped by group, vacancies inline within each group */}
+          <ScrollView
+            style={s.modalList}
+            contentContainerStyle={s.modalListContent}
+            showsVerticalScrollIndicator={false}
+          >
+            {(() => {
+              const groups = coworkersModal?.coworkersByGroup?.length > 0
+                ? coworkersModal.coworkersByGroup
+                : coworkersModal?.coworkers?.length > 0
+                  ? [{ groupId: '', groupName: '', institutionName: '', coworkers: coworkersModal.coworkers }]
+                  : [];
+              const vacanciesByGroup = coworkersModal?.vacanciesByGroup || [];
+              const showGroupHeaders = groups.length > 1 || (groups.length === 1 && groups[0].groupName);
+
+              return groups.map((group, gi) => {
+                const groupVacancies = vacanciesByGroup.filter(
+                  v => !group.groupId || String(v.groupId) === String(group.groupId)
+                );
+                return (
+                  <View key={group.groupId || gi}>
+                    {showGroupHeaders ? (
+                      <TouchableOpacity
+                        style={s.modalGroupHeader}
+                        activeOpacity={onNavigateToGroup && group.groupId ? 0.6 : 1}
+                        onPress={() => {
+                          if (onNavigateToGroup && group.groupId) {
+                            setCoworkersModal(null);
+                            setTimeout(() => onNavigateToGroup({ id: group.groupId, name: group.groupName }), 200);
+                          }
+                        }}
+                      >
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                          {group.groupColor ? (
+                            <View style={[s.groupColorDot, { backgroundColor: group.groupColor }]} />
+                          ) : null}
+                          <Text style={s.modalGroupName} numberOfLines={1}>
+                            {group.groupName || 'Grupo'}
+                          </Text>
+                          {onNavigateToGroup && group.groupId ? (
+                            <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
+                          ) : null}
+                        </View>
+                        {group.institutionName ? (
+                          <Text style={s.modalGroupInstitution} numberOfLines={1}>
+                            {group.institutionName}
+                          </Text>
+                        ) : null}
+                      </TouchableOpacity>
+                    ) : null}
+                    {group.coworkers.map(person => (
+                      <View key={person.id} style={s.modalPersonRow}>
+                        <CoworkerAvatar person={person} />
+                        <View style={s.modalPersonInfo}>
+                          <Text style={s.modalPersonName} numberOfLines={1}>
+                            {person.full_name || person.name}
+                          </Text>
+                          {person.description ? (
+                            <Text style={s.modalPersonDesc} numberOfLines={1}>
+                              {person.description}
+                            </Text>
+                          ) : null}
+                          {person.council ? (
+                            <Text style={s.modalPersonCouncil} numberOfLines={1}>
+                              {person.council}
+                            </Text>
+                          ) : null}
+                        </View>
+                      </View>
+                    ))}
+                    {groupVacancies.flatMap((v, vi) =>
+                      Array.from({ length: v.available ?? 0 }).map((_, si) => {
+                        const av = makeAvatarStyles(C);
+                        return (
+                          <View key={`vacancy-${v.groupId || vi}-${si}`} style={s.modalPersonRow}>
+                            <View style={av.item}>
+                              <View style={[av.fallback, { backgroundColor: C.warning + '18', borderWidth: 1.5, borderColor: C.warning + '60', borderStyle: 'dashed' }]}>
+                                <Ionicons name="star-outline" size={16} color={C.warning} />
+                              </View>
+                              <Text style={[av.name, { color: C.warning }]} numberOfLines={1}>Vago</Text>
+                            </View>
+                            <View style={s.modalPersonInfo}>
+                              <Text style={[s.modalPersonName, { color: C.warning }]} numberOfLines={1}>
+                                Vaga Aberta
+                              </Text>
+                            </View>
+                          </View>
+                        );
+                      })
+                    )}
+                  </View>
+                );
+              });
+            })()}
+          </ScrollView>
+        </View>
+      </Modal>
 
       {/* Modal de Edição de Horas */}
       <HoursEditModal
@@ -1061,7 +1296,7 @@ const ShiftBottomSheet = ({
   );
 };
 
-const styles = StyleSheet.create({
+const makeStyles = (C) => ({
   container: {
     ...StyleSheet.absoluteFillObject,
     zIndex: 1000,
@@ -1069,7 +1304,7 @@ const styles = StyleSheet.create({
 
   backdrop: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: Colors.shadow.overlay,
+    backgroundColor: C.shadow.overlay,
   },
 
   backdropPressable: {
@@ -1082,7 +1317,7 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     height: BOTTOM_SHEET_MAX_HEIGHT,
-    backgroundColor: Colors.background.primary,
+    backgroundColor: C.background.primary,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     ...Shadows.strong,
@@ -1091,7 +1326,7 @@ const styles = StyleSheet.create({
   handle: {
     width: 40,
     height: 4,
-    backgroundColor: Colors.border.medium,
+    backgroundColor: C.border.medium,
     borderRadius: 2,
     alignSelf: 'center',
     marginTop: 12,
@@ -1105,7 +1340,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.lg,
     paddingVertical: Spacing.md,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: Colors.border.light,
+    borderBottomColor: C.border.light,
   },
 
   headerContent: {
@@ -1115,13 +1350,13 @@ const styles = StyleSheet.create({
   dateTitle: {
     fontSize: Typography.fontSize.title2,
     fontWeight: Typography.fontWeight.bold,
-    color: Colors.text.primary,
+    color: C.text.primary,
     marginBottom: 2,
   },
 
   shiftsCountText: {
     fontSize: Typography.fontSize.subhead,
-    color: Colors.text.secondary,
+    color: C.text.secondary,
     textTransform: 'lowercase',
   },
 
@@ -1129,7 +1364,7 @@ const styles = StyleSheet.create({
     width: 32,
     height: 32,
     borderRadius: 16,
-    backgroundColor: Colors.background.secondary,
+    backgroundColor: C.background.secondary,
     alignItems: 'center',
     justifyContent: 'center',
     marginLeft: Spacing.md,
@@ -1142,16 +1377,16 @@ const styles = StyleSheet.create({
 
   scrollContent: {
     padding: Spacing.lg,
-    paddingBottom: Spacing.xl + 34, // Safe area bottom
+    paddingBottom: Spacing.xl + 34,
   },
 
   // Shift Card
   shiftCard: {
-    backgroundColor: Colors.background.primary,
+    backgroundColor: C.background.primary,
     borderRadius: BorderRadius.lg,
     marginBottom: Spacing.md,
     borderWidth: 1,
-    borderColor: Colors.border.light,
+    borderColor: C.border.light,
     ...Shadows.small,
   },
 
@@ -1180,21 +1415,21 @@ const styles = StyleSheet.create({
   },
 
   shiftValueText: {
-    fontSize: 18, // Reduzido de Typography.fontSize.title2 para caber valores maiores
+    fontSize: 18,
     fontWeight: Typography.fontWeight.bold,
-    color: Colors.success,
+    color: C.success,
     marginBottom: 2,
   },
 
   shiftValueLabel: {
     fontSize: Typography.fontSize.footnote,
-    color: Colors.text.tertiary,
+    color: C.text.tertiary,
     fontWeight: Typography.fontWeight.medium,
   },
 
   divider: {
     height: StyleSheet.hairlineWidth,
-    backgroundColor: Colors.border.light,
+    backgroundColor: C.border.light,
     marginHorizontal: Spacing.lg,
   },
 
@@ -1222,67 +1457,39 @@ const styles = StyleSheet.create({
 
   shiftDetailText: {
     fontSize: Typography.fontSize.body,
-    color: Colors.text.secondary,
+    color: C.text.secondary,
     flex: 1,
     fontWeight: Typography.fontWeight.medium,
   },
 
   groupText: {
-    color: Colors.text.tertiary,
+    color: C.text.tertiary,
     fontSize: Typography.fontSize.footnote,
   },
 
-  // Botão compacto integrado
+  groupColorDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    marginRight: 2,
+    flexShrink: 0,
+  },
+
   compactActionButton: {
     width: 36,
     height: 36,
     borderRadius: 18,
-    backgroundColor: Colors.background.primary,
+    backgroundColor: C.background.primary,
     alignItems: 'center',
     justifyContent: 'center',
     marginLeft: Spacing.md,
     borderWidth: 1,
-    borderColor: Colors.border.light,
+    borderColor: C.border.light,
   },
 
   compactActionButtonActive: {
-    backgroundColor: Colors.primary + '10',
-    borderColor: Colors.primary + '30',
-  },
-
-  // Calculation Summary
-  calculationSummary: {
-    backgroundColor: Colors.info + '08',
-    borderRadius: BorderRadius.sm,
-    padding: Spacing.md,
-    marginHorizontal: Spacing.lg,
-    marginTop: Spacing.sm,
-    marginBottom: Spacing.lg, // Adiciona margem no final
-    borderLeftWidth: 3,
-    borderLeftColor: Colors.info,
-    borderRightWidth: 3,
-    borderRightColor: Colors.info,
-  },
-
-  summaryTitle: {
-    fontSize: Typography.fontSize.footnote,
-    fontWeight: Typography.fontWeight.semiBold,
-    color: Colors.text.primary,
-    marginBottom: Spacing.xs,
-  },
-
-  summaryItem: {
-    fontSize: Typography.fontSize.footnote,
-    color: Colors.text.secondary,
-    fontWeight: Typography.fontWeight.medium,
-    marginBottom: 2,
-  },
-
-  summaryBonus: {
-    fontSize: Typography.fontSize.footnote,
-    color: Colors.success,
-    fontWeight: Typography.fontWeight.medium,
-    marginBottom: 2,
+    backgroundColor: C.primary + '10',
+    borderColor: C.primary + '30',
   },
 
   // Empty State
@@ -1295,18 +1502,18 @@ const styles = StyleSheet.create({
   emptyTitle: {
     fontSize: Typography.fontSize.body,
     fontWeight: Typography.fontWeight.semiBold,
-    color: Colors.text.primary,
+    color: C.text.primary,
     marginTop: Spacing.md,
     marginBottom: Spacing.xs,
   },
 
   emptySubtitle: {
     fontSize: Typography.fontSize.subhead,
-    color: Colors.text.secondary,
+    color: C.text.secondary,
     textAlign: 'center',
   },
 
-  // Registered Hours Section (Nueva estructura visual)
+  // Registered Hours Section
   registeredHoursSection: {
     paddingHorizontal: Spacing.lg,
     paddingVertical: Spacing.md,
@@ -1328,13 +1535,13 @@ const styles = StyleSheet.create({
   registeredHoursTitle: {
     fontSize: 12,
     fontWeight: '600',
-    color: Colors.text.secondary,
+    color: C.text.secondary,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
   },
 
   registeredHoursDetails: {
-    display: 'flex', 
+    display: 'flex',
     justifyContent: 'space-between',
     alignContent: 'center',
     flexDirection: 'row',
@@ -1347,7 +1554,7 @@ const styles = StyleSheet.create({
 
   contextInfoText: {
     fontSize: 11,
-    color: Colors.text.tertiary,
+    color: C.text.tertiary,
     fontWeight: '500',
     margin: 2,
   },
@@ -1358,16 +1565,16 @@ const styles = StyleSheet.create({
     gap: 4,
     paddingHorizontal: 8,
     paddingVertical: 4,
-    backgroundColor: Colors.error + '10',
+    backgroundColor: C.error + '10',
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: Colors.error + '20',
+    borderColor: C.error + '20',
   },
 
   clearButtonText: {
     fontSize: 11,
     fontWeight: '600',
-    color: Colors.error,
+    color: C.error,
     textTransform: 'uppercase',
     letterSpacing: 0.3,
   },
@@ -1379,7 +1586,7 @@ const styles = StyleSheet.create({
   registeredHoursTime: {
     fontSize: 16,
     fontWeight: '600',
-    color: Colors.text.primary,
+    color: C.text.primary,
     letterSpacing: 0.3,
   },
 
@@ -1389,9 +1596,6 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderRadius: 16,
     borderWidth: 1,
-  },
-
-  extrasContent: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
@@ -1404,7 +1608,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
 
-  // Novos estilos para composição de valor clean
+  // Value calculation
   valueCalculationDetails: {
     flexDirection: 'column',
     gap: Spacing.xs,
@@ -1420,37 +1624,208 @@ const styles = StyleSheet.create({
   valueCalculationText: {
     fontSize: 13,
     fontWeight: '500',
-    color: Colors.text.secondary,
+    color: C.text.secondary,
     flex: 1,
   },
 
   valueCalculationAmount: {
     fontSize: 13,
     fontWeight: '600',
-    color: Colors.text.primary,
+    color: C.text.primary,
     textAlign: 'right',
   },
 
-  // Container e texto para origem dos valores
   valueSourceContainer: {
     marginTop: Spacing.sm,
     paddingTop: Spacing.xs,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: Colors.border.light,
+    borderTopColor: C.border.light,
   },
 
   valueSourceText: {
     fontSize: 10,
     fontWeight: '500',
-    color: Colors.text.tertiary,
+    color: C.text.tertiary,
     textAlign: 'center',
     letterSpacing: 0.2,
   },
 
   splitInlineBadge: {
-    backgroundColor: Colors.info + '15',
-    borderColor: Colors.info + '30',
+    backgroundColor: C.info + '15',
+    borderColor: C.info + '30',
     marginRight: Spacing.sm,
+  },
+
+  // "Quem está também"
+  coworkersRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginTop: Spacing.sm,
+    overflow: 'hidden',
+  },
+
+  coworkerOverflow: {
+    width: 52,
+    alignItems: 'center',
+    marginRight: Spacing.sm,
+  },
+  coworkerOverflowCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: C.border.light,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  coworkerOverflowText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: C.text.secondary,
+    marginTop: 3,
+  },
+
+  // Coworkers detail Modal
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
+  modalSheet: {
+    backgroundColor: C.background.elevated,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    maxHeight: '75%',
+    paddingBottom: 32,
+  },
+  modalHeader: {
+    alignItems: 'center',
+    paddingTop: 10,
+    paddingHorizontal: Spacing.lg,
+    paddingBottom: Spacing.md,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: C.border.light,
+  },
+  modalTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: Spacing.sm,
+    width: '100%',
+  },
+  modalTitle: {
+    fontSize: Typography.fontSize.body,
+    fontWeight: Typography.fontWeight.semiBold,
+    color: C.text.primary,
+  },
+  modalSubtitle: {
+    fontSize: Typography.fontSize.footnote,
+    color: C.text.secondary,
+    marginTop: 2,
+  },
+  modalClose: {
+    padding: 4,
+  },
+  modalList: {
+    flexGrow: 0,
+  },
+  modalListContent: {
+    paddingHorizontal: Spacing.lg,
+    paddingTop: Spacing.sm,
+  },
+  modalPersonRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: Spacing.sm,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: C.border.light,
+  },
+  modalPersonInfo: {
+    flex: 1,
+    marginLeft: Spacing.sm,
+  },
+  modalPersonName: {
+    fontSize: Typography.fontSize.subhead,
+    fontWeight: Typography.fontWeight.medium,
+    color: C.text.primary,
+  },
+  modalPersonDesc: {
+    fontSize: Typography.fontSize.footnote,
+    color: C.text.secondary,
+    marginTop: 1,
+  },
+  modalPersonCouncil: {
+    fontSize: Typography.fontSize.caption1,
+    color: C.text.tertiary,
+    marginTop: 1,
+  },
+
+  // Vacancy badge
+  vacancyBadge: {
+    backgroundColor: C.warning + '20',
+    borderRadius: 10,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    marginLeft: Spacing.xs,
+  },
+  vacancyBadgeText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: C.warning,
+  },
+
+  // Vacancy section in modal
+  vacancySection: {
+    marginTop: Spacing.md,
+    paddingTop: Spacing.sm,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: C.border.light,
+  },
+  vacancySectionTitle: {
+    fontSize: Typography.fontSize.caption1,
+    fontWeight: Typography.fontWeight.semiBold,
+    color: C.text.tertiary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+    marginBottom: Spacing.xs,
+  },
+  vacancyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: Spacing.xs,
+  },
+  vacancyGroupName: {
+    fontSize: Typography.fontSize.footnote,
+    fontWeight: Typography.fontWeight.medium,
+    color: C.text.primary,
+  },
+  vacancyInstitution: {
+    fontSize: Typography.fontSize.caption1,
+    color: C.text.tertiary,
+  },
+  vacancyCount: {
+    fontSize: Typography.fontSize.footnote,
+    fontWeight: Typography.fontWeight.semiBold,
+    color: C.warning,
+    marginLeft: Spacing.sm,
+  },
+
+  // Modal grouped sections
+  modalGroupHeader: {
+    paddingTop: Spacing.md,
+    paddingBottom: Spacing.xs,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: C.border.light,
+    marginBottom: Spacing.xs,
+  },
+  modalGroupName: {
+    fontSize: Typography.fontSize.footnote,
+    fontWeight: Typography.fontWeight.semiBold,
+    color: C.text.primary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  modalGroupInstitution: {
+    fontSize: Typography.fontSize.caption1,
+    color: C.text.tertiary,
+    marginTop: 1,
   },
 });
 

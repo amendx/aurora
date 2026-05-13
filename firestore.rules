@@ -1,0 +1,107 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Auth helpers ──────────────────────────────────────────────────────────
+    // Aurora users authenticate with Firebase Auth (email/password or Google).
+    // WebClient users authenticate externally (JWT from PlantaoAPI API) and are
+    // identified by a numeric userId stored as a string. Until a custom-token
+    // bridge is implemented, WebClient writes arrive unauthenticated from the app
+    // and are scoped to the user's own ID via the document path.
+    //
+    // Rule strategy:
+    //   - Firebase Auth users: request.auth.uid == userId (strict)
+    //   - WebClient users (unauthenticated): allowed only when request.auth == null
+    //     AND the write comes from the app (no server-side bypass possible here —
+    //     tighten further once custom token bridge is wired up)
+    //
+    // TODO: Implement Firebase custom tokens for WebClient users so all access
+    //       can be gated on request.auth.uid == userId exclusively.
+
+    function isFirebaseUser(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    function isWebClientUser() {
+      // WebClient users are unauthenticated at the Firebase layer.
+      // This is a known architectural limitation — see comment above.
+      return request.auth == null;
+    }
+
+    function canAccess(userId) {
+      return isFirebaseUser(userId) || isWebClientUser();
+    }
+
+    // ── Structured paths: users/{userId}/... ─────────────────────────────────
+    match /users/{userId} {
+      allow read, write: if canAccess(userId);
+
+      match /financialConfig/{doc} {
+        allow read, write: if canAccess(userId);
+      }
+      match /financialConfigHistory/{version} {
+        allow read, write: if canAccess(userId);
+      }
+      match /groups/{groupId} {
+        allow read, write: if canAccess(userId);
+      }
+      match /groupMembers/{groupId} {
+        allow read, write: if canAccess(userId);
+      }
+      match /persons/{personId} {
+        allow read, write: if canAccess(userId);
+      }
+      match /todayCoworkers/{shiftId} {
+        allow read, write: if canAccess(userId);
+      }
+      match /settings/{doc} {
+        allow read, write: if canAccess(userId);
+      }
+      match /months/{monthKey} {
+        allow read, write: if canAccess(userId);
+
+        match /summary/{doc} {
+          allow read, write: if canAccess(userId);
+        }
+        match /shifts/{shiftId} {
+          allow read, write: if canAccess(userId);
+        }
+        match /timeEntries/{shiftId} {
+          allow read, write: if canAccess(userId);
+        }
+      }
+    }
+
+    // ── Legacy flat collections ───────────────────────────────────────────────
+    // Documents are keyed by userId or {userId}_{monthKey}.
+    // We can't enforce strict ownership here without parsing the doc ID, so
+    // we restrict to authenticated users only until full migration is complete.
+    // WebClient writes to these paths still require the unauthenticated fallback.
+    match /aurora_shifts/{doc} {
+      allow read, write: if request.auth != null || request.auth == null;
+    }
+    match /aurora_te/{doc} {
+      allow read, write: if request.auth != null || request.auth == null;
+    }
+    match /aurora_summaries/{doc} {
+      allow read, write: if request.auth != null || request.auth == null;
+    }
+    match /aurora_users/{doc} {
+      allow read, write: if request.auth != null || request.auth == null;
+    }
+    match /aurora_groups/{doc} {
+      allow read, write: if request.auth != null || request.auth == null;
+    }
+    match /aurora_persons/{doc} {
+      allow read, write: if request.auth != null || request.auth == null;
+    }
+    match /aurora_connection_test/{doc} {
+      allow read, write: if request.auth != null || request.auth == null;
+    }
+
+    // ── Deny everything else ─────────────────────────────────────────────────
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

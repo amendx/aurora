@@ -1,9 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useContext } from 'react';
 import {
   View,
   Text,
   ScrollView,
-  StyleSheet,
   TextInput,
   Pressable,
   Alert,
@@ -11,9 +10,16 @@ import {
 } from 'react-native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
-import { Colors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
+import { useColors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
+import { AuthContext } from '../context/AuthContext';
+import LocalCache from '../services/LocalCache';
 
 export default function ConfigScreenPremium({ navigation }) {
+  const { user } = useContext(AuthContext);
+  const userId = user?.id || 0;
+  const C = useColors();
+  const s = makeStyles(C);
+
   const [hourValues, setHourValues] = useState({
     weekday: { day: 130, night: 143 },
     weekend: { day: 170, night: 185 },
@@ -26,11 +32,18 @@ export default function ConfigScreenPremium({ navigation }) {
 
   const loadSavedConfigurations = async () => {
     try {
-      const savedConfig = await SecureStore.getItemAsync('shift_configurations');
-      if (savedConfig) {
-        const parsedConfig = JSON.parse(savedConfig);
+      // Prefer LocalCache (post-migration). Fall back to SecureStore for compat.
+      let parsedConfig = null;
+      if (userId) {
+        parsedConfig = await LocalCache.getFinancialConfig(userId);
+      }
+      if (!parsedConfig) {
+        const raw = await SecureStore.getItemAsync('shift_configurations');
+        if (raw) parsedConfig = JSON.parse(raw);
+      }
+      if (parsedConfig) {
         console.log('Configurações carregadas:', parsedConfig);
-        
+
         if (parsedConfig.hourValues) {
           setHourValues(parsedConfig.hourValues);
         }
@@ -48,6 +61,9 @@ export default function ConfigScreenPremium({ navigation }) {
         }
         if (parsedConfig.fridayNightAsWeekend !== undefined) {
           setFridayNightAsWeekend(parsedConfig.fridayNightAsWeekend);
+        }
+        if (parsedConfig.fractionalExtraHours !== undefined) {
+          setFractionalExtraHours(parsedConfig.fractionalExtraHours);
         }
       }
     } catch (error) {
@@ -71,6 +87,7 @@ export default function ConfigScreenPremium({ navigation }) {
   });
 
   const [fridayNightAsWeekend, setFridayNightAsWeekend] = useState(false);
+  const [fractionalExtraHours, setFractionalExtraHours] = useState(true);
 
   const handleHourChange = (period, type, value) => {
     setHourValues((prev) => ({
@@ -108,6 +125,9 @@ export default function ConfigScreenPremium({ navigation }) {
 
   const saveConfigurations = async () => {
     try {
+      const now = new Date();
+      const effectiveFrom = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+
       const configData = {
         hourValues,
         loyaltyEnabled,
@@ -115,11 +135,28 @@ export default function ConfigScreenPremium({ navigation }) {
         bonusEnabled,
         bonus,
         fridayNightAsWeekend,
-        savedAt: new Date().toISOString(),
+        fractionalExtraHours,
+        savedAt: now.toISOString(),
       };
-      
+
+      // Keep writing to SecureStore — ShiftValueCalculator still reads from there.
       await SecureStore.setItemAsync('shift_configurations', JSON.stringify(configData));
-      
+
+      // Also write to LocalCache with versioning so MonthSummary can track config changes.
+      if (userId) {
+        const existing = await LocalCache.getFinancialConfig(userId);
+        const nextVersion = (existing?.version || 0) + 1;
+        const lcConfig = {
+          ...configData,
+          userId,
+          version:       nextVersion,
+          effectiveFrom,
+          updatedAt:     now.toISOString(),
+        };
+        // saveFinancialConfig marks current + next month summaries dirty automatically
+        await LocalCache.saveFinancialConfig(userId, lcConfig);
+      }
+
       Alert.alert(
         'Configurações Salvas',
         'Suas configurações foram salvas com sucesso!',
@@ -160,6 +197,7 @@ export default function ConfigScreenPremium({ navigation }) {
             setBonusEnabled(false);
             setBonus({ percentage: 20, startMonth: 2, endMonth: 4 });
             setFridayNightAsWeekend(false);
+            setFractionalExtraHours(true);
           },
         },
       ]
@@ -168,20 +206,20 @@ export default function ConfigScreenPremium({ navigation }) {
 
   // GroupsScreen structure: groupCard > groupHeader (titleRow + stats) > groupMembers > memberCard rows
   const renderShiftInputField = (label, value, onChangeText, prefix = 'R$') => (
-    <View style={styles.shiftFieldRow}>
-      <View style={styles.shiftFieldInfo}>
-        <Text style={styles.shiftFieldName}>{label}</Text>
-        <Text style={styles.shiftFieldRole}>Valor por hora</Text>
+    <View style={s.shiftFieldRow}>
+      <View style={s.shiftFieldInfo}>
+        <Text style={s.shiftFieldName}>{label}</Text>
+        <Text style={s.shiftFieldRole}>Valor por hora</Text>
       </View>
-      <View style={styles.shiftFieldInput}>
-        <Text style={styles.shiftInputPrefix}>{prefix}</Text>
+      <View style={s.shiftFieldInput}>
+        <Text style={s.shiftInputPrefix}>{prefix}</Text>
         <TextInput
-          style={styles.shiftTextInput}
+          style={s.shiftTextInput}
           value={String(value || '')}
           onChangeText={onChangeText}
           keyboardType="numeric"
           placeholder="0,00"
-          placeholderTextColor={Colors.text.placeholder}
+          placeholderTextColor={C.text.placeholder}
           selectTextOnFocus={true}
         />
       </View>
@@ -189,144 +227,116 @@ export default function ConfigScreenPremium({ navigation }) {
   );
 
   return (
-    <View style={styles.container}>
-      <ScrollView 
-        style={styles.scrollView} 
-        contentContainerStyle={styles.scrollContent}
+    <View style={s.container}>
+      <ScrollView
+        style={s.scrollView}
+        contentContainerStyle={s.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        {/* Menu de Navegação */}
-        <View style={styles.sectionCard}>
-          <View style={styles.cardHeader}>
-            <View style={styles.cardIconContainer}>
-              <Ionicons name="menu-outline" size={20} color={Colors.accent} />
-            </View>
-            <Text style={styles.cardTitle}>Menu</Text>
-          </View>
-          
-          <Pressable
-            style={styles.menuItem}
-            onPress={() => navigation.navigate('GroupsScreen')}
-          >
-            <View style={styles.menuItemContent}>
-              <View style={styles.menuItemIcon}>
-                <Ionicons name="people" size={20} color={Colors.primary} />
-              </View>
-              <View style={styles.menuItemInfo}>
-                <Text style={styles.menuItemTitle}>Grupos</Text>
-                <Text style={styles.menuItemDescription}>
-                  Visualize seus grupos e colegas de plantão
-                </Text>
-              </View>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color={Colors.text.tertiary} />
-          </Pressable>
-        </View>
-
         {/* Valores durante a semana */}
-        <View style={styles.valueCard}>
-          <View style={styles.valueCardHeader}>
-            <View style={styles.valueInfo}>
-              <View style={styles.valueTitleRow}>
-                <View style={[styles.valueColorDot, { backgroundColor: Colors.primary }]} />
-                <Text style={styles.valueName}>Valores durante a semana</Text>
+        <View style={s.valueCard}>
+          <View style={s.valueCardHeader}>
+            <View style={s.valueInfo}>
+              <View style={s.valueTitleRow}>
+                <View style={[s.valueColorDot, { backgroundColor: C.primary }]} />
+                <Text style={s.valueName}>Valores durante a semana</Text>
               </View>
-              <View style={styles.valueStats}>
-                <View style={styles.valueStatItem}>
-                  <MaterialCommunityIcons name="calendar-outline" size={16} color={Colors.text.secondary} />
-                  <Text style={styles.valueStatText}>2 turnos</Text>
+              <View style={s.valueStats}>
+                <View style={s.valueStatItem}>
+                  <MaterialCommunityIcons name="calendar-outline" size={16} color={C.text.secondary} />
+                  <Text style={s.valueStatText}>2 turnos</Text>
                 </View>
               </View>
             </View>
           </View>
-          <View style={styles.valueFields}>
+          <View style={s.valueFields}>
             {renderShiftInputField('Manhã / Tarde', hourValues.weekday.day, (v) => handleHourChange('weekday', 'day', v))}
             {renderShiftInputField('Noite', hourValues.weekday.night, (v) => handleHourChange('weekday', 'night', v))}
           </View>
         </View>
 
         {/* Valores fim de semana */}
-        <View style={styles.valueCard}>
-          <View style={styles.valueCardHeader}>
-            <View style={styles.valueInfo}>
-              <View style={styles.valueTitleRow}>
-                <View style={[styles.valueColorDot, { backgroundColor: Colors.success }]} />
-                <Text style={styles.valueName}>Valores fim de semana</Text>
+        <View style={s.valueCard}>
+          <View style={s.valueCardHeader}>
+            <View style={s.valueInfo}>
+              <View style={s.valueTitleRow}>
+                <View style={[s.valueColorDot, { backgroundColor: C.success }]} />
+                <Text style={s.valueName}>Valores fim de semana</Text>
               </View>
-              <View style={styles.valueStats}>
-                <View style={styles.valueStatItem}>
-                  <MaterialCommunityIcons name="calendar" size={16} color={Colors.text.secondary} />
-                  <Text style={styles.valueStatText}>2 turnos</Text>
+              <View style={s.valueStats}>
+                <View style={s.valueStatItem}>
+                  <MaterialCommunityIcons name="calendar" size={16} color={C.text.secondary} />
+                  <Text style={s.valueStatText}>2 turnos</Text>
                 </View>
               </View>
             </View>
           </View>
-          <View style={styles.valueFields}>
+          <View style={s.valueFields}>
             {renderShiftInputField('Manhã / Tarde', hourValues.weekend.day, (v) => handleHourChange('weekend', 'day', v))}
             {renderShiftInputField('Noite', hourValues.weekend.night, (v) => handleHourChange('weekend', 'night', v))}
           </View>
         </View>
 
         {/* Configurações adicionais */}
-        <View style={styles.sectionCard}>
-          <View style={styles.cardHeader}>
-            <View style={styles.cardIconContainer}>
-              <Ionicons name="settings-outline" size={20} color={Colors.warning} />
+        <View style={s.sectionCard}>
+          <View style={s.cardHeader}>
+            <View style={s.cardIconContainer}>
+              <Ionicons name="settings-outline" size={20} color={C.warning} />
             </View>
-            <Text style={styles.cardTitle}>Configurações adicionais</Text>
+            <Text style={s.cardTitle}>Configurações adicionais</Text>
           </View>
 
           {/* Fidelização */}
-          <View style={styles.featureContainer}>
-            <View style={styles.featureHeader}>
-              <View style={styles.featureInfo}>
-                <Text style={styles.featureTitle}>Fidelização</Text>
-                <Text style={styles.featureDescription}>
+          <View style={s.featureContainer}>
+            <View style={s.featureHeader}>
+              <View style={s.featureInfo}>
+                <Text style={s.featureTitle}>Fidelização</Text>
+                <Text style={s.featureDescription}>
                   Bônus baseado em horas trabalhadas no mês
                 </Text>
               </View>
               <Switch
                 value={loyaltyEnabled}
                 onValueChange={setLoyaltyEnabled}
-                trackColor={{ 
-                  false: Colors.interactive.disabled, 
-                  true: Colors.primary + '40' 
+                trackColor={{
+                  false: C.interactive.disabled,
+                  true: C.primary + '40'
                 }}
-                thumbColor={loyaltyEnabled ? Colors.primary : Colors.background.primary}
+                thumbColor={loyaltyEnabled ? C.primary : C.interactive.inactive}
               />
             </View>
-            
+
             {loyaltyEnabled && (
-              <View style={styles.optionsContainer}>
+              <View style={s.optionsContainer}>
                 {loyaltyOptions.map((option, index) => (
                   <Pressable
                     key={index}
                     style={[
-                      styles.optionItem,
-                      option.active && styles.optionItemActive,
+                      s.optionItem,
+                      option.active && s.optionItemActive,
                     ]}
                     onPress={() => handleLoyaltyOptionToggle(index)}
                   >
-                    <View style={styles.optionContent}>
+                    <View style={s.optionContent}>
                       <Text style={[
-                        styles.optionTitle,
-                        option.active && styles.optionTitleActive,
+                        s.optionTitle,
+                        option.active && s.optionTitleActive,
                       ]}>
                         {option.percentage}% de Bônus
                       </Text>
                       <Text style={[
-                        styles.optionSubtitle,
-                        option.active && styles.optionSubtitleActive,
+                        s.optionSubtitle,
+                        option.active && s.optionSubtitleActive,
                       ]}>
                         Para ≥ {option.minHours} horas no mês
                       </Text>
                     </View>
                     <View style={[
-                      styles.radioButton,
-                      option.active && styles.radioButtonActive,
+                      s.radioButton,
+                      option.active && s.radioButtonActive,
                     ]}>
                       {option.active && (
-                        <Ionicons name="checkmark" size={12} color={Colors.background.primary} />
+                        <Ionicons name="checkmark" size={12} color={C.background.primary} />
                       )}
                     </View>
                   </Pressable>
@@ -336,84 +346,84 @@ export default function ConfigScreenPremium({ navigation }) {
           </View>
 
           {/* Bônus Geral */}
-          <View style={styles.featureContainer}>
-            <View style={styles.featureHeader}>
-              <View style={styles.featureInfo}>
-                <Text style={styles.featureTitle}>Bônus geral</Text>
-                <Text style={styles.featureDescription}>
+          <View style={s.featureContainer}>
+            <View style={s.featureHeader}>
+              <View style={s.featureInfo}>
+                <Text style={s.featureTitle}>Bônus geral</Text>
+                <Text style={s.featureDescription}>
                   Percentual adicional por período específico
                 </Text>
               </View>
               <Switch
                 value={bonusEnabled}
                 onValueChange={setBonusEnabled}
-                trackColor={{ 
-                  false: Colors.interactive.disabled, 
-                  true: Colors.success + '40' 
+                trackColor={{
+                  false: C.interactive.disabled,
+                  true: C.success + '40'
                 }}
-                thumbColor={bonusEnabled ? Colors.success : Colors.background.primary}
+                thumbColor={bonusEnabled ? C.success : C.interactive.inactive}
               />
             </View>
-            
+
             {bonusEnabled && (
-              <View style={styles.bonusContainer}>
-                <View style={styles.inputGrid}>
-                  <View style={styles.inputGroup}>
-                    <Text style={styles.inputLabel}>Percentual</Text>
-                    <View style={styles.inputContainer}>
+              <View style={s.bonusContainer}>
+                <View style={s.inputGrid}>
+                  <View style={s.inputGroup}>
+                    <Text style={s.inputLabel}>Percentual</Text>
+                    <View style={s.inputContainer}>
                       <TextInput
-                        style={styles.textInput}
+                        style={s.textInput}
                         value={String(bonus.percentage || '')}
                         onChangeText={(value) => handleBonusChange('percentage', value)}
                         keyboardType="numeric"
                         placeholder="0"
-                        placeholderTextColor={Colors.text.placeholder}
+                        placeholderTextColor={C.text.placeholder}
                       />
-                      <Text style={styles.inputSuffix}>%</Text>
+                      <Text style={s.inputSuffix}>%</Text>
                     </View>
                   </View>
                 </View>
 
-                <Text style={styles.periodLabel}>Período de Vigência</Text>
-                <View style={styles.inputGrid}>
-                  <View style={styles.inputGroup}>
-                    <Text style={styles.inputLabel}>Mês Inicial</Text>
-                    <View style={styles.inputContainer}>
+                <Text style={s.periodLabel}>Período de Vigência</Text>
+                <View style={s.inputGrid}>
+                  <View style={s.inputGroup}>
+                    <Text style={s.inputLabel}>Mês Inicial</Text>
+                    <View style={s.inputContainer}>
                       <TextInput
-                        style={styles.textInput}
+                        style={s.textInput}
                         value={String(bonus.startMonth || '')}
                         onChangeText={(value) => handleBonusChange('startMonth', value)}
                         keyboardType="numeric"
                         placeholder="1"
-                        placeholderTextColor={Colors.text.placeholder}
+                        placeholderTextColor={C.text.placeholder}
                       />
                     </View>
                   </View>
-                  
-                  <View style={styles.inputGroup}>
-                    <Text style={styles.inputLabel}>Mês Final</Text>
-                    <View style={styles.inputContainer}>
+
+                  <View style={s.inputGroup}>
+                    <Text style={s.inputLabel}>Mês Final</Text>
+                    <View style={s.inputContainer}>
                       <TextInput
-                        style={styles.textInput}
+                        style={s.textInput}
                         value={String(bonus.endMonth || '')}
                         onChangeText={(value) => handleBonusChange('endMonth', value)}
                         keyboardType="numeric"
                         placeholder="12"
-                        placeholderTextColor={Colors.text.placeholder}
+                        placeholderTextColor={C.text.placeholder}
                       />
                     </View>
                   </View>
                 </View>
 
-                <View style={styles.calculationCard}>
-                  <Text style={styles.calculationTitle}>📊 Exemplo de Cálculo</Text>
-                  <Text style={styles.calculationText}>
+                <View style={s.calculationCard}>
+                  <Text style={s.calculationTitle}>📊 Exemplo de Cálculo</Text>
+                  <Text style={s.calculationText}>
                     Valor base: R$ {parseFloat(hourValues.weekday.day || 0).toFixed(2)} (Dia - Semana)
                   </Text>
-                  <Text style={styles.calculationText}>
+                  <Text style={s.calculationText}>
                     Com bônus ({parseFloat(bonus.percentage || 0)}%): R$ {(parseFloat(hourValues.weekday.day || 0) + (parseFloat(hourValues.weekday.day || 0) * parseFloat(bonus.percentage || 0) / 100)).toFixed(2)}
                   </Text>
-                  <Text style={styles.calculationText}>
+                  <Text style={s.calculationText}>
                     Vigência: {getMonthName(parseInt(bonus.startMonth) || 1)} a {getMonthName(parseInt(bonus.endMonth) || 1)}
                   </Text>
                 </View>
@@ -422,36 +432,68 @@ export default function ConfigScreenPremium({ navigation }) {
           </View>
 
           {/* Sexta-feira Noturna */}
-          <View style={styles.featureContainer}>
-            <View style={styles.featureHeader}>
-              <View style={styles.featureInfo}>
-                <Text style={styles.featureTitle}>Sexta-feira Noturna</Text>
-                <Text style={styles.featureDescription}>
+          <View style={s.featureContainer}>
+            <View style={s.featureHeader}>
+              <View style={s.featureInfo}>
+                <Text style={s.featureTitle}>Sexta-feira Noturna</Text>
+                <Text style={s.featureDescription}>
                   Aplicar valor de fim de semana para plantões noturnos de sexta
                 </Text>
               </View>
               <Switch
                 value={fridayNightAsWeekend}
                 onValueChange={setFridayNightAsWeekend}
-                trackColor={{ 
-                  false: Colors.interactive.disabled, 
-                  true: Colors.warning + '40' 
+                trackColor={{
+                  false: C.interactive.disabled,
+                  true: C.warning + '40'
                 }}
-                thumbColor={fridayNightAsWeekend ? Colors.warning : Colors.background.primary}
+                thumbColor={fridayNightAsWeekend ? C.warning : C.interactive.inactive}
               />
             </View>
-            
+
             {fridayNightAsWeekend && (
-              <View style={styles.calculationCard}>
-                <Text style={styles.calculationTitle}>🌙 Regra Especial</Text>
-                <Text style={styles.calculationText}>
+              <View style={s.calculationCard}>
+                <Text style={s.calculationTitle}>🌙 Regra Especial</Text>
+                <Text style={s.calculationText}>
                   Plantões noturnos de sexta-feira usarão valores de fim de semana
                 </Text>
-                <Text style={styles.calculationText}>
+                <Text style={s.calculationText}>
                   Valor noturno sexta: R$ {parseFloat(hourValues.weekend.night || 0).toFixed(2)}/h (igual ao FDS)
                 </Text>
-                <Text style={styles.calculationText}>
+                <Text style={s.calculationText}>
                   Valor para 12h: R$ {(parseFloat(hourValues.weekend.night || 0) * 12).toFixed(2)}
+                </Text>
+              </View>
+            )}
+          </View>
+
+          {/* Hora Extra Fracionada */}
+          <View style={s.featureContainer}>
+            <View style={s.featureHeader}>
+              <View style={s.featureInfo}>
+                <Text style={s.featureTitle}>Hora Extra Fracionada</Text>
+                <Text style={s.featureDescription}>
+                  Quando desativado, apenas horas completas de extra são contabilizadas
+                </Text>
+              </View>
+              <Switch
+                value={fractionalExtraHours}
+                onValueChange={setFractionalExtraHours}
+                trackColor={{
+                  false: C.interactive.disabled,
+                  true: C.primary + '40',
+                }}
+                thumbColor={fractionalExtraHours ? C.primary : C.interactive.inactive}
+              />
+            </View>
+            {!fractionalExtraHours && (
+              <View style={s.calculationCard}>
+                <Text style={s.calculationTitle}>⏱ Regra de Arredondamento</Text>
+                <Text style={s.calculationText}>
+                  Minutos extras são ignorados — somente horas inteiras contam
+                </Text>
+                <Text style={s.calculationText}>
+                  Exemplo: 6h33 → conta como 6h (sem extra)
                 </Text>
               </View>
             )}
@@ -459,21 +501,21 @@ export default function ConfigScreenPremium({ navigation }) {
         </View>
 
         {/* Action Buttons */}
-        <View style={styles.buttonContainer}>
-          <Pressable 
-            style={[styles.button, styles.resetButton]}
+        <View style={s.buttonContainer}>
+          <Pressable
+            style={[s.button, s.resetButton]}
             onPress={resetToDefaults}
           >
-            <Ionicons name="refresh-outline" size={18} color={Colors.error} />
-            <Text style={styles.resetButtonText}>Restaurar Padrões</Text>
+            <Ionicons name="refresh-outline" size={18} color={C.error} />
+            <Text style={s.resetButtonText}>Restaurar Padrões</Text>
           </Pressable>
-          
-          <Pressable 
-            style={[styles.button, styles.saveButton]}
+
+          <Pressable
+            style={[s.button, s.saveButton]}
             onPress={saveConfigurations}
           >
-            <Ionicons name="checkmark-outline" size={18} color={Colors.background.primary} />
-            <Text style={styles.saveButtonText}>Salvar</Text>
+            <Ionicons name="checkmark-outline" size={18} color={C.background.primary} />
+            <Text style={s.saveButtonText}>Salvar</Text>
           </Pressable>
         </View>
       </ScrollView>
@@ -481,16 +523,16 @@ export default function ConfigScreenPremium({ navigation }) {
   );
 }
 
-const styles = StyleSheet.create({
+const makeStyles = (C) => ({
   container: {
     flex: 1,
-    backgroundColor: Colors.background.secondary,
+    backgroundColor: C.background.secondary,
   },
-  
+
   scrollView: {
     flex: 1,
   },
-  
+
   scrollContent: {
     padding: Spacing.lg,
     paddingBottom: Spacing.xxl,
@@ -498,7 +540,7 @@ const styles = StyleSheet.create({
 
   // Section Card (seguindo padrão HomeScreenPremium)
   sectionCard: {
-    backgroundColor: Colors.background.primary,
+    backgroundColor: C.background.primary,
     borderRadius: BorderRadius.lg,
     marginBottom: Spacing.lg,
     padding: Spacing.lg,
@@ -515,7 +557,7 @@ const styles = StyleSheet.create({
     width: 36,
     height: 36,
     borderRadius: 18,
-    backgroundColor: Colors.primary + '15',
+    backgroundColor: C.primary + '15',
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: Spacing.sm,
@@ -524,20 +566,16 @@ const styles = StyleSheet.create({
   cardTitle: {
     fontSize: Typography.fontSize.headline,
     fontWeight: Typography.fontWeight.semiBold,
-    color: Colors.text.primary,
+    color: C.text.primary,
   },
 
   // ── Shift Value Cards (structure copied from GroupsScreen) ──────────────
   // groupCard
   valueCard: {
-    backgroundColor: '#ffffff',
+    backgroundColor: C.background.primary,
     borderRadius: 16,
     marginBottom: 16,
-    elevation: 4,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
+    ...Shadows.medium,
   },
   // groupHeader
   valueCardHeader: {
@@ -567,7 +605,7 @@ const styles = StyleSheet.create({
   valueName: {
     fontSize: 18,
     fontWeight: '600',
-    color: '#1e293b',
+    color: C.text.primary,
   },
   // groupStats
   valueStats: {
@@ -585,12 +623,12 @@ const styles = StyleSheet.create({
   // statText
   valueStatText: {
     fontSize: 12,
-    color: '#64748b',
+    color: C.text.secondary,
   },
   // groupMembers
   valueFields: {
     borderTopWidth: 1,
-    borderTopColor: '#e2e8f0',
+    borderTopColor: C.border.light,
     paddingTop: 16,
     paddingHorizontal: 16,
     paddingBottom: 16,
@@ -599,7 +637,7 @@ const styles = StyleSheet.create({
   shiftFieldRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#f8fafc',
+    backgroundColor: C.background.secondary,
     borderRadius: 12,
     padding: 12,
     marginBottom: 8,
@@ -612,86 +650,38 @@ const styles = StyleSheet.create({
   shiftFieldName: {
     fontSize: 14,
     fontWeight: '600',
-    color: '#1e293b',
+    color: C.text.primary,
   },
   // memberRole
   shiftFieldRole: {
     fontSize: 12,
-    color: '#64748b',
+    color: C.text.secondary,
     marginTop: 2,
   },
   // memberActions area — input on the right
   shiftFieldInput: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#ffffff',
+    backgroundColor: C.background.primary,
     borderRadius: 10,
     paddingHorizontal: 10,
     paddingVertical: 6,
-    elevation: 1,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 2,
+    ...Shadows.small,
   },
   shiftInputPrefix: {
     fontSize: 12,
     fontWeight: '600',
-    color: '#3b82f6',
+    color: C.primary,
     marginRight: 4,
   },
   shiftTextInput: {
     fontSize: 16,
     fontWeight: '600',
-    color: '#1e293b',
+    color: C.text.primary,
     textAlign: 'center',
     minWidth: 64,
   },
   // ────────────────────────────────────────────────────────────────────────
-
-  // Menu Item Styles
-  menuItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: Spacing.md,
-    paddingHorizontal: Spacing.sm,
-    borderRadius: BorderRadius.md,
-    backgroundColor: Colors.background.secondary + '50',
-    marginBottom: Spacing.xs,
-  },
-
-  menuItemContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-
-  menuItemIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: Colors.primary + '15',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: Spacing.md,
-  },
-
-  menuItemInfo: {
-    flex: 1,
-  },
-
-  menuItemTitle: {
-    fontSize: Typography.fontSize.subhead,
-    fontWeight: Typography.fontWeight.semiBold,
-    color: Colors.text.primary,
-    marginBottom: 2,
-  },
-
-  menuItemDescription: {
-    fontSize: Typography.fontSize.footnote,
-    color: Colors.text.secondary,
-  },
 
   // Input Grid (2 campos por linha)
   inputGrid: {
@@ -701,7 +691,7 @@ const styles = StyleSheet.create({
 
   inputGroup: {
     flex: 1,
-    backgroundColor: Colors.background.secondary,
+    backgroundColor: C.background.secondary,
     borderRadius: 12,
     padding: Spacing.md,
     elevation: 2,
@@ -714,14 +704,14 @@ const styles = StyleSheet.create({
   inputLabel: {
     fontSize: Typography.fontSize.footnote,
     fontWeight: Typography.fontWeight.medium,
-    color: Colors.text.secondary,
+    color: C.text.secondary,
     marginBottom: Spacing.sm,
   },
 
   inputContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: Colors.background.primary,
+    backgroundColor: C.background.primary,
     borderRadius: 10,
     minHeight: 44,
     paddingHorizontal: Spacing.md,
@@ -735,14 +725,14 @@ const styles = StyleSheet.create({
   inputPrefix: {
     fontSize: Typography.fontSize.footnote,
     fontWeight: Typography.fontWeight.semiBold,
-    color: Colors.primary,
+    color: C.primary,
     marginRight: Spacing.xs,
   },
 
   inputSuffix: {
     fontSize: Typography.fontSize.footnote,
     fontWeight: Typography.fontWeight.semiBold,
-    color: Colors.primary,
+    color: C.primary,
     marginLeft: Spacing.xs,
   },
 
@@ -750,14 +740,14 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: Typography.fontSize.body,
     fontWeight: Typography.fontWeight.semiBold,
-    color: Colors.text.primary,
+    color: C.text.primary,
     textAlign: 'center',
   },
 
   // Feature Container
   featureContainer: {
     borderTopWidth: 1,
-    borderTopColor: Colors.border.light,
+    borderTopColor: C.border.light,
     paddingTop: Spacing.lg,
     marginTop: Spacing.lg,
   },
@@ -775,13 +765,13 @@ const styles = StyleSheet.create({
   featureTitle: {
     fontSize: Typography.fontSize.body,
     fontWeight: Typography.fontWeight.semiBold,
-    color: Colors.text.primary,
+    color: C.text.primary,
     marginBottom: 2,
   },
 
   featureDescription: {
     fontSize: Typography.fontSize.footnote,
-    color: Colors.text.secondary,
+    color: C.text.secondary,
   },
 
   // Options Container
@@ -792,17 +782,17 @@ const styles = StyleSheet.create({
   optionItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: Colors.background.secondary + '60',
+    backgroundColor: C.background.secondary + '60',
     borderRadius: BorderRadius.md,
     padding: Spacing.md,
     marginBottom: Spacing.sm,
     borderWidth: 1,
-    borderColor: Colors.border.light,
+    borderColor: C.border.light,
   },
 
   optionItemActive: {
-    backgroundColor: Colors.primary + '10',
-    borderColor: Colors.primary,
+    backgroundColor: C.primary + '10',
+    borderColor: C.primary,
   },
 
   optionContent: {
@@ -812,21 +802,21 @@ const styles = StyleSheet.create({
   optionTitle: {
     fontSize: Typography.fontSize.body,
     fontWeight: Typography.fontWeight.semiBold,
-    color: Colors.text.primary,
+    color: C.text.primary,
     marginBottom: 2,
   },
 
   optionTitleActive: {
-    color: Colors.primary,
+    color: C.primary,
   },
 
   optionSubtitle: {
     fontSize: Typography.fontSize.footnote,
-    color: Colors.text.secondary,
+    color: C.text.secondary,
   },
 
   optionSubtitleActive: {
-    color: Colors.primary,
+    color: C.primary,
   },
 
   radioButton: {
@@ -834,14 +824,14 @@ const styles = StyleSheet.create({
     height: 22,
     borderRadius: 11,
     borderWidth: 2,
-    borderColor: Colors.border.medium,
+    borderColor: C.border.medium,
     alignItems: 'center',
     justifyContent: 'center',
   },
 
   radioButtonActive: {
-    backgroundColor: Colors.primary,
-    borderColor: Colors.primary,
+    backgroundColor: C.primary,
+    borderColor: C.primary,
   },
 
   // Bonus Container
@@ -852,31 +842,31 @@ const styles = StyleSheet.create({
   periodLabel: {
     fontSize: Typography.fontSize.subhead,
     fontWeight: Typography.fontWeight.medium,
-    color: Colors.text.primary,
+    color: C.text.primary,
     marginTop: Spacing.md,
     marginBottom: Spacing.sm,
   },
 
   // Calculation Card
   calculationCard: {
-    backgroundColor: Colors.info + '10',
+    backgroundColor: C.info + '10',
     borderRadius: BorderRadius.md,
     padding: Spacing.md,
     marginTop: Spacing.md,
     borderLeftWidth: 4,
-    borderLeftColor: Colors.info,
+    borderLeftColor: C.info,
   },
 
   calculationTitle: {
     fontSize: Typography.fontSize.subhead,
     fontWeight: Typography.fontWeight.semiBold,
-    color: Colors.text.primary,
+    color: C.text.primary,
     marginBottom: Spacing.xs,
   },
 
   calculationText: {
     fontSize: Typography.fontSize.footnote,
-    color: Colors.text.secondary,
+    color: C.text.secondary,
     marginBottom: 2,
   },
 
@@ -899,26 +889,26 @@ const styles = StyleSheet.create({
   },
 
   resetButton: {
-    backgroundColor: Colors.background.primary,
+    backgroundColor: C.background.primary,
     borderWidth: 1,
-    borderColor: Colors.error,
+    borderColor: C.error,
     ...Shadows.small,
   },
 
   resetButtonText: {
     fontSize: Typography.fontSize.subhead,
     fontWeight: Typography.fontWeight.semiBold,
-    color: Colors.error,
+    color: C.error,
   },
 
   saveButton: {
-    backgroundColor: Colors.primary,
+    backgroundColor: C.primary,
     ...Shadows.small,
   },
 
   saveButtonText: {
     fontSize: Typography.fontSize.subhead,
     fontWeight: Typography.fontWeight.semiBold,
-    color: Colors.background.primary,
+    color: C.background.primary,
   },
 });

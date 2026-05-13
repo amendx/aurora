@@ -1,11 +1,12 @@
 {
   "expo": {
-  "name": "Aurora",
-    "slug": "cem-horas",
+    "name": "Aurora",
+    "slug": "aurora",
     "version": "1.0.0",
+    "scheme": "aurora",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "automatic",
     "splash": {
       "image": "./assets/splash.png",
       "resizeMode": "contain",
@@ -27,7 +28,9 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-image-picker",
+      "expo-web-browser"
     ]
   }
 }

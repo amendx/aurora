@@ -1,8 +1,8 @@
 import * as SecureStore from 'expo-secure-store';
 
-const TOKEN_KEY = 'soffia_auth_token';
-const USER_KEY = 'soffia_user_data';
-const GROUPS_KEY = 'soffia_groups_cache';
+const TOKEN_KEY = 'webClient_auth_token';
+const USER_KEY = 'webClient_user_data';
+const GROUPS_KEY = 'webClient_groups_cache';
 
 export class StorageService {
   static async saveToken(token) {
@@ -111,6 +111,40 @@ export class StorageService {
       return true;
     } catch (error) {
       console.error('Erro ao limpar armazenamento:', error);
+      return false;
+    }
+  }
+
+  // ── Generic SecureStore access (for legacy real_hours_ keys) ─────────────────
+  // New code should use LocalCache (AsyncStorage) for bulk/non-sensitive data.
+  // These methods exist for backward compat while migration runs.
+
+  static async getItem(key) {
+    try {
+      return await SecureStore.getItemAsync(key);
+    } catch (error) {
+      console.error(`Erro ao ler item '${key}':`, error);
+      return null;
+    }
+  }
+
+  static async setItem(key, value) {
+    try {
+      const str = typeof value === 'string' ? value : JSON.stringify(value);
+      await SecureStore.setItemAsync(key, str);
+      return true;
+    } catch (error) {
+      console.error(`Erro ao salvar item '${key}':`, error);
+      return false;
+    }
+  }
+
+  static async removeItem(key) {
+    try {
+      await SecureStore.deleteItemAsync(key);
+      return true;
+    } catch (error) {
+      console.error(`Erro ao remover item '${key}':`, error);
       return false;
     }
   }

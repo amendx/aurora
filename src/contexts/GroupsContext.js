@@ -1,8 +1,9 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import SoffiaApiService from '../services/SoffiaApiService';
+import WebClientApiService from '../services/WebClientApiService';
 import Logger from '../utils/Logger';
 import { AuthContext } from '../context/AuthContext';
 import { StorageService } from '../utils/StorageService';
+import LocalCache from '../services/LocalCache';
 
 const GroupsContext = createContext();
 
@@ -15,7 +16,8 @@ export const useGroups = () => {
 };
 
 export const GroupsProvider = ({ children }) => {
-  const { token } = useContext(AuthContext);
+  const { token, user } = useContext(AuthContext);
+  const userId = user?.id || 0;
   const [groups, setGroups] = useState({});
   const [coworkers, setCoworkers] = useState({});
   const [membersByGroupId, setMembersByGroupId] = useState({});
@@ -149,7 +151,7 @@ export const GroupsProvider = ({ children }) => {
   // Quando o token chegar: carrega da API em background com delay
   // para não bloquear a experiência inicial (plantões/home)
   useEffect(() => {
-    if (token && !hasLoadedFromApi) {
+    if (token && user?.source !== 'aurora' && !hasLoadedFromApi) {
       Logger.info('🏢 Token disponível, agendando carga de grupos em background...');
       const timer = setTimeout(() => {
         loadGroupsBackground();
@@ -170,7 +172,7 @@ export const GroupsProvider = ({ children }) => {
       setError(null);
       Logger.debug('🏢 Carregando grupos da API /groups');
 
-      const response = await SoffiaApiService.getGroups(token);
+      const response = await WebClientApiService.getGroups(token);
       
       if (response?.data?.items) {
         const newGroups = { ...groups };
@@ -288,7 +290,7 @@ export const GroupsProvider = ({ children }) => {
       // Não seta loading = true para não impactar a UI
       Logger.debug('🏢 [BG] Carregando grupos em background...');
       
-      const response = await SoffiaApiService.getGroups(token);
+      const response = await WebClientApiService.getGroups(token);
       
       if (response?.data?.items) {
         const newGroups = { ...groups };
@@ -334,24 +336,41 @@ export const GroupsProvider = ({ children }) => {
     }
   };
 
-  // Persistir grupos no StorageService (evita overfetching)
+  // Persistir grupos no StorageService e LocalCache (dual-write)
   const persistGroups = async (groupsData) => {
     try {
+      // Keep existing SecureStore write for backward compat
       await StorageService.saveGroups(groupsData);
+      // Also write to LocalCache (user-scoped, Firebase-ready)
+      if (userId) {
+        await LocalCache.saveGroups(userId, groupsData);
+      }
     } catch (error) {
       Logger.error('Erro ao persistir grupos:', error);
     }
   };
 
-  // Carregar grupos do cache local (chamado no startup)
+  // Carregar grupos do cache local — prefer LocalCache, fall back to SecureStore
   const loadPersistedData = async () => {
     try {
+      // Try LocalCache first (user-scoped, survives logout cleanly)
+      if (userId) {
+        const lcData = await LocalCache.getGroups(userId);
+        if (lcData?.groups && Array.isArray(lcData.groups) && lcData.groups.length > 0) {
+          const groupsMap = {};
+          lcData.groups.forEach(g => { groupsMap[g.id] = g; });
+          setGroups(groupsMap);
+          Logger.info(`📦 ${lcData.groups.length} grupos carregados do LocalCache`);
+          return;
+        }
+      }
+      // Fallback: legacy SecureStore cache
       const cached = await StorageService.getGroups();
       if (cached && Array.isArray(cached) && cached.length > 0) {
         const groupsMap = {};
         cached.forEach(g => { groupsMap[g.id] = g; });
         setGroups(groupsMap);
-        Logger.info(`📦 ${cached.length} grupos carregados do cache local`);
+        Logger.info(`📦 ${cached.length} grupos carregados do cache legado`);
       }
     } catch (error) {
       Logger.error('Erro ao carregar grupos do cache:', error);

@@ -1,40 +1,87 @@
 /**
  * Premium Design System
  * Modern, native-inspired design tokens for consistent UI
+ *
+ * Dark Palette (v2):
+ *   Charcoal Blue  #3d4d5c  — deep backgrounds
+ *   Blue Slate     #49627a  — surface / card
+ *   Blue Grey      #7096bb  — inactive / mid-tone
+ *   Baby Blue Ice  #97cafc  — accent / highlight
+ *   Tropical Teal  #6cc1c0  — primary action
+ *   Mint Leaf      #41b883  — success / positive
  */
 import { Dimensions, Platform } from 'react-native';
 
 const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
 
+// ─── Palette tokens ────────────────────────────────────────────────────────
+const Palette = {
+  charcoalBlue:  '#3d4d5c',
+  blueSlate:     '#49627a',
+  blueGrey:      '#7096bb',
+  babyBlueIce:   '#97cafc',
+  tropicalTeal:  '#6cc1c0',
+  mintLeaf:      '#41b883',
+  // Deeper surface derived by darkening charcoal-blue ~15%
+  abyss:         '#263340',
+};
+
 export const Colors = {
   // Primary System Colors
-  primary: '#007AFF',      // iOS Blue
-  primaryLight: '#5AC8FA', // Light Blue
-  primaryDark: '#0056CC',  // Dark Blue
+  primary: '#6cc1c0',      // Tropical Teal
+  primaryLight: '#97cafc', // Baby Blue Ice
+  primaryDark: '#41b883',  // Mint Leaf
   
-  // Background System
+  // Background System (light)
   background: {
     primary: '#FFFFFF',
-    secondary: '#F2F2F7',   // iOS Light Gray
-    tertiary: '#F9F9FB',    // Subtle Background
+    secondary: '#F2F2F7',
+    tertiary: '#F9F9FB',
     card: '#FFFFFF',
     elevated: '#FFFFFF',
   },
   
-  // Dark Mode
+  // Dark Mode — harmonized with the new cool-toned palette
   dark: {
+    primary:      Palette.tropicalTeal,   // #6cc1c0
+    primaryLight: Palette.babyBlueIce,    // #97cafc
+    primaryDark:  Palette.mintLeaf,       // #41b883
+
     background: {
-      primary: '#000000',
-      secondary: '#1C1C1E',   // iOS Dark Gray
-      tertiary: '#2C2C2E',    // Card Background
-      card: '#1C1C1E',
-      elevated: '#2C2C2E',
+      primary:   Palette.abyss,           // #263340  — deepest canvas
+      secondary: Palette.charcoalBlue,    // #3d4d5c  — standard surface
+      tertiary:  Palette.blueSlate,       // #49627a  — elevated surface
+      card:      Palette.charcoalBlue,    // #3d4d5c
+      elevated:  Palette.blueSlate,       // #49627a
     },
     text: {
-      primary: '#FFFFFF',
-      secondary: '#EBEBF5',
-      tertiary: '#EBEBF560',
-    }
+      primary:     '#E8F4FD',                        // near-white, blue tinted
+      secondary:   Palette.babyBlueIce,              // #97cafc
+      tertiary:    'rgba(151, 202, 252, 0.65)',
+      quaternary:  'rgba(151, 202, 252, 0.40)',
+      placeholder: 'rgba(112, 150, 187, 0.55)',      // blue-grey
+    },
+    interactive: {
+      active:   Palette.tropicalTeal,                // #6cc1c0
+      inactive: Palette.blueGrey,                    // #7096bb
+      pressed:  Palette.mintLeaf,                    // #41b883
+      disabled: 'rgba(112, 150, 187, 0.30)',
+    },
+    success: Palette.mintLeaf,                       // #41b883
+    warning: '#FFBB55',                              // warm amber — still visible on blue bg
+    error:   '#FF6B6B',                              // soft red that won't clash with the cool tones
+    info:    Palette.babyBlueIce,                    // #97cafc
+    border: {
+      light:  'rgba(73, 98, 122, 0.55)',             // blue-slate semi
+      medium: Palette.blueSlate,                     // #49627a
+      strong: Palette.blueGrey,                      // #7096bb
+    },
+    shadow: {
+      light:   'rgba(38, 51, 64, 0.40)',
+      medium:  'rgba(38, 51, 64, 0.60)',
+      strong:  'rgba(38, 51, 64, 0.80)',
+      overlay: 'rgba(38, 51, 64, 0.70)',
+    },
   },
   
   // Text System
@@ -48,9 +95,9 @@ export const Colors = {
   
   // Interactive States
   interactive: {
-    active: '#007AFF',
-    inactive: '#8E8E93',     // iOS Inactive
-    pressed: '#0056CC',
+    active:   Palette.tropicalTeal,              // #6cc1c0
+    inactive: '#8E8E93',
+    pressed:  Palette.mintLeaf,                  // #41b883
     disabled: '#3C3C4399',
   },
   
@@ -58,7 +105,7 @@ export const Colors = {
   success: '#34C759',        // iOS Green
   warning: '#FF9500',        // iOS Orange
   error: '#FF3B30',          // iOS Red
-  info: '#5AC8FA',           // iOS Light Blue
+  info: '#97cafc',           // Baby Blue Ice
   
   // Border & Separator
   border: {
@@ -253,7 +300,14 @@ export const Animation = {
 };
 
 // Utility Functions
-export const getColorScheme = (isDark = false) => {
+export const getColorScheme = (isDark = false) => isDark ? Colors.dark : Colors;
+
+// Hook — returns the active palette based on current theme.
+// Usage: const colors = useColors();
+export const useColors = () => {
+  // Lazy import to avoid circular dep at module load time.
+  const { useTheme } = require('../contexts/ThemeContext');
+  const { isDark } = useTheme();
   return isDark ? Colors.dark : Colors;
 };
 

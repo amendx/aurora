@@ -3,8 +3,6 @@ import {
   View,
   Text,
   StyleSheet,
-  SafeAreaView,
-  StatusBar,
   ScrollView,
   RefreshControl,
   TouchableOpacity,
@@ -16,39 +14,29 @@ import {
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useGroups } from '../contexts/GroupsContext';
 import { AuthContext } from '../context/AuthContext';
-import SoffiaApiService from '../services/SoffiaApiService';
+import WebClientApiService from '../services/WebClientApiService';
 import Logger from '../utils/Logger';
+import { COLOR_PALETTE, getGroupColors, saveGroupColor } from '../utils/GroupColorConfig';
+import { useColors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
 
 const { width } = Dimensions.get('window');
-const COLORS = {
-  gradient: ['#667eea', '#764ba2'],
-  background: '#f8fafc',
-  card: '#ffffff',
-  cardShadow: 'rgba(0, 0, 0, 0.08)',
-  text: '#1e293b',
-  textSecondary: '#64748b',
-  textLight: '#94a3b8',
-  accent: '#3b82f6',
-  success: '#10b981',
-  warning: '#f59e0b',
-  error: '#ef4444',
-  border: '#e2e8f0',
-  white: '#ffffff',
-};
 
 const MemberCard = ({ member, type }) => {
+  const C = useColors();
+  const s = makeMemberStyles(C);
+
   const getTypeIcon = () => {
     switch (type) {
       case 'manager':
-        return { name: 'crown', color: COLORS.warning };
+        return { name: 'crown', color: C.warning };
       case 'assist':
-        return { name: 'account-star', color: COLORS.accent };
+        return { name: 'account-star', color: C.primary };
       case 'analyst':
-        return { name: 'account-check', color: COLORS.success };
+        return { name: 'account-check', color: C.success };
       case 'observer':
-        return { name: 'account-eye', color: COLORS.textSecondary };
+        return { name: 'account-eye', color: C.text.secondary };
       default:
-        return { name: 'account', color: COLORS.textSecondary };
+        return { name: 'account', color: C.text.secondary };
     }
   };
 
@@ -61,47 +49,88 @@ const MemberCard = ({ member, type }) => {
   }[type] || 'Membro';
 
   return (
-    <View style={styles.memberCard}>
-      <View style={styles.memberAvatar}>
-        <MaterialCommunityIcons name="account-circle" size={40} color={COLORS.textLight} />
-        <View style={[styles.typeIndicator, { backgroundColor: typeIcon.color }]}>
-          <MaterialCommunityIcons name={typeIcon.name} size={12} color={COLORS.white} />
+    <View style={s.memberCard}>
+      <View style={s.memberAvatar}>
+        <MaterialCommunityIcons name="account-circle" size={40} color={C.text.tertiary} />
+        <View style={[s.typeIndicator, { backgroundColor: typeIcon.color }]}>
+          <MaterialCommunityIcons name={typeIcon.name} size={12} color={C.background.primary} />
         </View>
       </View>
-      
-      <View style={styles.memberInfo}>
-        <Text style={styles.memberName}>{member.name || member.full_name}</Text>
-        <Text style={styles.memberRole}>{member.role}</Text>
+
+      <View style={s.memberInfo}>
+        <Text style={s.memberName}>{member.name || member.full_name}</Text>
+        <Text style={s.memberRole}>{member.role}</Text>
         {member.council && (
-          <Text style={styles.memberCouncil}>{member.council}</Text>
+          <Text style={s.memberCouncil}>{member.council}</Text>
         )}
-        <Text style={[styles.memberType, { color: typeIcon.color }]}>{typeLabel}</Text>
+        <Text style={[s.memberType, { color: typeIcon.color }]}>{typeLabel}</Text>
       </View>
-      
-      {/* <View style={styles.memberActions}>
-        {member.phone && (
-          <TouchableOpacity style={styles.actionButton}>
-            <Ionicons name="call" size={16} color={COLORS.accent} />
-          </TouchableOpacity>
-        )}
-        {member.email && (
-          <TouchableOpacity style={styles.actionButton}>
-            <Ionicons name="mail" size={16} color={COLORS.accent} />
-          </TouchableOpacity>
-        )}
-      </View> */}
     </View>
   );
 };
 
-const GroupCard = ({ group, initialExpanded = false, onCardLayout }) => {
+const makeMemberStyles = (C) => ({
+  memberCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: C.background.secondary,
+    borderRadius: BorderRadius.md,
+    padding: 12,
+    marginBottom: 8,
+  },
+  memberAvatar: {
+    position: 'relative',
+    marginRight: 12,
+  },
+  typeIndicator: {
+    position: 'absolute',
+    bottom: -2,
+    right: -2,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: C.background.primary,
+  },
+  memberInfo: {
+    flex: 1,
+  },
+  memberName: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: C.text.primary,
+  },
+  memberRole: {
+    fontSize: 12,
+    color: C.text.secondary,
+    marginTop: 2,
+  },
+  memberCouncil: {
+    fontSize: 11,
+    color: C.text.tertiary,
+    marginTop: 1,
+  },
+  memberType: {
+    fontSize: 11,
+    fontWeight: '500',
+    marginTop: 2,
+  },
+});
+
+const GroupCard = ({ group, initialExpanded = false, onCardLayout, customColor, showColorPicker = false, onColorChange }) => {
+  const C = useColors();
+  const s = makeGroupCardStyles(C);
+
   const [expanded, setExpanded] = useState(initialExpanded);
-  const [fullMembers, setFullMembers] = useState(null); // null = não carregado
+  const [fullMembers, setFullMembers] = useState(null);
   const [loadingMembers, setLoadingMembers] = useState(false);
   const [memberSearch, setMemberSearch] = useState('');
   const { token } = useContext(AuthContext);
 
-  // Membros parciais do /groups (pode estar truncado)
+  const displayColor = customColor || group.color || C.primary;
+
   const partialMembers = [
     ...(group.manager ? [{ ...group.manager, type: 'manager' }] : []),
     ...(group.assists || []).map(m => ({ ...m, type: 'assist' })),
@@ -109,13 +138,10 @@ const GroupCard = ({ group, initialExpanded = false, onCardLayout }) => {
     ...(group.observers || []).map(m => ({ ...m, type: 'observer' })),
   ];
 
-  // Usar total_users da API se disponível, senão contar parciais
   const totalMembers = group.total_users || partialMembers.length;
 
-  // Membros a exibir: fullMembers se já carregado, senão parciais
   const displayMembers = fullMembers || partialMembers;
 
-  // Filtrar membros por nome (busca local)
   const filteredMembers = memberSearch.trim()
     ? displayMembers.filter(m => {
         const name = (m.name || m.full_name || '').toLowerCase();
@@ -123,15 +149,13 @@ const GroupCard = ({ group, initialExpanded = false, onCardLayout }) => {
       })
     : displayMembers;
 
-  // Buscar todos os membros do grupo via /groups/{id}/members
   const fetchFullGroupDetails = async () => {
-    if (fullMembers || !token || SoffiaApiService.isMockToken(token)) return;
-    
+    if (fullMembers || !token) return;
+
     setLoadingMembers(true);
     try {
-      const response = await SoffiaApiService.getGroupMembers(token, group.id);
+      const response = await WebClientApiService.getGroupMembers(token, group.id);
       if (response.success && response.data && response.data.length > 0) {
-        // Mapear campos do /members para o formato esperado pelo MemberCard
         const members = response.data.map(m => ({
           id: m.id,
           name: m.name || m.full_name || '',
@@ -163,7 +187,6 @@ const GroupCard = ({ group, initialExpanded = false, onCardLayout }) => {
     }
   };
 
-  // Auto-expandir se initialExpanded
   useEffect(() => {
     if (initialExpanded) {
       fetchFullGroupDetails();
@@ -172,7 +195,7 @@ const GroupCard = ({ group, initialExpanded = false, onCardLayout }) => {
 
   return (
     <View
-      style={styles.groupCard}
+      style={s.groupCard}
       onLayout={(e) => {
         if (onCardLayout) {
           onCardLayout(group.id, e.nativeEvent.layout.y);
@@ -180,79 +203,108 @@ const GroupCard = ({ group, initialExpanded = false, onCardLayout }) => {
       }}
     >
       <TouchableOpacity
-        style={styles.groupHeader}
+        style={s.groupHeader}
         onPress={handleToggleExpand}
       >
-        <View style={styles.groupInfo}>
-          <View style={styles.groupTitleRow}>
-            <View style={[styles.groupColorDot, { backgroundColor: group.color || COLORS.accent }]} />
-            <Text style={styles.groupName}>{group.name}</Text>
+        <View style={s.groupInfo}>
+          <View style={s.groupTitleRow}>
+            <View style={[s.groupColorDot, { backgroundColor: displayColor }]} />
+            <Text style={s.groupName}>{group.name}</Text>
             {group.is_personal && (
-              <View style={styles.personalBadge}>
-                <Text style={styles.personalBadgeText}>Pessoal</Text>
+              <View style={s.personalBadge}>
+                <Text style={s.personalBadgeText}>Pessoal</Text>
               </View>
             )}
           </View>
-          
+
           {group.institution && (
-            <Text style={styles.groupInstitution}>{group.institution.name}</Text>
+            <Text style={s.groupInstitution}>{group.institution.name}</Text>
           )}
-          
-          <View style={styles.groupStats}>
-            <View style={styles.statItem}>
-              <MaterialCommunityIcons name="account-group" size={16} color={COLORS.textSecondary} />
-              <Text style={styles.statText}>{totalMembers} membros</Text>
+
+          <View style={s.groupStats}>
+            <View style={s.statItem}>
+              <MaterialCommunityIcons name="account-group" size={16} color={C.text.secondary} />
+              <Text style={s.statText}>{totalMembers} membros</Text>
             </View>
-            
+
             {group.unread_notices > 0 && (
-              <View style={styles.statItem}>
-                <MaterialCommunityIcons name="bell" size={16} color={COLORS.warning} />
-                <Text style={[styles.statText, { color: COLORS.warning }]}>
+              <View style={s.statItem}>
+                <MaterialCommunityIcons name="bell" size={16} color={C.warning} />
+                <Text style={[s.statText, { color: C.warning }]}>
                   {group.unread_notices} avisos
                 </Text>
               </View>
             )}
-            
+
             {group.is_admin && (
-              <View style={styles.adminBadge}>
-                <MaterialCommunityIcons name="shield-crown" size={14} color={COLORS.warning} />
-                <Text style={[styles.statText, { color: COLORS.warning }]}>Admin</Text>
+              <View style={s.adminBadge}>
+                <MaterialCommunityIcons name="shield-crown" size={14} color={C.warning} />
+                <Text style={[s.statText, { color: C.warning }]}>Admin</Text>
               </View>
             )}
           </View>
         </View>
-        
+
         <Ionicons
           name={expanded ? 'chevron-up' : 'chevron-down'}
           size={24}
-          color={COLORS.textSecondary}
+          color={C.text.secondary}
         />
       </TouchableOpacity>
-      
+
       {expanded && (
-        <View style={styles.groupMembers}>
+        <View style={s.groupMembers}>
+          {showColorPicker && (
+            <View style={s.colorPickerSection}>
+              <Text style={s.colorPickerLabel}>Cor do grupo</Text>
+              <View style={s.colorPaletteRow}>
+                {COLOR_PALETTE.map((color) => (
+                  <TouchableOpacity
+                    key={color}
+                    onPress={() => onColorChange && onColorChange(color)}
+                    style={[
+                      s.colorSwatch,
+                      { backgroundColor: color },
+                      displayColor === color && s.colorSwatchSelected,
+                    ]}
+                  >
+                    {displayColor === color && (
+                      <Ionicons name="checkmark" size={14} color={C.background.primary} />
+                    )}
+                  </TouchableOpacity>
+                ))}
+                {customColor && (
+                  <TouchableOpacity
+                    onPress={() => onColorChange && onColorChange(null)}
+                    style={s.colorSwatchReset}
+                  >
+                    <Ionicons name="refresh" size={14} color={C.text.secondary} />
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+          )}
           {loadingMembers ? (
-            <View style={styles.membersLoadingContainer}>
-              <ActivityIndicator size="small" color={COLORS.accent} />
-              <Text style={styles.membersLoadingText}>Carregando membros...</Text>
+            <View style={s.membersLoadingContainer}>
+              <ActivityIndicator size="small" color={C.primary} />
+              <Text style={s.membersLoadingText}>Carregando membros...</Text>
             </View>
           ) : (
             <>
-              <Text style={styles.membersTitle}>
+              <Text style={s.membersTitle}>
                 {memberSearch.trim()
                   ? `${filteredMembers.length} de ${displayMembers.length} membros`
                   : `Membros (${displayMembers.length})`
                 }
               </Text>
 
-              {/* Busca local de membros dentro do grupo */}
               {displayMembers.length > 5 && (
-                <View style={styles.memberSearchWrapper}>
-                  <Ionicons name="search" size={16} color={COLORS.textLight} />
+                <View style={s.memberSearchWrapper}>
+                  <Ionicons name="search" size={16} color={C.text.tertiary} />
                   <TextInput
-                    style={styles.memberSearchInput}
+                    style={s.memberSearchInput}
                     placeholder="Buscar membro..."
-                    placeholderTextColor={COLORS.textLight}
+                    placeholderTextColor={C.text.placeholder}
                     value={memberSearch}
                     onChangeText={setMemberSearch}
                     autoCapitalize="none"
@@ -260,14 +312,14 @@ const GroupCard = ({ group, initialExpanded = false, onCardLayout }) => {
                   />
                   {memberSearch.length > 0 && (
                     <TouchableOpacity onPress={() => setMemberSearch('')}>
-                      <Ionicons name="close-circle" size={16} color={COLORS.textLight} />
+                      <Ionicons name="close-circle" size={16} color={C.text.tertiary} />
                     </TouchableOpacity>
                   )}
                 </View>
               )}
 
               {filteredMembers.length === 0 ? (
-                <Text style={styles.noMembersText}>Nenhum membro encontrado para "{memberSearch}"</Text>
+                <Text style={s.noMembersText}>Nenhum membro encontrado para "{memberSearch}"</Text>
               ) : (
                 filteredMembers.map((member, index) => (
                   <MemberCard key={`${member.id}-${index}`} member={member} type={member.type} />
@@ -281,48 +333,225 @@ const GroupCard = ({ group, initialExpanded = false, onCardLayout }) => {
   );
 };
 
-const GroupsScreen = ({ navigation, focusGroupId = null }) => {
+const makeGroupCardStyles = (C) => ({
+  groupCard: {
+    backgroundColor: C.background.primary,
+    borderRadius: BorderRadius.lg,
+    marginBottom: 16,
+    ...Shadows.medium,
+  },
+  groupHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 16,
+  },
+  groupInfo: {
+    flex: 1,
+  },
+  groupTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  groupColorDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    marginRight: 12,
+  },
+  groupName: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: C.text.primary,
+    flex: 1,
+  },
+  personalBadge: {
+    backgroundColor: C.primary,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 8,
+    marginLeft: 8,
+  },
+  personalBadgeText: {
+    fontSize: 10,
+    color: C.background.primary,
+    fontWeight: '500',
+  },
+  groupInstitution: {
+    fontSize: 14,
+    color: C.text.secondary,
+    marginBottom: 8,
+    marginLeft: 24,
+  },
+  groupStats: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+    marginLeft: 24,
+  },
+  statItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  statText: {
+    fontSize: 12,
+    color: C.text.secondary,
+  },
+  adminBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: C.warning + '18',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  groupMembers: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: C.border.light,
+    paddingTop: 16,
+    paddingHorizontal: 16,
+    paddingBottom: 16,
+  },
+  membersTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: C.text.primary,
+    marginBottom: 16,
+  },
+  membersLoadingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 20,
+    gap: 8,
+  },
+  membersLoadingText: {
+    fontSize: 14,
+    color: C.text.secondary,
+  },
+  noMembersText: {
+    fontSize: 13,
+    color: C.text.tertiary,
+    textAlign: 'center',
+    paddingVertical: 12,
+    fontStyle: 'italic',
+  },
+  memberSearchWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: C.background.secondary,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginBottom: 10,
+    gap: 6,
+  },
+  memberSearchInput: {
+    flex: 1,
+    fontSize: 13,
+    color: C.text.primary,
+    paddingVertical: 2,
+  },
+  colorPickerSection: {
+    marginBottom: 16,
+    paddingBottom: 16,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: C.border.light,
+  },
+  colorPickerLabel: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: C.text.secondary,
+    marginBottom: 10,
+  },
+  colorPaletteRow: {
+    flexDirection: 'row',
+    gap: 10,
+    flexWrap: 'wrap',
+    alignItems: 'center',
+  },
+  colorSwatch: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  colorSwatchSelected: {
+    borderWidth: 2.5,
+    borderColor: C.background.primary,
+    ...Shadows.medium,
+  },
+  colorSwatchReset: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: C.border.light,
+  },
+});
+
+const GroupsScreen = ({ navigation, focusGroupId = null, onRefreshReady }) => {
   const { groups: rawGroups, loading, error, loadGroups } = useGroups();
-  const { token } = useContext(AuthContext);
+  const { token, user } = useContext(AuthContext);
+  const C = useColors();
+  const s = makeStyles(C);
+
   const [refreshing, setRefreshing] = useState(false);
-  const [activeTab, setActiveTab] = useState('meus'); // Começa em "Meus Grupos"
+  const [activeTab, setActiveTab] = useState('meus');
   const [groupFilter, setGroupFilter] = useState('');
   const scrollViewRef = useRef(null);
   const groupCardPositions = useRef({});
   const groupsListOffsetY = useRef(0);
   const hasScrolledToFocus = useRef(false);
+  const [groupColors, setGroupColors] = useState({});
 
-  // Todos os grupos (carregados sob demanda ao clicar na aba)
   const [allGroups, setAllGroups] = useState([]);
   const [allGroupsLoading, setAllGroupsLoading] = useState(false);
   const [allGroupsLoaded, setAllGroupsLoaded] = useState(false);
 
   const groups = Array.isArray(rawGroups) ? rawGroups : [];
+  const userId = user?.id || user?.userId;
 
-  // "Meus Grupos" = todos os grupos que a API /groups retorna (são os do usuário)
+  useEffect(() => {
+    if (!userId) return;
+    getGroupColors(userId).then(colors => setGroupColors(colors));
+  }, [userId]);
+
+  const handleColorChange = async (groupId, color) => {
+    if (!userId) return;
+    await saveGroupColor(userId, groupId, color);
+    setGroupColors(prev => {
+      const updated = { ...prev };
+      if (color === null) {
+        delete updated[String(groupId)];
+      } else {
+        updated[String(groupId)] = color;
+      }
+      return updated;
+    });
+  };
+
   const meusGrupos = groups;
-
-  // Grupos exibidos depende da aba
   const displayedGroups = activeTab === 'meus' ? meusGrupos : allGroups;
 
-  // Filtrar grupos pelo nome
   const filteredGroups = groupFilter.trim()
     ? displayedGroups.filter(g =>
         g.name.toLowerCase().includes(groupFilter.trim().toLowerCase())
       )
     : displayedGroups;
 
-  // Callback para capturar a posição Y de cada GroupCard dentro do groupsList
   const handleCardLayout = (groupId, y) => {
     groupCardPositions.current[groupId] = y;
 
-    // Se esse é o card focado, rolar até ele
     if (focusGroupId && groupId === focusGroupId && !hasScrolledToFocus.current) {
       hasScrolledToFocus.current = true;
-      // Pequeno delay para garantir que o layout do ScrollView está estabilizado
       setTimeout(() => {
         if (scrollViewRef.current) {
-          // y é relativo ao groupsList; somar o offset do groupsList dentro do ScrollView
           const scrollTarget = groupsListOffsetY.current + y;
           scrollViewRef.current.scrollTo({
             y: scrollTarget,
@@ -333,19 +562,15 @@ const GroupsScreen = ({ navigation, focusGroupId = null }) => {
     }
   };
 
-  // Callback para capturar o offset Y do container groupsList dentro do ScrollView
   const handleGroupsListLayout = (e) => {
     groupsListOffsetY.current = e.nativeEvent.layout.y;
   };
 
-  // Carregar todos os grupos da organização (sob demanda)
   const loadAllGroups = async () => {
     if (allGroupsLoaded || allGroupsLoading) return;
     setAllGroupsLoading(true);
     try {
-      // Buscar todos os grupos com ?all=true ou sem filtro de usuário
-      // A API /groups retorna os grupos do usuário; para todos, usar /groups?all=true
-      const response = await SoffiaApiService.getGroups(token, true);
+      const response = await WebClientApiService.getGroups(token, true);
       if (response?.data?.items) {
         const normalized = response.data.items
           .map(g => ({
@@ -380,7 +605,6 @@ const GroupsScreen = ({ navigation, focusGroupId = null }) => {
     }
   };
 
-  // Ao trocar para aba "Todos", dispara carga sob demanda
   const handleTabChange = (tab) => {
     setActiveTab(tab);
     if (tab === 'todos' && !allGroupsLoaded) {
@@ -388,7 +612,6 @@ const GroupsScreen = ({ navigation, focusGroupId = null }) => {
     }
   };
 
-  // Se tiver focusGroupId, muda para a aba que contém o grupo
   useEffect(() => {
     if (focusGroupId && groups.length > 0) {
       const isInMeus = meusGrupos.some(g => g.id === focusGroupId);
@@ -416,64 +639,40 @@ const GroupsScreen = ({ navigation, focusGroupId = null }) => {
     }
   };
 
-  const renderHeader = () => (
-    <View style={styles.header}>
-      <View style={styles.headerGradient}>
-        <SafeAreaView>
-          <View style={styles.headerContent}>
-            <TouchableOpacity
-              style={styles.backButton}
-              onPress={() => navigation.goBack()}
-            >
-              <Ionicons name="arrow-back" size={24} color={COLORS.white} />
-            </TouchableOpacity>
-            
-            <Text style={styles.headerTitle}>Grupos</Text>
-            
-            <TouchableOpacity
-              style={styles.refreshButton}
-              onPress={handleRefresh}
-              disabled={loading || refreshing}
-            >
-              <Ionicons
-                name="refresh"
-                size={24}
-                color={COLORS.white}
-                style={refreshing ? { opacity: 0.6 } : {}}
-              />
-            </TouchableOpacity>
-          </View>
-        </SafeAreaView>
-      </View>
-    </View>
-  );
+  const handleRefreshRef = useRef(handleRefresh);
+  handleRefreshRef.current = handleRefresh;
+
+  useEffect(() => {
+    onRefreshReady?.(() => handleRefreshRef.current());
+    return () => onRefreshReady?.(null);
+  }, []);
 
   const renderTabs = () => (
-    <View style={styles.tabContainer}>
+    <View style={s.tabContainer}>
       <TouchableOpacity
-        style={[styles.tab, activeTab === 'meus' && styles.tabActive]}
+        style={[s.tab, activeTab === 'meus' && s.tabActive]}
         onPress={() => handleTabChange('meus')}
       >
-        <Text style={[styles.tabText, activeTab === 'meus' && styles.tabTextActive]}>
+        <Text style={[s.tabText, activeTab === 'meus' && s.tabTextActive]}>
           Meus Grupos
         </Text>
-        <View style={[styles.tabBadge, activeTab === 'meus' && styles.tabBadgeActive]}>
-          <Text style={[styles.tabBadgeText, activeTab === 'meus' && styles.tabBadgeTextActive]}>
+        <View style={[s.tabBadge, activeTab === 'meus' && s.tabBadgeActive]}>
+          <Text style={[s.tabBadgeText, activeTab === 'meus' && s.tabBadgeTextActive]}>
             {meusGrupos.length}
           </Text>
         </View>
       </TouchableOpacity>
 
       <TouchableOpacity
-        style={[styles.tab, activeTab === 'todos' && styles.tabActive]}
+        style={[s.tab, activeTab === 'todos' && s.tabActive]}
         onPress={() => handleTabChange('todos')}
       >
-        <Text style={[styles.tabText, activeTab === 'todos' && styles.tabTextActive]}>
+        <Text style={[s.tabText, activeTab === 'todos' && s.tabTextActive]}>
           Todos os Grupos
         </Text>
         {allGroupsLoaded && (
-          <View style={[styles.tabBadge, activeTab === 'todos' && styles.tabBadgeActive]}>
-            <Text style={[styles.tabBadgeText, activeTab === 'todos' && styles.tabBadgeTextActive]}>
+          <View style={[s.tabBadge, activeTab === 'todos' && s.tabBadgeActive]}>
+            <Text style={[s.tabBadgeText, activeTab === 'todos' && s.tabBadgeTextActive]}>
               {allGroups.length}
             </Text>
           </View>
@@ -485,21 +684,21 @@ const GroupsScreen = ({ navigation, focusGroupId = null }) => {
   const renderContent = () => {
     if (loading && groups.length === 0) {
       return (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={COLORS.accent} />
-          <Text style={styles.loadingText}>Carregando grupos...</Text>
+        <View style={s.loadingContainer}>
+          <ActivityIndicator size="large" color={C.primary} />
+          <Text style={s.loadingText}>Carregando grupos...</Text>
         </View>
       );
     }
 
     if (error && groups.length === 0) {
       return (
-        <View style={styles.errorContainer}>
-          <MaterialCommunityIcons name="alert-circle" size={48} color={COLORS.error} />
-          <Text style={styles.errorTitle}>Erro ao carregar grupos</Text>
-          <Text style={styles.errorMessage}>{error}</Text>
-          <TouchableOpacity style={styles.retryButton} onPress={loadGroups}>
-            <Text style={styles.retryButtonText}>Tentar novamente</Text>
+        <View style={s.errorContainer}>
+          <MaterialCommunityIcons name="alert-circle" size={48} color={C.error} />
+          <Text style={s.errorTitle}>Erro ao carregar grupos</Text>
+          <Text style={s.errorMessage}>{error}</Text>
+          <TouchableOpacity style={s.retryButton} onPress={loadGroups}>
+            <Text style={s.retryButtonText}>Tentar novamente</Text>
           </TouchableOpacity>
         </View>
       );
@@ -509,315 +708,97 @@ const GroupsScreen = ({ navigation, focusGroupId = null }) => {
       ? 'Você não faz parte de nenhum grupo.'
       : 'Nenhum grupo encontrado na organização.';
 
-    // Loading específico da aba "Todos"
     const isTabLoading = activeTab === 'todos' && allGroupsLoading;
 
     return (
       <ScrollView
         ref={scrollViewRef}
-        style={styles.scrollView}
+        style={s.scrollView}
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
             onRefresh={handleRefresh}
-            colors={[COLORS.accent]}
-            tintColor={COLORS.accent}
+            colors={[C.primary]}
+            tintColor={C.primary}
           />
         }
       >
         {renderTabs()}
 
         {/* Busca/filtro de grupos */}
-        <View style={styles.searchContainer}>
-          <View style={styles.searchInputWrapper}>
-            <Ionicons name="search" size={18} color={COLORS.textLight} style={styles.searchIcon} />
+        <View style={s.searchContainer}>
+          <View style={s.searchInputWrapper}>
+            <Ionicons name="search" size={18} color={C.text.tertiary} style={s.searchIcon} />
             <TextInput
-              style={styles.searchInput}
+              style={s.searchInput}
               placeholder="Buscar grupo..."
-              placeholderTextColor={COLORS.textLight}
+              placeholderTextColor={C.text.placeholder}
               value={groupFilter}
               onChangeText={setGroupFilter}
               autoCapitalize="none"
               autoCorrect={false}
             />
             {groupFilter.length > 0 && (
-              <TouchableOpacity onPress={() => setGroupFilter('')} style={styles.clearSearchButton}>
-                <Ionicons name="close-circle" size={18} color={COLORS.textLight} />
+              <TouchableOpacity onPress={() => setGroupFilter('')} style={s.clearSearchButton}>
+                <Ionicons name="close-circle" size={18} color={C.text.tertiary} />
               </TouchableOpacity>
             )}
           </View>
         </View>
 
         {isTabLoading ? (
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator size="large" color={COLORS.accent} />
-            <Text style={styles.loadingText}>Carregando todos os grupos...</Text>
+          <View style={s.loadingContainer}>
+            <ActivityIndicator size="large" color={C.primary} />
+            <Text style={s.loadingText}>Carregando todos os grupos...</Text>
           </View>
         ) : filteredGroups.length === 0 ? (
-          <View style={styles.emptyTabContainer}>
-            <MaterialCommunityIcons name="account-group-outline" size={48} color={COLORS.textLight} />
-            <Text style={styles.emptyTabText}>
+          <View style={s.emptyTabContainer}>
+            <MaterialCommunityIcons name="account-group-outline" size={48} color={C.text.tertiary} />
+            <Text style={s.emptyTabText}>
               {groupFilter.trim()
                 ? `Nenhum grupo encontrado para "${groupFilter}"`
                 : emptyTabMessage}
             </Text>
           </View>
         ) : (
-          <View style={styles.groupsList} onLayout={handleGroupsListLayout}>
+          <View style={s.groupsList} onLayout={handleGroupsListLayout}>
             {filteredGroups.map((group) => (
               <GroupCard
                 key={group.id}
                 group={group}
                 initialExpanded={focusGroupId === group.id}
                 onCardLayout={handleCardLayout}
+                customColor={groupColors[String(group.id)] || null}
+                showColorPicker={activeTab === 'meus'}
+                onColorChange={(color) => handleColorChange(group.id, color)}
               />
             ))}
           </View>
         )}
 
-        <View style={styles.bottomSpacing} />
+        <View style={s.bottomSpacing} />
       </ScrollView>
     );
   };
 
   return (
-    <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor={COLORS.gradient[0]} />
-      {renderHeader()}
+    <View style={s.container}>
       {renderContent()}
     </View>
   );
 };
 
-const styles = StyleSheet.create({
+const makeStyles = (C) => ({
   container: {
     flex: 1,
-    backgroundColor: COLORS.background,
-  },
-  header: {
-    elevation: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 8,
-  },
-  headerGradient: {
-    backgroundColor: COLORS.gradient[0], // Usar a primeira cor do gradiente como cor sólida
-    paddingBottom: 20,
-  },
-  headerContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingTop: 10,
-  },
-  backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  headerTitle: {
-    fontSize: 20,
-    fontWeight: '600',
-    color: COLORS.white,
-  },
-  refreshButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  statsContainer: {
-    flexDirection: 'row',
-    paddingHorizontal: 20,
-    paddingVertical: 20,
-    gap: 15,
-  },
-  statCard: {
-    flex: 1,
-    backgroundColor: COLORS.card,
-    borderRadius: 16,
-    padding: 16,
-    alignItems: 'center',
-    elevation: 4,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-  },
-  statNumber: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: COLORS.text,
-    marginTop: 8,
-  },
-  statLabel: {
-    fontSize: 12,
-    color: COLORS.textSecondary,
-    marginTop: 4,
+    backgroundColor: C.background.secondary,
   },
   scrollView: {
     flex: 1,
   },
   groupsList: {
     paddingHorizontal: 20,
-  },
-  groupCard: {
-    backgroundColor: COLORS.card,
-    borderRadius: 16,
-    marginBottom: 16,
-    elevation: 4,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-  },
-  groupHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: 16,
-  },
-  groupInfo: {
-    flex: 1,
-  },
-  groupTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  groupColorDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    marginRight: 12,
-  },
-  groupName: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: COLORS.text,
-    flex: 1,
-  },
-  personalBadge: {
-    backgroundColor: COLORS.accent,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 8,
-    marginLeft: 8,
-  },
-  personalBadgeText: {
-    fontSize: 10,
-    color: COLORS.white,
-    fontWeight: '500',
-  },
-  groupInstitution: {
-    fontSize: 14,
-    color: COLORS.textSecondary,
-    marginBottom: 8,
-    marginLeft: 24,
-  },
-  groupStats: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 16,
-    marginLeft: 24,
-  },
-  statItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  statText: {
-    fontSize: 12,
-    color: COLORS.textSecondary,
-  },
-  adminBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: 'rgba(245, 158, 11, 0.1)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 6,
-  },
-  groupMembers: {
-    borderTopWidth: 1,
-    borderTopColor: COLORS.border,
-    paddingTop: 16,
-    paddingHorizontal: 16,
-    paddingBottom: 16,
-  },
-  membersTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: COLORS.text,
-    marginBottom: 16,
-  },
-  memberCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: COLORS.background,
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 8,
-  },
-  memberAvatar: {
-    position: 'relative',
-    marginRight: 12,
-  },
-  typeIndicator: {
-    position: 'absolute',
-    bottom: -2,
-    right: -2,
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: COLORS.white,
-  },
-  memberInfo: {
-    flex: 1,
-  },
-  memberName: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: COLORS.text,
-  },
-  memberRole: {
-    fontSize: 12,
-    color: COLORS.textSecondary,
-    marginTop: 2,
-  },
-  memberCouncil: {
-    fontSize: 11,
-    color: COLORS.textLight,
-    marginTop: 1,
-  },
-  memberType: {
-    fontSize: 11,
-    fontWeight: '500',
-    marginTop: 2,
-  },
-  memberActions: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  actionButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: 'rgba(59, 130, 246, 0.1)',
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   loadingContainer: {
     flex: 1,
@@ -827,7 +808,7 @@ const styles = StyleSheet.create({
   },
   loadingText: {
     fontSize: 16,
-    color: COLORS.textSecondary,
+    color: C.text.secondary,
     marginTop: 16,
   },
   errorContainer: {
@@ -840,49 +821,28 @@ const styles = StyleSheet.create({
   errorTitle: {
     fontSize: 18,
     fontWeight: '600',
-    color: COLORS.text,
+    color: C.text.primary,
     marginTop: 16,
     textAlign: 'center',
   },
   errorMessage: {
     fontSize: 14,
-    color: COLORS.textSecondary,
+    color: C.text.secondary,
     textAlign: 'center',
     marginTop: 8,
     lineHeight: 20,
   },
   retryButton: {
-    backgroundColor: COLORS.accent,
+    backgroundColor: C.primary,
     paddingHorizontal: 24,
     paddingVertical: 12,
-    borderRadius: 12,
+    borderRadius: BorderRadius.md,
     marginTop: 24,
   },
   retryButtonText: {
-    color: COLORS.white,
+    color: C.background.primary,
     fontSize: 14,
     fontWeight: '600',
-  },
-  emptyContainer: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 40,
-    paddingVertical: 60,
-  },
-  emptyTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: COLORS.text,
-    marginTop: 20,
-    textAlign: 'center',
-  },
-  emptyMessage: {
-    fontSize: 14,
-    color: COLORS.textSecondary,
-    textAlign: 'center',
-    marginTop: 8,
-    lineHeight: 20,
   },
   bottomSpacing: {
     height: 40,
@@ -892,14 +852,10 @@ const styles = StyleSheet.create({
     marginHorizontal: 20,
     marginTop: 16,
     marginBottom: 8,
-    backgroundColor: COLORS.card,
-    borderRadius: 12,
+    backgroundColor: C.background.primary,
+    borderRadius: BorderRadius.md,
     padding: 4,
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.08,
-    shadowRadius: 4,
+    ...Shadows.small,
   },
   tab: {
     flex: 1,
@@ -908,23 +864,23 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingVertical: 10,
     paddingHorizontal: 8,
-    borderRadius: 10,
+    borderRadius: BorderRadius.sm,
     gap: 6,
   },
   tabActive: {
-    backgroundColor: COLORS.accent,
+    backgroundColor: C.primary,
   },
   tabText: {
     fontSize: 13,
     fontWeight: '500',
-    color: COLORS.textSecondary,
+    color: C.text.secondary,
   },
   tabTextActive: {
-    color: COLORS.white,
+    color: C.background.primary,
     fontWeight: '600',
   },
   tabBadge: {
-    backgroundColor: COLORS.border,
+    backgroundColor: C.border.light,
     borderRadius: 10,
     minWidth: 20,
     height: 20,
@@ -938,10 +894,10 @@ const styles = StyleSheet.create({
   tabBadgeText: {
     fontSize: 11,
     fontWeight: '600',
-    color: COLORS.textSecondary,
+    color: C.text.secondary,
   },
   tabBadgeTextActive: {
-    color: COLORS.white,
+    color: C.background.primary,
   },
   emptyTabContainer: {
     alignItems: 'center',
@@ -951,7 +907,7 @@ const styles = StyleSheet.create({
   },
   emptyTabText: {
     fontSize: 14,
-    color: COLORS.textSecondary,
+    color: C.text.secondary,
     textAlign: 'center',
     marginTop: 12,
   },
@@ -962,15 +918,11 @@ const styles = StyleSheet.create({
   searchInputWrapper: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: COLORS.card,
-    borderRadius: 12,
+    backgroundColor: C.background.primary,
+    borderRadius: BorderRadius.md,
     paddingHorizontal: 12,
     paddingVertical: 8,
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.08,
-    shadowRadius: 4,
+    ...Shadows.small,
   },
   searchIcon: {
     marginRight: 8,
@@ -978,45 +930,11 @@ const styles = StyleSheet.create({
   searchInput: {
     flex: 1,
     fontSize: 14,
-    color: COLORS.text,
+    color: C.text.primary,
     paddingVertical: 4,
   },
   clearSearchButton: {
     padding: 4,
-  },
-  membersLoadingContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 20,
-    gap: 8,
-  },
-  membersLoadingText: {
-    fontSize: 14,
-    color: COLORS.textSecondary,
-  },
-  noMembersText: {
-    fontSize: 13,
-    color: COLORS.textLight,
-    textAlign: 'center',
-    paddingVertical: 12,
-    fontStyle: 'italic',
-  },
-  memberSearchWrapper: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: COLORS.background,
-    borderRadius: 10,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    marginBottom: 10,
-    gap: 6,
-  },
-  memberSearchInput: {
-    flex: 1,
-    fontSize: 13,
-    color: COLORS.text,
-    paddingVertical: 2,
   },
 });
 

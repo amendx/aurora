@@ -2,17 +2,19 @@ import React, { useContext, useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
-  StyleSheet,
   ScrollView,
   Pressable,
   RefreshControl,
   Animated,
+  Image,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { AuthContext } from '../context/AuthContext';
 import { useShifts } from '../contexts/ShiftsContext';
-import { Colors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
+import { useColors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
 import ShiftBottomSheet from '../components/ShiftBottomSheet';
+import TodayCoworkersService from '../services/TodayCoworkersService';
+import { getGroupColors } from '../utils/GroupColorConfig';
 
 // ── Skeleton ──────────────────────────────────────────────────────────────────
 const SkeletonBox = ({ width = '100%', height = 20, style }) => {
@@ -38,34 +40,52 @@ const SkeletonBox = ({ width = '100%', height = 20, style }) => {
   );
 };
 
-const ShiftCardSkeleton = () => (
-  <View style={styles.shiftCard}>
-    <View style={styles.shiftDate}>
-      <SkeletonBox width={32} height={28} style={{ marginBottom: 4 }} />
-      <SkeletonBox width={24} height={12} />
+const ShiftCardSkeleton = () => {
+  const C = useColors();
+  const s = makeStyles(C);
+  return (
+    <View style={s.shiftCard}>
+      <View style={s.shiftDate}>
+        <SkeletonBox width={32} height={28} style={{ marginBottom: 4 }} />
+        <SkeletonBox width={24} height={12} />
+      </View>
+      <View style={s.shiftInfo}>
+        <SkeletonBox width="60%" height={14} style={{ marginBottom: 6 }} />
+        <SkeletonBox width="40%" height={12} style={{ marginBottom: 4 }} />
+        <SkeletonBox width="50%" height={11} />
+      </View>
     </View>
-    <View style={styles.shiftInfo}>
-      <SkeletonBox width="60%" height={14} style={{ marginBottom: 6 }} />
-      <SkeletonBox width="40%" height={12} style={{ marginBottom: 4 }} />
-      <SkeletonBox width="50%" height={11} />
-    </View>
-  </View>
-);
+  );
+};
 
-const StatCardSkeleton = () => (
-  <View style={[styles.statsCard, { alignItems: 'center', gap: 6 }]}>
-    <SkeletonBox width={32} height={28} />
-    <SkeletonBox width={48} height={12} />
-  </View>
-);
+const StatCardSkeleton = () => {
+  const C = useColors();
+  const s = makeStyles(C);
+  return (
+    <View style={[s.statsCard, { alignItems: 'center', gap: 6 }]}>
+      <SkeletonBox width={32} height={28} />
+      <SkeletonBox width={48} height={12} />
+    </View>
+  );
+};
 // ─────────────────────────────────────────────────────────────────────────────
 
 const LABEL_MAP = { M: 'Manhã', T: 'Tarde', N: 'Noite' };
 
 const HomeScreenPremium = ({ navigation }) => {
   const { user } = useContext(AuthContext);
-  const { daysWithShifts, loading, error, getCurrentMonthData, loadTwoMonthsData } = useShifts();
+  const { daysWithShifts, loading, error, loadMonthlyShifts } = useShifts();
   const [refreshing, setRefreshing] = useState(false);
+  const [groupColors, setGroupColors] = useState({});
+  const C = useColors();
+  const s = makeStyles(C);
+
+  // Load custom group colors (user overrides saved via GroupsScreen)
+  useEffect(() => {
+    const userId = user?.id;
+    if (!userId) return;
+    getGroupColors(userId).then(setGroupColors);
+  }, [user?.id]);
 
   // Bottom Sheet state
   const [bsVisible, setBsVisible] = useState(false);
@@ -75,27 +95,22 @@ const HomeScreenPremium = ({ navigation }) => {
   const handleRefresh = async () => {
     setRefreshing(true);
     const now = new Date();
-    const currentMonth = now.getMonth() + 1;
-    const currentYear = now.getFullYear();
-    
-    // Usar nova função que carrega 2 meses
-    await loadTwoMonthsData(currentMonth, currentYear);
+    await loadMonthlyShifts(now.getMonth() + 1, now.getFullYear(), true);
     setRefreshing(false);
   };
 
-  // Carregar dados iniciais ao montar o componente
+  // Reload current month on mount and every time this screen gains focus.
+  // Uses navigation.addListener instead of useFocusEffect to avoid requiring
+  // the component to be directly registered as a navigator screen.
   useEffect(() => {
-    const loadInitialData = async () => {
+    const reload = () => {
       const now = new Date();
-      const currentMonth = now.getMonth() + 1;
-      const currentYear = now.getFullYear();
-      
-      // Usar nova função para carregar com contexto completo
-      await loadTwoMonthsData(currentMonth, currentYear);
+      loadMonthlyShifts(now.getMonth() + 1, now.getFullYear());
     };
-    
-    loadInitialData();
-  }, []);
+    reload(); // run on mount
+    const unsubscribe = navigation?.addListener?.('focus', reload);
+    return unsubscribe;
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const getGreeting = () => {
     const hour = new Date().getHours();
@@ -137,24 +152,32 @@ const HomeScreenPremium = ({ navigation }) => {
   };
 
   const renderWelcomeCard = () => (
-    <View style={styles.welcomeCard}>
-      <View style={styles.welcomeContent}>
-        <Text style={styles.greetingText}>{getGreeting()},</Text>
-        <Text style={styles.userNameText}>{user?.name || 'Usuário'}</Text>
-        <Text style={styles.welcomeSubtext}>
+    <View style={s.welcomeCard}>
+      <View style={s.welcomeContent}>
+        <Text style={s.greetingText}>{getGreeting()},</Text>
+        <Text style={s.userNameText}>{user?.name || 'Usuário'}</Text>
+        <Text style={s.welcomeSubtext}>
           {loading
             ? 'Carregando plantões...'
             : `Você tem ${upcomingShifts.length} plantões próximos`}
         </Text>
       </View>
-      <View style={styles.welcomeIcon}>
-        <Ionicons name="medical" size={32} color={Colors.primary} />
+      <View style={s.welcomeIcon}>
+        {user?.photo ? (
+          <Image
+            source={{ uri: user.photo }}
+            style={s.avatarImage}
+            accessibilityLabel="Foto do usuário"
+          />
+        ) : (
+          <Ionicons name="person-circle" size={32} color={C.primary} />
+        )}
       </View>
     </View>
   );
 
   const renderStatsCards = () => (
-    <View style={styles.statsContainer}>
+    <View style={s.statsContainer}>
       {loading ? (
         <>
           <StatCardSkeleton />
@@ -163,22 +186,22 @@ const HomeScreenPremium = ({ navigation }) => {
         </>
       ) : (
         <>
-          <View style={styles.statsCard}>
-            <View style={styles.statItem}>
-              <Text style={styles.statNumber}>{stats.total}</Text>
-              <Text style={styles.statLabel}>Total</Text>
+          <View style={s.statsCard}>
+            <View style={s.statItem}>
+              <Text style={s.statNumber}>{stats.total}</Text>
+              <Text style={s.statLabel}>Total</Text>
             </View>
           </View>
-          <View style={styles.statsCard}>
-            <View style={styles.statItem}>
-              <Text style={styles.statNumber}>{stats.completed}</Text>
-              <Text style={styles.statLabel}>Concluídos</Text>
+          <View style={s.statsCard}>
+            <View style={s.statItem}>
+              <Text style={s.statNumber}>{stats.completed}</Text>
+              <Text style={s.statLabel}>Concluídos</Text>
             </View>
           </View>
-          <View style={styles.statsCard}>
-            <View style={styles.statItem}>
-              <Text style={styles.statNumber}>{stats.upcoming}</Text>
-              <Text style={styles.statLabel}>Próximos</Text>
+          <View style={s.statsCard}>
+            <View style={s.statItem}>
+              <Text style={s.statNumber}>{stats.upcoming}</Text>
+              <Text style={s.statLabel}>Próximos</Text>
             </View>
           </View>
         </>
@@ -187,64 +210,113 @@ const HomeScreenPremium = ({ navigation }) => {
   );
 
   const renderUpcomingShifts = () => (
-    <View style={styles.section}>
-      <View style={styles.sectionHeader}>
-        <Text style={styles.sectionTitle}>Próximos Plantões</Text>
-        <Pressable style={styles.sectionAction} onPress={handleVerTodos}>
-          <Text style={styles.sectionActionText}>Ver todos</Text>
-          <Ionicons name="chevron-forward" size={16} color={Colors.interactive.active} />
+    <View style={s.section}>
+      <View style={s.sectionHeader}>
+        <Text style={s.sectionTitle}>Próximos Plantões</Text>
+        <Pressable style={s.sectionAction} onPress={handleVerTodos}>
+          <Text style={s.sectionActionText}>Ver todos</Text>
+          <Ionicons name="chevron-forward" size={16} color={C.interactive.active} />
         </Pressable>
       </View>
 
       {loading ? (
-        <View style={styles.shiftsContainer}>
+        <View style={s.shiftsContainer}>
           <ShiftCardSkeleton />
           <ShiftCardSkeleton />
         </View>
       ) : upcomingShifts.length > 0 ? (
-        <View style={styles.shiftsContainer}>
+        <View style={s.shiftsContainer}>
           {upcomingShifts.map((shift, index) => {
             const shiftDate = new Date(shift.date + 'T00:00:00');
             const turno = LABEL_MAP[shift.label] || shift.label || '';
             return (
               <Pressable
                 key={index}
-                style={styles.shiftCard}
+                style={s.shiftCard}
                 onPress={() => openShiftBottomSheet(shift)}
               >
-                <View style={styles.shiftDate}>
-                  <Text style={styles.shiftDay}>{shiftDate.getDate()}</Text>
-                  <Text style={styles.shiftWeekday}>
+                <View style={s.shiftDate}>
+                  <Text style={s.shiftDay}>{shiftDate.getDate()}</Text>
+                  <Text style={s.shiftWeekday}>
                     {shiftDate.toLocaleDateString('pt-BR', { weekday: 'short' })}
                   </Text>
                 </View>
 
-                <View style={styles.shiftInfo}>
-                  <Text style={styles.shiftTitle}>
+                <View style={s.shiftInfo}>
+                  <Text style={s.shiftTitle}>
                     {turno ? `Plantão ${turno}` : (shift.title || 'Plantão')}
                   </Text>
-                  <Text style={styles.shiftTime}>
-                    {shift.startTime || shift.start_time} – {shift.endTime || shift.end_time}
-                  </Text>
-                  {shift.group?.name && (
-                    <Text style={styles.shiftGroup}>{shift.group.name}</Text>
-                  )}
-                
+                  {(() => {
+                    // Primary: cross-group cache from TodayCoworkersService
+                    // Fallback: originalData.coworkers[] (own group only, already excludes self)
+                    let coworkers = TodayCoworkersService.getCoworkers(shift.id);
+                    if (coworkers.length === 0 && shift?.originalData?.coworkers?.length > 0) {
+                      coworkers = shift.originalData.coworkers;
+                    }
+                    const vacancies = TodayCoworkersService.getVacanciesByGroup(shift.id);
+                    const totalVacancies = vacancies.reduce((acc, v) => acc + (v.available ?? 0), 0);
+                    if (coworkers.length === 0 && totalVacancies === 0) return null;
+                    const visible = coworkers.slice(0, 4);
+                    const overflow = coworkers.length - visible.length;
+                    return (
+                      <View style={s.coworkerDots}>
+                        {visible.map((p, i) => (
+                          <View
+                            key={p.id}
+                            style={[s.coworkerDot, { marginLeft: i === 0 ? 0 : -6 }]}
+                          >
+                            {p.photo ? (
+                              <Image source={{ uri: p.photo }} style={s.coworkerDotImg} />
+                            ) : (
+                              <View style={s.coworkerDotFallback}>
+                                <Text style={s.coworkerDotInitial}>
+                                  {(p.name || '?').charAt(0).toUpperCase()}
+                                </Text>
+                              </View>
+                            )}
+                          </View>
+                        ))}
+                        {overflow > 0 && (
+                          <View style={[s.coworkerDot, s.coworkerDotOverflow, { marginLeft: -6 }]}>
+                            <Text style={s.coworkerDotOverflowText}>+{overflow}</Text>
+                          </View>
+                        )}
+                        {totalVacancies > 0 && (
+                          <View style={[s.vacancyDot, { marginLeft: coworkers.length > 0 ? 4 : 0 }]}>
+                            <Ionicons name="star-outline" size={9} color={C.warning} />
+                          </View>
+                        )}
+                      </View>
+                    );
+                  })()}
+                  {shift.group?.name && (() => {
+                    const raw = groupColors[String(shift.group?.id)] || shift.group?.color;
+                    const groupColor = raw ? (raw.startsWith('#') ? raw : `#${raw}`) : C.primary;
+                    return (
+                      <View style={s.shiftGroupRow}>
+                        <View style={[s.shiftGroupDot, { backgroundColor: groupColor }]} />
+                        <Text style={[s.shiftGroup, { color: groupColor }]} numberOfLines={1}>
+                          {shift.group.name}
+                        </Text>
+                      </View>
+                    );
+                  })()}
+
                 </View>
 
-                <View style={styles.shiftStatus}>
-                  {/* <View style={[styles.statusIndicator, { backgroundColor: Colors.warning }]} /> */}
-                  <Ionicons name="chevron-forward" size={14} color={Colors.text.tertiary} style={{ marginTop: 4 }} />
+                <View style={s.shiftStatus}>
+                  {/* <View style={[s.statusIndicator, { backgroundColor: C.warning }]} /> */}
+                  <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} style={{ marginTop: 4 }} />
                 </View>
               </Pressable>
             );
           })}
         </View>
       ) : (
-        <View style={styles.emptyState}>
-          <Ionicons name="calendar-outline" size={48} color={Colors.interactive.inactive} />
-          <Text style={styles.emptyStateText}>Nenhum plantão próximo</Text>
-          <Text style={styles.emptyStateSubtext}>
+        <View style={s.emptyState}>
+          <Ionicons name="calendar-outline" size={48} color={C.interactive.inactive} />
+          <Text style={s.emptyStateText}>Nenhum plantão próximo</Text>
+          <Text style={s.emptyStateSubtext}>
             Seus próximos plantões aparecerão aqui
           </Text>
         </View>
@@ -253,42 +325,45 @@ const HomeScreenPremium = ({ navigation }) => {
   );
 
   const renderQuickActions = () => (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>Ações Rápidas</Text>
-      <View style={styles.actionsContainer}>
+    <View style={s.section}>
+       <View style={s.sectionHeader}>
+      <Text style={s.sectionTitle}>Relatórios</Text>
+       </View>
+      <View style={s.actionsContainer}>
         <Pressable
-          style={[styles.actionCard, styles.actionCardDisabled]}
+          style={[s.actionCard, s.actionCardDisabled]}
           disabled
         >
-          <View style={[styles.actionIcon, styles.actionIconDisabled]}>
-            <Ionicons name="time" size={24} color={Colors.text.tertiary} />
+          <View style={[s.actionIcon, s.actionIconDisabled]}>
+            <Ionicons name="time" size={24} color={C.text.tertiary} />
           </View>
-          <Text style={[styles.actionText, styles.actionTextDisabled]}>Registrar Horas</Text>
+          <Text style={[s.actionText, s.actionTextDisabled]}>Registrar Horas</Text>
         </Pressable>
 
         <Pressable
-          style={styles.actionCard}
+          style={s.actionCard}
           onPress={() => navigation?.navigate?.('Reports')}
         >
-          <View style={styles.actionIcon}>
-            <Ionicons name="document-text" size={24} color={Colors.warning} />
+          <View style={s.actionIcon}>
+            <Ionicons name="document-text" size={24} color={C.warning} />
           </View>
-          <Text style={styles.actionText}>Relatórios</Text>
+          <Text style={s.actionText}>Relatórios</Text>
         </Pressable>
       </View>
+     
     </View>
   );
 
   return (
     <>
       <ScrollView
-        style={styles.container}
+        style={s.container}
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />
         }
       >
-        <View style={styles.content}>
+        <View style={s.content}>
           {renderWelcomeCard()}
           {renderStatsCards()}
           {renderUpcomingShifts()}
@@ -306,10 +381,10 @@ const HomeScreenPremium = ({ navigation }) => {
   );
 };
 
-const styles = StyleSheet.create({
+const makeStyles = (C) => ({
   container: {
     flex: 1,
-    backgroundColor: Colors.background.secondary,
+    backgroundColor: C.background.secondary,
   },
   content: {
     padding: Spacing.screen,
@@ -317,7 +392,7 @@ const styles = StyleSheet.create({
 
   // Welcome Card
   welcomeCard: {
-    backgroundColor: Colors.background.primary,
+    backgroundColor: C.background.primary,
     borderRadius: BorderRadius.lg,
     padding: Spacing.lg,
     flexDirection: 'row',
@@ -331,27 +406,33 @@ const styles = StyleSheet.create({
   greetingText: {
     fontSize: Typography.fontSize.body,
     fontWeight: Typography.fontWeight.regular,
-    color: Colors.text.secondary,
+    color: C.text.secondary,
     marginBottom: 4,
   },
   userNameText: {
     fontSize: Typography.fontSize.title2,
     fontWeight: Typography.fontWeight.bold,
-    color: Colors.text.primary,
+    color: C.text.primary,
     marginBottom: Spacing.sm,
   },
   welcomeSubtext: {
     fontSize: Typography.fontSize.subhead,
     fontWeight: Typography.fontWeight.regular,
-    color: Colors.text.tertiary,
+    color: C.text.tertiary,
   },
   welcomeIcon: {
     width: 64,
     height: 64,
-    backgroundColor: Colors.background.secondary,
+    backgroundColor: C.background.secondary,
     borderRadius: 32,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  avatarImage: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    resizeMode: 'cover',
   },
 
   // Stats Cards
@@ -362,7 +443,7 @@ const styles = StyleSheet.create({
   },
   statsCard: {
     flex: 1,
-    backgroundColor: Colors.background.primary,
+    backgroundColor: C.background.primary,
     borderRadius: BorderRadius.md,
     padding: Spacing.md,
     alignItems: 'center',
@@ -374,20 +455,20 @@ const styles = StyleSheet.create({
   statNumber: {
     fontSize: Typography.fontSize.title1,
     fontWeight: Typography.fontWeight.bold,
-    color: Colors.primary,
+    color: C.primary,
     marginBottom: 4,
   },
   statLabel: {
     fontSize: Typography.fontSize.caption3,
     fontWeight: Typography.fontWeight.medium,
-    color: Colors.text.secondary,
+    color: C.text.secondary,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
   },
 
   // Sections
   section: {
-    marginBottom: Spacing.xl,
+    marginBottom: Spacing.md,
   },
   sectionHeader: {
     flexDirection: 'row',
@@ -398,7 +479,7 @@ const styles = StyleSheet.create({
   sectionTitle: {
     fontSize: Typography.fontSize.title3,
     fontWeight: Typography.fontWeight.semiBold,
-    color: Colors.text.primary,
+    color: C.text.primary,
   },
   sectionAction: {
     flexDirection: 'row',
@@ -407,7 +488,7 @@ const styles = StyleSheet.create({
   sectionActionText: {
     fontSize: Typography.fontSize.subhead,
     fontWeight: Typography.fontWeight.medium,
-    color: Colors.interactive.active,
+    color: C.interactive.active,
     marginRight: 4,
   },
 
@@ -416,7 +497,7 @@ const styles = StyleSheet.create({
     gap: Spacing.sm,
   },
   shiftCard: {
-    backgroundColor: Colors.background.primary,
+    backgroundColor: C.background.primary,
     borderRadius: BorderRadius.md,
     padding: Spacing.md,
     flexDirection: 'row',
@@ -431,13 +512,13 @@ const styles = StyleSheet.create({
   shiftDay: {
     fontSize: Typography.fontSize.title2,
     fontWeight: Typography.fontWeight.bold,
-    color: Colors.primary,
+    color: C.primary,
     lineHeight: Typography.fontSize.title2 * 1.1,
   },
   shiftWeekday: {
     fontSize: Typography.fontSize.caption1,
     fontWeight: Typography.fontWeight.medium,
-    color: Colors.text.secondary,
+    color: C.text.secondary,
     textTransform: 'uppercase',
   },
   shiftInfo: {
@@ -446,25 +527,92 @@ const styles = StyleSheet.create({
   shiftTitle: {
     fontSize: Typography.fontSize.body,
     fontWeight: Typography.fontWeight.semiBold,
-    color: Colors.text.primary,
+    color: C.text.primary,
     marginBottom: 2,
   },
   shiftTime: {
     fontSize: Typography.fontSize.subhead,
     fontWeight: Typography.fontWeight.regular,
-    color: Colors.text.secondary,
+    color: C.text.secondary,
     marginBottom: 2,
+  },
+  shiftGroupRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginBottom: 2,
+  },
+  shiftGroupDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    flexShrink: 0,
   },
   shiftGroup: {
     fontSize: Typography.fontSize.footnote,
     fontWeight: Typography.fontWeight.medium,
-    color: Colors.primary,
-    marginBottom: 2,
+    color: C.primary,
+    flex: 1,
+  },
+  coworkerDots: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 3,
+    marginTop: 1,
+  },
+  coworkerDot: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: C.background.primary,
+    overflow: 'hidden',
+  },
+  coworkerDotImg: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+  },
+  coworkerDotFallback: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: C.primary + '30',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  coworkerDotInitial: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: C.primary,
+  },
+ coworkerDotOverflow: {
+  backgroundColor: C.border.medium,
+  alignItems: 'center',
+  justifyContent: 'center',
+},
+
+coworkerDotOverflowText: {
+  fontSize: 8,
+  fontWeight: '700',
+  color: C.text.secondary,
+  textAlign: 'center',
+  includeFontPadding: false,
+},
+  vacancyDot: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: C.warning + '20',
+    borderWidth: 1,
+    borderColor: C.warning + '50',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   shiftLocation: {
     fontSize: Typography.fontSize.footnote,
     fontWeight: Typography.fontWeight.regular,
-    color: Colors.text.tertiary,
+    color: C.text.tertiary,
   },
   shiftStatus: {
     alignItems: 'center',
@@ -478,7 +626,7 @@ const styles = StyleSheet.create({
 
   // Empty State
   emptyState: {
-    backgroundColor: Colors.background.primary,
+    backgroundColor: C.background.primary,
     borderRadius: BorderRadius.md,
     padding: Spacing.xxl,
     alignItems: 'center',
@@ -487,14 +635,14 @@ const styles = StyleSheet.create({
   emptyStateText: {
     fontSize: Typography.fontSize.body,
     fontWeight: Typography.fontWeight.medium,
-    color: Colors.text.primary,
+    color: C.text.primary,
     marginTop: Spacing.md,
     marginBottom: 4,
   },
   emptyStateSubtext: {
     fontSize: Typography.fontSize.subhead,
     fontWeight: Typography.fontWeight.regular,
-    color: Colors.text.secondary,
+    color: C.text.secondary,
     textAlign: 'center',
   },
 
@@ -505,7 +653,7 @@ const styles = StyleSheet.create({
   },
   actionCard: {
     flex: 1,
-    backgroundColor: Colors.background.primary,
+    backgroundColor: C.background.primary,
     borderRadius: BorderRadius.md,
     padding: Spacing.md,
     alignItems: 'center',
@@ -514,7 +662,7 @@ const styles = StyleSheet.create({
   actionIcon: {
     width: 48,
     height: 48,
-    backgroundColor: Colors.background.secondary,
+    backgroundColor: C.background.secondary,
     borderRadius: 24,
     alignItems: 'center',
     justifyContent: 'center',
@@ -523,17 +671,17 @@ const styles = StyleSheet.create({
   actionText: {
     fontSize: Typography.fontSize.subhead,
     fontWeight: Typography.fontWeight.medium,
-    color: Colors.text.primary,
+    color: C.text.primary,
     textAlign: 'center',
   },
   actionCardDisabled: {
     opacity: 0.45,
   },
   actionIconDisabled: {
-    backgroundColor: Colors.background.secondary,
+    backgroundColor: C.background.secondary,
   },
   actionTextDisabled: {
-    color: Colors.text.tertiary,
+    color: C.text.tertiary,
   },
 });
 

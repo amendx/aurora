@@ -1,278 +1,203 @@
-import React, { useContext } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  Pressable,
-} from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { AuthContext } from '../context/AuthContext';
-import { Colors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
+import React, { useContext } from "react";
+import { View, Text, StyleSheet, ScrollView, Pressable, Alert, Switch } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
+import { AuthContext } from "../context/AuthContext";
+import { useTheme } from "../contexts/ThemeContext";
+import { useColors, Typography, Spacing, Shadows, BorderRadius } from "../constants/DesignSystem";
 
 const SettingsScreenPremium = ({ navigation }) => {
-  const { user } = useContext(AuthContext);
+  const { logout } = useContext(AuthContext);
+  const { isDark, preference, setTheme } = useTheme();
+  const C = useColors();
+
+  const themeLabel = preference === 'system' ? 'Automático' : preference === 'dark' ? 'Escuro' : 'Claro';
+  const themeIcon = preference === 'system' ? 'phone-portrait-outline' : preference === 'dark' ? 'moon-outline' : 'sunny-outline';
+
+  const handleLogout = () => {
+    Alert.alert(
+      'Sair da Conta',
+      'Tem certeza que deseja sair da sua conta?',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        { text: 'Sair', style: 'destructive', onPress: logout },
+      ]
+    );
+  };
 
   const settingsItems = [
     {
-      id: 'profile',
-      title: 'Perfil',
-      subtitle: 'Gerencie suas informações pessoais',
-      icon: 'person-outline',
-      onPress: () => navigation?.navigate('Profile'),
+      id: "profile",
+      title: "Perfil",
+      subtitle: "Gerencie suas informações pessoais",
+      icon: "person-outline",
+      onPress: () => navigation?.navigate("Profile"),
     },
     {
-      id: 'config',
-      title: 'Valores do Plantão',
-      subtitle: 'Configure valores e parâmetros',
-      icon: 'calculator-outline',
-      onPress: () => navigation?.navigate('ConfigScreenPremium'),
+      id: "config",
+      title: "Valores do Plantão",
+      subtitle: "Configure valores e parâmetros",
+      icon: "calculator-outline",
+      onPress: () => navigation?.navigate("ConfigScreenPremium"),
     },
     {
-      id: 'notifications',
-      title: 'Notificações',
-      subtitle: 'Gerencie suas notificações',
-      icon: 'notifications-outline',
-      onPress: () => console.log('Notifications'),
+      id: "groups",
+      title: "Grupos",
+      subtitle: "Gerencie seus grupos",
+      icon: "people-circle-outline",
+      onPress: () => navigation?.navigate("GroupsScreen"),
     },
     {
-      id: 'theme',
-      title: 'Aparência',
-      subtitle: 'Tema claro, escuro ou automático',
-      icon: 'color-palette-outline',
-      onPress: () => console.log('Theme'),
-    },
-    {
-      id: 'backup',
-      title: 'Backup e Sincronização',
-      subtitle: 'Mantenha seus dados seguros',
-      icon: 'cloud-outline',
-      onPress: () => console.log('Backup'),
-    },
-    {
-      id: 'privacy',
-      title: 'Privacidade',
-      subtitle: 'Controle seus dados pessoais',
-      icon: 'shield-checkmark-outline',
-      onPress: () => console.log('Privacy'),
-    },
-    {
-      id: 'about',
-      title: 'Sobre o App',
-      subtitle: 'Versão, licenças e informações',
-      icon: 'information-circle-outline',
-      onPress: () => console.log('About'),
-    },
-    {
-      id: 'help',
-      title: 'Ajuda e Suporte',
-      subtitle: 'FAQ, contato e documentação',
-      icon: 'help-circle-outline',
-      onPress: () => console.log('Help'),
+      id: "groupVisibility",
+      title: "Visibilidade de grupos",
+      subtitle: "Escolha quem aparece no seu plantão",
+      icon: "cloud-circle-outline",
+      onPress: () => navigation?.navigate("GroupVisibilityScreen"),
     },
   ];
 
-  const renderUserCard = () => (
-    <View style={styles.userCard}>
-      <View style={styles.avatar}>
-        <Ionicons name="person" size={28} color={Colors.interactive.active} />
-      </View>
-      <View style={styles.userInfo}>
-        <Text style={styles.userName}>{user?.name || 'Usuário'}</Text>
-        <Text style={styles.userEmail}>{user?.email || 'email@exemplo.com'}</Text>
-      </View>
-      <Pressable style={styles.editButton} onPress={() => navigation?.navigate('Profile')}>
-        <Ionicons name="chevron-forward" size={20} color={Colors.interactive.inactive} />
-      </Pressable>
-    </View>
-  );
+  const s = makeStyles(C);
 
   const renderSettingsItem = (item, isLast = false) => (
     <View key={item.id}>
       <Pressable
-        style={({ pressed }) => [
-          styles.settingsItem,
-          pressed && styles.settingsItemPressed
-        ]}
+        style={({ pressed }) => [s.settingsItem, pressed && s.settingsItemPressed]}
         onPress={item.onPress}
       >
-        <View style={styles.settingsIcon}>
-          <Ionicons name={item.icon} size={24} color={Colors.interactive.active} />
+        <View style={s.settingsIcon}>
+          <Ionicons name={item.icon} size={24} color={C.interactive.active} />
         </View>
-        <View style={styles.settingsContent}>
-          <Text style={styles.settingsTitle}>{item.title}</Text>
-          <Text style={styles.settingsSubtitle}>{item.subtitle}</Text>
+        <View style={s.settingsContent}>
+          <Text style={s.settingsTitle}>{item.title}</Text>
+          <Text style={s.settingsSubtitle}>{item.subtitle}</Text>
         </View>
-        <Ionicons name="chevron-forward" size={20} color={Colors.interactive.inactive} />
+        <Ionicons name="chevron-forward" size={20} color={C.interactive.inactive} />
       </Pressable>
-      {!isLast && <View style={styles.separator} />}
+      {!isLast && <View style={s.separator} />}
     </View>
   );
 
-  const renderSection = (title, items, startIndex = 0) => (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>{title}</Text>
-      <View style={styles.card}>
+  const renderSection = (title, items) => (
+    <View style={s.section}>
+      <Text style={s.sectionTitle}>{title}</Text>
+      <View style={s.card}>
         {items.map((item, index) => renderSettingsItem(item, index === items.length - 1))}
       </View>
     </View>
   );
 
-  // Group settings items by sections
   const accountItems = settingsItems.slice(0, 2);
-  const appItems = settingsItems.slice(2, 5);
-  const supportItems = settingsItems.slice(5, 8);
+  const groupsItems = settingsItems.slice(2, 4);
 
   return (
-    <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
-      <View style={styles.content}>
-        {/* User Card */}
-        {renderUserCard()}
+    <ScrollView style={s.container} showsVerticalScrollIndicator={false}>
+      <View style={s.content}>
+        {renderSection("Conta", accountItems)}
+        {renderSection("Grupos", groupsItems)}
 
-        {/* Settings Sections */}
-        {renderSection('Conta', accountItems)}
-        {/* {renderSection('Aplicativo', appItems)} */}
-        {/* {renderSection('Suporte', supportItems)} */}
+        <View style={s.section}>
+          <Text style={s.sectionTitle}>Aplicativo</Text>
+          <View style={s.card}>
+            {/* Theme toggle */}
+            <Pressable style={s.settingsItem} onPress={() => setTheme(isDark ? 'light' : 'dark')}>
+              <View style={s.settingsIcon}>
+                <Ionicons name={themeIcon} size={24} color={C.interactive.active} />
+              </View>
+              <View style={s.settingsContent}>
+                <Text style={s.settingsTitle}>Aparência</Text>
+                <Text style={s.settingsSubtitle}>{themeLabel}</Text>
+              </View>
+              <Switch
+                value={isDark}
+                onValueChange={() => setTheme(isDark ? 'light' : 'dark')}
+                trackColor={{ false: C.border.medium, true: C.primary + '60' }}
+                thumbColor={isDark ? C.primary : C.interactive.inactive}
+              />
+            </Pressable>
+            <View style={s.separator} />
+            <Pressable
+              style={({ pressed }) => [s.settingsItem, pressed && s.settingsItemPressed]}
+              onPress={handleLogout}
+            >
+              <View style={[s.settingsIcon, { backgroundColor: C.error + '15' }]}>
+                <Ionicons name="log-out-outline" size={24} color={C.error} />
+              </View>
+              <View style={s.settingsContent}>
+                <Text style={[s.settingsTitle, { color: C.error }]}>Sair da Conta</Text>
+                <Text style={s.settingsSubtitle}>Desconectar do aplicativo</Text>
+              </View>
+            </Pressable>
+          </View>
+        </View>
 
-        {/* App Version */}
-        <View style={styles.versionContainer}>
-          <Text style={styles.versionText}>Aurora v1.0.0</Text>
-          <Text style={styles.buildText}>Build 2024.03.10</Text>
+        <View style={s.versionContainer}>
+          <Text style={s.versionText}>Aurora v1.0.0</Text>
         </View>
       </View>
     </ScrollView>
   );
 };
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: Colors.background.secondary,
-  },
-  content: {
-    padding: Spacing.screen,
-    paddingBottom: Spacing.xxxl + 60, // Extra space for tab bar
-  },
-
-  // User Card
-  userCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: Colors.background.primary,
-    borderRadius: BorderRadius.lg,
-    padding: Spacing.lg,
-    marginBottom: Spacing.xl,
-    ...Shadows.small,
-  },
-  avatar: {
-    width: 56,
-    height: 56,
-    backgroundColor: Colors.background.secondary,
-    borderRadius: 28,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: Spacing.md,
-    ...Shadows.small,
-  },
-  userInfo: {
-    flex: 1,
-  },
-  userName: {
-    fontSize: Typography.fontSize.title3,
-    fontWeight: Typography.fontWeight.semiBold,
-    color: Colors.text.primary,
-    marginBottom: 2,
-  },
-  userEmail: {
-    fontSize: Typography.fontSize.subhead,
-    fontWeight: Typography.fontWeight.regular,
-    color: Colors.text.secondary,
-  },
-  editButton: {
-    width: 44,
-    height: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-
-  // Sections
-  section: {
-    marginBottom: Spacing.lg,
-  },
+const makeStyles = (C) => ({
+  container: { flex: 1, backgroundColor: C.background.secondary },
+  content: { padding: Spacing.screen, paddingBottom: Spacing.xxxl + 60 },
+  section: { marginBottom: Spacing.lg },
   sectionTitle: {
     fontSize: Typography.fontSize.subhead,
     fontWeight: Typography.fontWeight.semiBold,
-    color: Colors.text.secondary,
+    color: C.text.secondary,
     marginBottom: Spacing.sm,
     marginLeft: Spacing.sm,
-    textTransform: 'uppercase',
+    textTransform: "uppercase",
     letterSpacing: 0.5,
   },
   card: {
-    backgroundColor: Colors.background.primary,
+    backgroundColor: C.background.primary,
     borderRadius: BorderRadius.lg,
-    overflow: 'hidden',
+    overflow: "hidden",
     ...Shadows.small,
   },
-
-  // Settings Items
   settingsItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     padding: Spacing.md,
     minHeight: 64,
   },
-  settingsItemPressed: {
-    backgroundColor: Colors.background.secondary,
-  },
+  settingsItemPressed: { backgroundColor: C.background.secondary },
   settingsIcon: {
     width: 40,
     height: 40,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: Colors.background.secondary,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: C.background.secondary,
     borderRadius: 20,
     marginRight: Spacing.md,
   },
-  settingsContent: {
-    flex: 1,
-  },
+  settingsContent: { flex: 1 },
   settingsTitle: {
     fontSize: Typography.fontSize.body,
     fontWeight: Typography.fontWeight.medium,
-    color: Colors.text.primary,
+    color: C.text.primary,
     marginBottom: 2,
   },
   settingsSubtitle: {
     fontSize: Typography.fontSize.footnote,
-    fontWeight: Typography.fontWeight.regular,
-    color: Colors.text.secondary,
-    lineHeight: Typography.fontSize.footnote * Typography.lineHeight.normal,
+    color: C.text.secondary,
   },
   separator: {
     height: StyleSheet.hairlineWidth,
-    backgroundColor: Colors.border.light,
-    marginLeft: 56, // Align with content after icon
+    backgroundColor: C.border.light,
+    marginLeft: 56,
   },
-
-  // Version Info
   versionContainer: {
-    alignItems: 'center',
+    alignItems: "center",
     marginTop: Spacing.xl,
     paddingTop: Spacing.lg,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: Colors.border.light,
+    borderTopColor: C.border.light,
   },
   versionText: {
-    fontSize: Typography.fontSize.subhead,
-    fontWeight: Typography.fontWeight.medium,
-    color: Colors.text.secondary,
-  },
-  buildText: {
     fontSize: Typography.fontSize.caption1,
-    fontWeight: Typography.fontWeight.regular,
-    color: Colors.text.tertiary,
-    marginTop: 2,
+    color: C.text.tertiary,
   },
 });
 
