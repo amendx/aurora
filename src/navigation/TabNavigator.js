@@ -1,6 +1,7 @@
 import React, { useState, useContext } from 'react';
-import { View, StyleSheet } from 'react-native';
+import { View } from 'react-native';
 import { AuthContext } from '../context/AuthContext';
+import { useColors } from '../constants/DesignSystem';
 import AppHeader from '../components/AppHeader';
 import HomeScreen from '../screens/HomeScreen';
 import CalendarScreen from '../screens/CalendarScreen';
@@ -11,6 +12,7 @@ import Logger from '../utils/Logger';
 export default function TabNavigator({ navigation }) {
   const [currentTab, setCurrentTab] = useState('home');
   const { user } = useContext(AuthContext);
+  const C = useColors();
 
   const handleTabPress = (tabId) => {
     Logger.debug(`📱 Navegando para tab: ${tabId}`);
@@ -21,6 +23,8 @@ export default function TabNavigator({ navigation }) {
     Logger.debug(`📱 Navegação interna para: ${screenName}`);
     if (screenName === 'ConfigScreenPremium') {
       navigation.navigate('ConfigScreenPremium');
+    } else if (screenName === 'GroupVisibilityScreen') {
+      navigation.navigate('GroupVisibilityScreen');
     }
   };
 
@@ -64,26 +68,12 @@ export default function TabNavigator({ navigation }) {
   };
 
   return (
-    <View style={styles.container}>
-      {/* Header fixo e compartilhado */}
+    <View style={{ flex: 1, backgroundColor: C.background.primary }}>
       <AppHeader {...getHeaderData()} />
-      
-      <View style={styles.content}>
+      <View style={{ flex: 1, paddingBottom: 60 }}>
         {renderCurrentScreen()}
       </View>
-      
       <TabBar currentTab={currentTab} onTabPress={handleTabPress} />
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#FFFFFF',
-  },
-  content: {
-    flex: 1,
-    paddingBottom: 60,
-  },
-});

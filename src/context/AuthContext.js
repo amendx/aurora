@@ -1,7 +1,44 @@
-import React, { createContext, useState, useEffect, useContext } from 'react';
-import { SoffiaApiService } from '../services/SoffiaApiService';
+import React, { createContext, useState, useEffect } from 'react';
+import { WebClientApiService } from '../services/WebClientApiService';
 import { StorageService } from '../utils/StorageService';
+import { runMigration } from '../services/StorageMigration';
+import LocalCache from '../services/LocalCache';
+import FirebaseAdapter from '../services/firebase/FirebaseAdapter';
+import { syncCurrentMonthToFirebase } from '../services/firebase/LoginSyncService';
+import {
+  createAccount,
+  loginAuroraUser,
+  getFirebaseIdToken,
+  waitForAuroraAuth,
+  signOutAurora,
+  friendlyAuthError,
+} from '../services/firebase/SignupService';
+import { handleGoogleSignIn } from '../services/firebase/GoogleSignInService';
+import { db } from '../services/firebase/config';
+import { useTheme } from '../contexts/ThemeContext';
+import TodayCoworkersService from '../services/TodayCoworkersService';
 import Logger from '../utils/Logger';
+
+// Returns true only if Firestore has a doc for this email with source:'aurora'.
+const _isAuroraAccountInFirestore = async (email) => {
+  if (!db || !email) return false;
+  const { collection, query, where, getDocs } = await import('firebase/firestore');
+  const snap = await getDocs(query(collection(db, 'users'), where('email', '==', email)));
+  if (snap.empty) return false;
+  return snap.docs[0].data()?.source === 'aurora';
+};
+
+const _fireMigration = (userId) => {
+  if (!userId) return;
+  runMigration(userId).catch(err =>
+    Logger.warn('StorageMigration background error:', err?.message)
+  );
+};
+
+const _activateFirebase = () => LocalCache.setFirebaseAdapter(FirebaseAdapter);
+const _deactivateFirebase = () => LocalCache.setFirebaseAdapter(null);
+
+const _isAurora = (userData) => userData?.source === 'aurora';
 
 const AuthContext = createContext({});
 
@@ -10,6 +47,7 @@ export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [token, setToken] = useState(null);
+  const { setUserId: setThemeUserId } = useTheme();
 
   useEffect(() => {
     checkAuthStatus();
@@ -18,18 +56,39 @@ export const AuthProvider = ({ children }) => {
   const checkAuthStatus = async () => {
     try {
       Logger.info('🔍 Verificando status de autenticação...');
-      
+
       const storedToken = await StorageService.getToken();
       const userData = await StorageService.getUserData();
-      
+
       if (storedToken && userData) {
-        // Verificar se o token ainda é válido
-        const isTokenValid = await validateToken(storedToken);
-        
+        const isTokenValid = await validateToken(storedToken, userData);
+
         if (isTokenValid) {
-          setToken(storedToken);
+          // For Aurora users, always refresh the ID token on startup so it
+          // never becomes stale (Firebase ID tokens expire after 1 hour).
+          let activeToken = storedToken;
+          if (_isAurora(userData)) {
+            const fresh = await getFirebaseIdToken();
+            if (fresh) {
+              activeToken = fresh;
+              await StorageService.saveToken(fresh);
+            }
+          }
+
+          setToken(activeToken);
           setUser(userData);
           setIsAuthenticated(true);
+          setThemeUserId(userData?.id || null);
+          _fireMigration(userData?.id);
+          _activateFirebase();
+          FirebaseAdapter.saveUser(userData?.id, null, userData).catch(() => {});
+
+          // WebClient-only background tasks — skip for Aurora users who have no WebClient token.
+          if (!_isAurora(userData)) {
+            syncCurrentMonthToFirebase(userData?.id).catch(() => {});
+            TodayCoworkersService.compute(userData?.id, activeToken, userData?.id).catch(() => {});
+          }
+
           Logger.info('✅ Usuário já autenticado com token válido');
         } else {
           Logger.warn('⚠️ Token expirado, removendo dados');
@@ -46,23 +105,23 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
-  const validateToken = async (tokenToValidate) => {
+  const validateToken = async (tokenToValidate, userData) => {
     try {
-      // Se for token mockado, sempre considerar válido
-      if (tokenToValidate === 'mock_token_for_development') {
-        Logger.debug('🧪 Token mockado detectado - considerando válido');
-        return true;
+      // Aurora users: wait for Firebase Auth to restore session from AsyncStorage.
+      // auth.currentUser is null synchronously on startup — waitForAuroraAuth uses
+      // onAuthStateChanged to get the real answer after the SDK initializes.
+      if (_isAurora(userData)) {
+        return waitForAuroraAuth();
       }
-      
-      // Tentar fazer uma requisição simples para validar o token
-      const response = await fetch('https://api.plantaoativo.com/users/profile', {
+
+      const response = await fetch(`${process.env.EXPO_PUBLIC_API_URL}/users/profile`, {
         method: 'GET',
         headers: {
           'Accept': 'application/json',
           'Authorization': `Bearer ${tokenToValidate}`,
         },
       });
-      
+
       Logger.debug(`🔐 Validação do token - Status: ${response.status}`);
       return response.status === 200;
     } catch (error) {
@@ -74,34 +133,68 @@ export const AuthProvider = ({ children }) => {
   const login = async (email, password) => {
     try {
       setLoading(true);
-      const result = await SoffiaApiService.login(email, password);
+      Logger.info(`🔐 Login attempt — email: ${email}`);
 
-      Logger.debug('🔍 Resultado do SoffiaApiService.login:', JSON.stringify(result));
+      // ── Step 1: try Firebase Auth (Aurora users) ──────────────────────────
+      // Errors that mean "stop here — don't fall through to WebClient":
+      const FIREBASE_HARD_STOP = new Set([
+        'auth/wrong-password',
+        'auth/invalid-credential', // Firebase SDK v10+ merges wrong-password into this
+        'auth/too-many-requests',
+        'auth/user-disabled',
+      ]);
 
-      // Extrair apiData do formato { message, data: {...} } ou { success, data: { data: {...} } }
+      try {
+        const aurora = await loginAuroraUser(email, password);
+        if (aurora) {
+          const { userInfo, idToken } = aurora;
+          await StorageService.saveToken(idToken);
+          await StorageService.saveUserData(userInfo);
+          setToken(idToken);
+          setUser(userInfo);
+          setIsAuthenticated(true);
+          setThemeUserId(userInfo?.id || null);
+          _activateFirebase();
+          FirebaseAdapter.saveUser(userInfo.id, null, userInfo).catch(() => {});
+          Logger.info(`✅ Login concluído — email: ${email} source: aurora`);
+          return { success: true };
+        }
+        // loginAuroraUser returned null → Firebase not initialised, fall through
+      } catch (firebaseErr) {
+        if (FIREBASE_HARD_STOP.has(firebaseErr.code)) {
+          // Before hard-stopping, confirm this is actually an Aurora account in Firestore.
+          // If no Firestore doc with source:'aurora' exists, fall through to WebClient —
+          // the Firebase Auth account may be a ghost (e.g. migrated WebClient user).
+          const isAuroraAccount = await _isAuroraAccountInFirestore(email).catch(() => false);
+          if (isAuroraAccount) {
+            return { success: false, error: friendlyAuthError(firebaseErr.code) || 'Senha incorreta.' };
+          }
+          Logger.debug(`🔍 Firebase hard-stop mas sem conta Aurora no Firestore — tentando WebClient...`);
+        } else {
+          // auth/user-not-found or anything else → try WebClient below.
+          Logger.debug(`🔍 Firebase login falhou (${firebaseErr.code}), tentando WebClient...`);
+        }
+      }
+
+      // ── Step 2: WebClient API (original PlantaoAPI users) ─────────────────
+      const result = await WebClientApiService.login(email, password);
+
       let apiData = null;
-
       if (result && result.message && result.data) {
-        // Formato direto da API real / login local: { message: "...", data: { token, id, name, ... } }
         apiData = result.data;
       } else if (result && result.success && result.data) {
-        // Formato legado com { success: true, data: { data: { token, ... } } }
         apiData = result.data.data || result.data;
       }
 
       if (!apiData) {
-        const errorMsg = result?.error || 'Resposta inválida do servidor';
-        Logger.error('❌ Login falhou:', errorMsg);
-        return { success: false, error: errorMsg };
+        return { success: false, error: result?.error || 'Credenciais inválidas.' };
       }
 
       const extractedToken = apiData.token;
       if (!extractedToken) {
-        Logger.error('❌ Token não encontrado na resposta');
-        return { success: false, error: 'Token não recebido pelo servidor' };
+        return { success: false, error: 'Token não recebido pelo servidor.' };
       }
 
-      // Normalizar dados do usuário — suportar variações de campo da API
       const userInfo = {
         id: apiData.id || apiData.user_id,
         name: apiData.name || apiData.full_name || apiData.username || email,
@@ -109,23 +202,25 @@ export const AuthProvider = ({ children }) => {
         username: apiData.username || '',
         role: apiData.role || '',
         photo: apiData.photo || null,
-        council: apiData.council || '',
+        council: apiData.council || { id: '', state: '' },
         phone: apiData.phone || '',
         is_premium: apiData.is_premium || false,
+        // source intentionally absent — treated as 'webClient' everywhere
       };
-
-      Logger.info('✅ Login bem-sucedido!');
-      Logger.info(`👤 Usuário: ${userInfo.name} (${userInfo.email})`);
-      Logger.info(`🔑 Token: ${extractedToken.substring(0, 20)}...`);
 
       await StorageService.saveToken(extractedToken);
       await StorageService.saveUserData(userInfo);
-
       setToken(extractedToken);
       setUser(userInfo);
       setIsAuthenticated(true);
+      setThemeUserId(userInfo.id);
+      _fireMigration(userInfo.id);
+      _activateFirebase();
+      FirebaseAdapter.saveUser(userInfo.id, apiData, userInfo).catch(() => {});
+      syncCurrentMonthToFirebase(userInfo.id).catch(() => {});
+      TodayCoworkersService.compute(userInfo.id, extractedToken, userInfo.id).catch(() => {});
 
-      Logger.info('✅ Login finalizado e dados armazenados');
+      Logger.info(`✅ Login concluído — email: ${email} source: webClient`);
       return { success: true };
     } catch (error) {
       Logger.error('❌ Erro no processo de login:', error.message);
@@ -135,23 +230,80 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
+  const signup = async (signupData) => {
+    try {
+      setLoading(true);
+      const userInfo = await createAccount(signupData);
+      const idToken = await getFirebaseIdToken();
+
+      await StorageService.saveToken(idToken);
+      await StorageService.saveUserData(userInfo);
+
+      setToken(idToken);
+      setUser(userInfo);
+      setIsAuthenticated(true);
+      setThemeUserId(userInfo.id);
+      _activateFirebase();
+      FirebaseAdapter.saveUser(userInfo.id, null, userInfo).catch(() => {});
+
+      Logger.info('✅ Conta Aurora criada com sucesso');
+      return { success: true };
+    } catch (error) {
+      Logger.error('❌ Erro ao criar conta:', error.message);
+      const friendly = friendlyAuthError(error.code);
+      return { success: false, error: friendly || error.message };
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loginWithGoogle = async (accessToken) => {
+    try {
+      setLoading(true);
+      const { userInfo, idToken } = await handleGoogleSignIn(accessToken);
+
+      await StorageService.saveToken(idToken);
+      await StorageService.saveUserData(userInfo);
+
+      setToken(idToken);
+      setUser(userInfo);
+      setIsAuthenticated(true);
+      setThemeUserId(userInfo.id);
+      _activateFirebase();
+      FirebaseAdapter.saveUser(userInfo.id, null, userInfo).catch(() => {});
+
+      Logger.info(`✅ Login concluído — email: ${userInfo.email} source: aurora (google)`);
+      return { success: true };
+    } catch (error) {
+      Logger.error('❌ Erro no login Google:', error.message);
+      const friendly = friendlyAuthError(error.code);
+      return { success: false, error: friendly || error.message };
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const logout = async () => {
     try {
       setLoading(true);
       const storedToken = await StorageService.getToken();
+      const userData = await StorageService.getUserData();
 
-      // Só chama a API de logout se for um token real (não login local)
-      if (storedToken && storedToken !== 'mock_token_for_development') {
-        await SoffiaApiService.logout(storedToken);
-      } else {
-        Logger.info('🧪 Logout local - sem chamada à API');
+      if (_isAurora(userData)) {
+        // Aurora users: sign out from Firebase Auth; no WebClient API to call.
+        await signOutAurora();
+      } else if (storedToken) {
+        // WebClient users: invalidate the PlantaoAPI session.
+        await WebClientApiService.logout(storedToken).catch(() => {});
       }
-      
+
       await StorageService.clearAll();
+      _deactivateFirebase();
+      setThemeUserId(null);
       setUser(null);
       setToken(null);
       setIsAuthenticated(false);
-      
+
       return { success: true };
     } catch (error) {
       console.error('Erro no logout:', error);
@@ -161,13 +313,36 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
+  const updatePhoto = async (photoUri) => {
+    try {
+      const { _compressAndUpload } = await import('../services/firebase/SignupService');
+      const photoUrl = await _compressAndUpload(user.id, photoUri);
+      const { db: firestoreDb } = await import('../services/firebase/config');
+      const { doc, setDoc } = await import('firebase/firestore');
+      if (firestoreDb) {
+        await setDoc(doc(firestoreDb, 'users', user.id), { photo: photoUrl }, { merge: true });
+      }
+      const updated = { ...user, photo: photoUrl };
+      await StorageService.saveUserData(updated);
+      setUser(updated);
+      Logger.info('✅ Foto de perfil atualizada');
+      return { success: true };
+    } catch (err) {
+      Logger.error('❌ Erro ao atualizar foto:', err?.message);
+      return { success: false, error: err?.message };
+    }
+  };
+
   const value = {
     isAuthenticated,
     user,
     token,
     loading,
     login,
+    signup,
+    loginWithGoogle,
     logout,
+    updatePhoto,
   };
 
   return (

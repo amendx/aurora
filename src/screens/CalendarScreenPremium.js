@@ -2,11 +2,8 @@ import React, { useState, useEffect, useContext, useRef, useCallback } from 'rea
 import {
   View,
   Text,
-  StyleSheet,
   ScrollView,
   Pressable,
-  Alert,
-  ActivityIndicator,
   Animated,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -14,10 +11,11 @@ import { Calendar, LocaleConfig } from 'react-native-calendars';
 import * as SecureStore from 'expo-secure-store';
 import { AuthContext } from '../context/AuthContext';
 import { useShifts } from '../contexts/ShiftsContext';
-import { Colors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
+import { useColors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
 import Logger from '../utils/Logger';
 import ShiftBottomSheet from '../components/ShiftBottomSheet';
 import { getShiftValues, calculateShiftValueSync } from '../utils/ShiftValueCalculator';
+import TimeUtils from '../utils/TimeUtils';
 
 // Configurar calendário em português
 LocaleConfig.locales['pt'] = {
@@ -52,25 +50,39 @@ const SkeletonBox = ({ width = '100%', height = 20, style }) => {
   );
 };
 
+/** Replaces a single day cell with a skeleton box — same outer dimensions as the real day cell. */
+const SkeletonDay = () => (
+  <View style={{ width: 42, height: 42, alignItems: 'center', justifyContent: 'center', marginVertical: 1 }}>
+    <SkeletonBox width={36} height={36} style={{ borderRadius: 8 }} />
+  </View>
+);
+
 const CalendarScreenPremium = ({ navigation }) => {
-  const { user } = useContext(AuthContext);
-  const { 
+  useContext(AuthContext);
+  const {
     daysWithShifts,
     loading,
     error,
+    loadedFor,
     loadMonthlyShifts,
-    hoursReport
+    hoursReport,
+    persistTimeEntries,
+    refreshMonthSummary,
   } = useShifts();
-  
+  const C = useColors();
+  const s = makeStyles(C);
+
   const [currentDate, setCurrentDate] = useState(new Date());
   const [markedDates, setMarkedDates] = useState({});
   const [themeKey, setThemeKey] = useState(0);
-  
+  const [isNavigating, setIsNavigating] = useState(false);
+
   // Refs for debouncing month navigation
   const navigationTimeoutRef = useRef(null);
   const isNavigatingRef = useRef(false);
   const pendingDateRef = useRef(null);
-  
+  const targetMonthKeyRef = useRef(null);
+
   // Estado para filtros de tipo de plantão
   const [shiftFilters, setShiftFilters] = useState({
     M: true,  // Manhã
@@ -91,22 +103,24 @@ const CalendarScreenPremium = ({ navigation }) => {
     if (navigationTimeoutRef.current) {
       clearTimeout(navigationTimeoutRef.current);
     }
-    
+
     // Update the UI immediately (optimistic update)
     setCurrentDate(targetDate);
-    
+    setIsNavigating(true);
+
     // Store the pending date for loading
     pendingDateRef.current = targetDate;
     isNavigatingRef.current = true;
-    
+    targetMonthKeyRef.current = `${targetDate.getFullYear()}-${targetDate.getMonth() + 1}`;
+
     // Wait 500ms after the last click before loading data
     navigationTimeoutRef.current = setTimeout(() => {
       const month = pendingDateRef.current.getMonth() + 1;
       const year = pendingDateRef.current.getFullYear();
-      
+
       Logger.debug(`📅 CalendarScreen: Loading data for ${month}/${year} (after navigation settled)`);
       loadMonthlyShifts(month, year);
-      
+
       isNavigatingRef.current = false;
       pendingDateRef.current = null;
     }, 500);
@@ -116,13 +130,12 @@ const CalendarScreenPremium = ({ navigation }) => {
   useEffect(() => {
     const month = currentDate.getMonth() + 1;
     const year = currentDate.getFullYear();
-    
+
     // Only load on initial mount
     if (!isNavigatingRef.current) {
-      Logger.debug(`📅 CalendarScreen: Initial load for ${month}/${year}`);
       loadMonthlyShifts(month, year);
     }
-    
+
     // Cleanup function to clear timeout on unmount
     return () => {
       if (navigationTimeoutRef.current) {
@@ -130,6 +143,19 @@ const CalendarScreenPremium = ({ navigation }) => {
       }
     };
   }, []); // Only run on mount
+
+  // Remount Calendar component when month/year changes so it displays the new month
+  useEffect(() => {
+    setThemeKey(prev => prev + 1);
+  }, [currentDate.getFullYear(), currentDate.getMonth()]);
+
+  // Clear navigation skeleton once the context confirms the target month is loaded
+  useEffect(() => {
+    if (loadedFor && loadedFor === targetMonthKeyRef.current) {
+      setIsNavigating(false);
+      targetMonthKeyRef.current = null;
+    }
+  }, [loadedFor]);
 
   // Carregar configurações de valores
   useEffect(() => {
@@ -149,34 +175,27 @@ const CalendarScreenPremium = ({ navigation }) => {
   const calculateExtraHours = async () => {
     try {
       let totalExtras = 0;
-      
-      console.log('🔍 calculateExtraHours - Iniciando cálculo para mês:', currentDate.getMonth() + 1);
-      
+
+
       if (!daysWithShifts) return 0;
 
       for (const day of daysWithShifts) {
         if (day.shifts) {
           const dateKey = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-${String(day.day).padStart(2, '0')}`;
           const savedHoursKey = `real_hours_${dateKey}`;
-          
-          console.log('🔍 calculateExtraHours - Verificando dia:', dateKey);
-          
+
+
           // Tentar carregar horas reais salvas para este dia
           const savedHours = await SecureStore.getItemAsync(savedHoursKey);
-          
+
           if (savedHours) {
             const realHours = JSON.parse(savedHours);
-            console.log('🔍 calculateExtraHours - Horas salvas encontradas:', realHours);
-            
+
             // Para cada plantão do dia, calcular diferença
             day.shifts.forEach((shift, index) => {
               const shiftRealHours = realHours[index];
-              
-              console.log('🔍 calculateExtraHours - Shift', index, ':', {
-                shiftTime: shift.time,
-                realHours: shiftRealHours
-              });
-              
+
+
               if (shiftRealHours?.startTime && shiftRealHours?.endTime) {
                 // Calcular horas previstas
                 const shiftTime = shift.time || '';
@@ -184,28 +203,20 @@ const CalendarScreenPremium = ({ navigation }) => {
                 if (timeParts.length !== 2) {
                   timeParts = shiftTime.split(' - ');
                 }
-                
+
                 if (timeParts.length === 2) {
                   const [predictedStart, predictedEnd] = timeParts.map(time => time.replace(/\s*\([^)]*\)/, '').trim());
-                  const predictedDurationMin = calculateDuration(predictedStart, predictedEnd);
-                  const realDurationMin = calculateDuration(shiftRealHours.startTime, shiftRealHours.endTime);
-                  
-                  console.log('🔍 calculateExtraHours - Durações calculadas:', {
-                    predictedDurationMin,
-                    realDurationMin,
-                    difference: realDurationMin - predictedDurationMin
-                  });
-                  
+                  const predictedDurationMin = TimeUtils.calculateDurationMinutes(predictedStart, predictedEnd);
+                  const realDurationMin = TimeUtils.calculateDurationMinutes(shiftRealHours.startTime, shiftRealHours.endTime);
+
+
+
                   if (predictedDurationMin !== null && realDurationMin !== null) {
                     const differenceMin = realDurationMin - predictedDurationMin;
-                    // Incluir TODAS as diferenças (positivas e negativas)
-                    totalExtras += differenceMin / 60;
-                    
-                    console.log('🔍 calculateExtraHours - Diferença adicionada:', {
-                      differenceMin,
-                      differenceHours: differenceMin / 60,
-                      totalAcumulado: totalExtras
-                    });
+                    // NOVA LÓGICA: trabalhar em minutos, converter apenas no final
+                    totalExtras += differenceMin / 60; // Conversão para horas decimais (compatibilidade)
+
+
                   }
                 }
               }
@@ -213,8 +224,8 @@ const CalendarScreenPremium = ({ navigation }) => {
           }
         }
       }
-      
-      console.log('🔍 calculateExtraHours - Total final:', totalExtras);
+
+
       return totalExtras;
     } catch (error) {
       Logger.warn('Erro ao calcular horas extras:', error);
@@ -222,41 +233,10 @@ const CalendarScreenPremium = ({ navigation }) => {
     }
   };
 
-  // Calcular duração em minutos
-  const calculateDuration = (startTime, endTime) => {
-    try {
-      // Normalizar formato dos horários (tanto "07h00" quanto "07:00")
-      const normalizeTime = (time) => {
-        return time.replace('h', ':');
-      };
-      
-      const normalizedStart = normalizeTime(startTime);
-      const normalizedEnd = normalizeTime(endTime);
-      
-      const [startHour, startMin] = normalizedStart.split(':').map(Number);
-      const [endHour, endMin] = normalizedEnd.split(':').map(Number);
-      
-      if (isNaN(startHour) || isNaN(startMin) || isNaN(endHour) || isNaN(endMin)) {
-        return null;
-      }
-      
-      const startTotalMin = startHour * 60 + startMin;
-      let endTotalMin = endHour * 60 + endMin;
-      
-      if (endTotalMin < startTotalMin) {
-        endTotalMin += 24 * 60;
-      }
-      
-      return endTotalMin - startTotalMin;
-    } catch (error) {
-      return null;
-    }
-  };
 
   // Atualizar marcações quando os dados mudarem
   useEffect(() => {
     updateCalendarMarkers();
-    // Recalcular horas extras quando os dados mudarem
     calculateExtraHours().then(setExtraHours);
   }, [daysWithShifts, shiftFilters]);
 
@@ -269,16 +249,16 @@ const CalendarScreenPremium = ({ navigation }) => {
 
     const month = currentDate.getMonth() + 1;
     const year = currentDate.getFullYear();
-    
+
     const marked = {};
     daysWithShifts.forEach(dayData => {
       const dateString = `${year}-${String(month).padStart(2, '0')}-${String(dayData.day).padStart(2, '0')}`;
-      
+
       // Definir cores por tipo de plantão
       const shiftTypeColors = {
-        'M': Colors.success,      // Manhã - Verde
-        'T': Colors.primary,      // Tarde - Azul
-        'N': Colors.warning       // Noite - Laranja
+        'M': C.success,      // Manhã - Verde
+        'T': C.primary,      // Tarde - Azul
+        'N': C.warning       // Noite - Laranja
       };
 
       // Aplicar filtros de tipo
@@ -296,16 +276,16 @@ const CalendarScreenPremium = ({ navigation }) => {
       // Criar pontos (dots) para cada tipo de plantão visível
       const shiftTypes = [...new Set(visibleShifts.map(s => s.label?.charAt(0)))];
       const dots = shiftTypes.map(type => ({
-        color: shiftTypeColors[type] || Colors.primary,
+        color: shiftTypeColors[type] || C.primary,
       }));
 
       // Determinar cor de seleção baseada no tipo predominante
-      let selectedColor = Colors.primary; // padrão
+      let selectedColor = C.primary; // padrão
       if (shiftTypes.length === 1) {
         selectedColor = shiftTypeColors[shiftTypes[0]];
       } else if (shiftTypes.length > 1) {
         // Para múltiplos tipos, usar cor neutra mas destacada
-        selectedColor = Colors.interactive.inactive;
+        selectedColor = C.interactive.inactive;
       }
 
       // Marcar como selected com dots
@@ -314,14 +294,11 @@ const CalendarScreenPremium = ({ navigation }) => {
         marked: true,
         selectedColor: selectedColor,
         dots: dots,
-        dotColor: dots[0]?.color || Colors.primary
+        dotColor: dots[0]?.color || C.primary
       };
     });
 
     setMarkedDates(marked);
-    
-    // Forçar re-render do tema do calendário quando os filtros mudarem
-    setThemeKey(prev => prev + 1);
   };
 
   // Alternar filtro de tipo de plantão
@@ -335,22 +312,22 @@ const CalendarScreenPremium = ({ navigation }) => {
   // Obter cor do botão de filtro baseado no estado
   const getFilterButtonColor = (type, isActive) => {
     const colors = {
-      'M': Colors.success,
-      'T': Colors.primary,
-      'N': Colors.warning
+      'M': C.success,
+      'T': C.primary,
+      'N': C.warning
     };
-    
-    return isActive ? colors[type] : Colors.background.secondary;
+
+    return isActive ? colors[type] : C.background.secondary;
   };
 
   // Manipular pressionar um dia
   const handleDayPress = (day) => {
     const dayData = daysWithShifts?.find(d => d.day === parseInt(day.day));
-    
+
     if (!dayData || !dayData.shifts || dayData.shifts.length === 0) {
       return;
     }
-    
+
     // Criar objeto Date válido para o BottomSheet
     // Se dayData.date já é um objeto Date, usar ele; senão criar um novo
     let selectedDate;
@@ -369,7 +346,7 @@ const CalendarScreenPremium = ({ navigation }) => {
       // Fallback: criar data baseada no dia selecionado e mês/ano do calendário atual
       selectedDate = new Date(currentDate.getFullYear(), currentDate.getMonth(), parseInt(day.day));
     }
-    
+
     setSelectedDayData({
       date: selectedDate,
       shifts: dayData.shifts
@@ -389,13 +366,26 @@ const CalendarScreenPremium = ({ navigation }) => {
   // Callback chamado quando horas são alteradas no BottomSheet
   const handleHoursChanged = async (dateKey, newHours) => {
     console.log('📊 Horas alteradas para', dateKey, '- Recalculando totalizador...');
-    
-    // Recalcular horas extras após mudança
+
+    // Recalcular horas extras após mudança (existing behaviour)
     try {
       const newExtraHours = await calculateExtraHours();
       setExtraHours(newExtraHours);
     } catch (error) {
       console.error('Erro ao recalcular horas extras:', error);
+    }
+
+    // Persist time entries to LocalCache and refresh MonthSummary
+    try {
+      const dayData = (daysWithShifts || []).find(d => d.date === dateKey);
+      if (dayData?.shifts && newHours) {
+        await persistTimeEntries(dateKey, newHours, dayData.shifts);
+      }
+      const month = currentDate.getMonth() + 1;
+      const year  = currentDate.getFullYear();
+      await refreshMonthSummary(month, year);
+    } catch (err) {
+      console.warn('LocalCache summary refresh error:', err?.message);
     }
   };
 
@@ -435,23 +425,14 @@ const CalendarScreenPremium = ({ navigation }) => {
       };
     }
 
-    // Formatar horas extras com sinal e cor apropriada
+    // Formatar horas extras com sinal e cor apropriada - CORRIGIDA para usar TimeUtils
     const formatExtraHours = (hours) => {
       if (hours === 0) return '0h';
-      
-      const absHours = Math.abs(hours);
-      const wholeHours = Math.floor(absHours);
-      const minutes = Math.round((absHours - wholeHours) * 60);
-      
-      let formatted = '';
-      if (wholeHours > 0 && minutes > 0) {
-        formatted = `${wholeHours}h${minutes.toString().padStart(2, '0')}`;
-      } else if (wholeHours > 0) {
-        formatted = `${wholeHours}h`;
-      } else {
-        formatted = `${minutes}min`;
-      }
-      
+
+      // Converter para minutos para evitar problemas de precisão
+      const totalMinutes = Math.round(hours * 60);
+      const formatted = TimeUtils.minutesToCompactDisplay(Math.abs(totalMinutes));
+
       return hours >= 0 ? `+${formatted}` : `-${formatted}`;
     };
 
@@ -484,7 +465,7 @@ const CalendarScreenPremium = ({ navigation }) => {
           // Contar por tipo apenas os visíveis
           filteredShifts.forEach(shift => {
             const type = shift.label?.charAt(0);
-            
+
             // Contar o shift por tipo (se o tipo é conhecido)
             if (stats.byType.hasOwnProperty(type)) {
               stats.byType[type]++;
@@ -494,13 +475,7 @@ const CalendarScreenPremium = ({ navigation }) => {
       }
     });
 
-    console.log(`🔍 Calendar - Total de horas do contexto: ${stats.totalHours}h`);
-    console.log('🔍 Calendar - Breakdown:', {
-      totalShifts: stats.totalShifts,
-      daysWithShifts: daysWithVisibleShifts,
-      byType: stats.byType,
-      totalHours: stats.totalHours
-    });
+
     stats.totalDays = daysWithVisibleShifts;
     return stats;
   };
@@ -516,28 +491,36 @@ const CalendarScreenPremium = ({ navigation }) => {
   const stats = generateStatistics();
 
   return (
-    <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
-      <View style={styles.content}>
+    <ScrollView style={s.container} showsVerticalScrollIndicator={false}>
+      <View style={s.content}>
         {/* Month Navigation */}
-        <View style={styles.monthHeader}>
-          <Pressable style={styles.navButton} onPress={goToPreviousMonth}>
-            <Ionicons name="chevron-back" size={20} color={Colors.interactive.active} />
+        <View style={s.monthHeader}>
+          <Pressable style={s.navButton} onPress={goToPreviousMonth}>
+            <Ionicons
+              name="chevron-back"
+              size={20}
+              color={C.interactive.active}
+            />
           </Pressable>
-          
-          <Text style={styles.monthTitle}>{formatMonth(currentDate)}</Text>
-          
-          <Pressable style={styles.navButton} onPress={goToNextMonth}>
-            <Ionicons name="chevron-forward" size={20} color={Colors.interactive.active} />
+
+          <Text style={s.monthTitle}>{formatMonth(currentDate)}</Text>
+
+          <Pressable style={s.navButton} onPress={goToNextMonth}>
+            <Ionicons
+              name="chevron-forward"
+              size={20}
+              color={C.interactive.active}
+            />
           </Pressable>
         </View>
 
         {/* Statistics Overview */}
-        <View style={styles.statsSection}>
-          <View style={styles.statsGrid}>
+        <View style={s.statsSection}>
+          <View style={s.statsGrid}>
             {loading ? (
               <>
-                {[0, 1, 2].map(i => (
-                  <View key={i} style={[styles.statCard, { gap: 6 }]}>
+                {[0, 1, 2].map((i) => (
+                  <View key={i} style={[s.statCard, { gap: 6 }]}>
                     <SkeletonBox width={40} height={28} />
                     <SkeletonBox width={52} height={12} />
                   </View>
@@ -545,38 +528,46 @@ const CalendarScreenPremium = ({ navigation }) => {
               </>
             ) : (
               <>
-                <View style={styles.statCard}>
-                  <Text style={[
-                    styles.statNumber,
-                    {
-                      color: stats.extraHours === 0
-                        ? Colors.text.secondary
-                        : stats.extraHours > 0
-                          ? Colors.success
-                          : Colors.error
-                    }
-                  ]}>
+                <View style={s.statCard}>
+                  <Text
+                    style={[
+                      s.statNumber,
+                      {
+                        color:
+                          stats.extraHours === 0
+                            ? C.text.secondary
+                            : stats.extraHours > 0
+                              ? C.success
+                              : C.error,
+                      },
+                    ]}
+                  >
                     {stats.extraHoursFormatted}
                   </Text>
-                  <Text style={styles.statLabel}>Horas Extras</Text>
+                  <Text style={s.statLabel}>Horas Extras</Text>
                 </View>
 
-                <View style={styles.statCard}>
-                  <Text style={[styles.statNumber, 
-                    {
-                      color: stats.totalShifts === 0
-                        ? Colors.text.secondary
-                        : stats.totalShifts > 0
-                          ? Colors.success
-                          : Colors.error
-                    }
-                  ]}>{stats.totalShifts}</Text>
-                  <Text style={styles.statLabel}>Plantões</Text>
+                <View style={s.statCard}>
+                  <Text
+                    style={[
+                      s.statNumber,
+                      {
+                        color:
+                          stats.totalShifts === 0
+                            ? C.text.secondary
+                            : stats.totalShifts > 0
+                              ? C.success
+                              : C.error,
+                      },
+                    ]}
+                  >
+                    {stats.totalShifts}
+                  </Text>
+                  <Text style={s.statLabel}>Plantões</Text>
                 </View>
-
-                <View style={styles.statCard}>
-                  <Text style={styles.statNumber}>{stats.totalHours}h</Text>
-                  <Text style={styles.statLabel}>Horas totais</Text>
+                <View style={s.statCard}>
+                  <Text style={s.statNumber}>{stats.totalHours}h</Text>
+                  <Text style={s.statLabel}>Horas totais</Text>
                 </View>
               </>
             )}
@@ -584,55 +575,61 @@ const CalendarScreenPremium = ({ navigation }) => {
         </View>
 
         {/* Shift Filters */}
-        <View style={styles.filtersSection}>
-          <Text style={styles.filtersTitle}>Filtrar por período</Text>
-          <View style={styles.filtersRow}>
+        <View style={s.filtersSection}>
+          <Text style={s.filtersTitle}>Filtrar por período</Text>
+          <View style={s.filtersRow}>
             {[
-              { key: 'M', label: 'Manhã', count: stats.byType.M },
-              { key: 'T', label: 'Tarde', count: stats.byType.T },
-              { key: 'N', label: 'Noite', count: stats.byType.N }
-            ].map(filter => (
+              { key: "M", label: "Manhã", count: stats.byType.M },
+              { key: "T", label: "Tarde", count: stats.byType.T },
+              { key: "N", label: "Noite", count: stats.byType.N },
+            ].map((filter) => (
               <Pressable
                 key={filter.key}
                 style={[
-                  styles.filterChip,
+                  s.filterChip,
                   {
-                    backgroundColor: shiftFilters[filter.key] 
+                    backgroundColor: shiftFilters[filter.key]
                       ? getFilterButtonColor(filter.key, true)
-                      : Colors.background.secondary,
+                      : C.background.secondary,
                     borderColor: getFilterButtonColor(filter.key, true),
                     borderWidth: shiftFilters[filter.key] ? 0 : 1,
-                  }
+                  },
                 ]}
                 onPress={() => toggleShiftFilter(filter.key)}
               >
-                <Text style={[
-                  styles.filterChipText,
-                  { 
-                    color: shiftFilters[filter.key] 
-                      ? Colors.background.primary 
-                      : Colors.text.secondary 
-                  }
-                ]}>
+                <Text
+                  style={[
+                    s.filterChipText,
+                    {
+                      color: shiftFilters[filter.key]
+                        ? C.background.primary
+                        : C.text.secondary,
+                    },
+                  ]}
+                >
                   {filter.label}
                 </Text>
                 {filter.count > 0 && (
-                  <View style={[
-                    styles.filterBadge,
-                    { 
-                      backgroundColor: shiftFilters[filter.key] 
-                        ? Colors.background.primary + '30'
-                        : getFilterButtonColor(filter.key, true) + '20'
-                    }
-                  ]}>
-                    <Text style={[
-                      styles.filterBadgeText,
-                      { 
-                        color: shiftFilters[filter.key] 
-                          ? Colors.background.primary 
-                          : getFilterButtonColor(filter.key, true)
-                      }
-                    ]}>
+                  <View
+                    style={[
+                      s.filterBadge,
+                      {
+                        backgroundColor: shiftFilters[filter.key]
+                          ? C.background.primary + "30"
+                          : getFilterButtonColor(filter.key, true) + "20",
+                      },
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        s.filterBadgeText,
+                        {
+                          color: shiftFilters[filter.key]
+                            ? C.background.primary
+                            : getFilterButtonColor(filter.key, true),
+                        },
+                      ]}
+                    >
                       {filter.count}
                     </Text>
                   </View>
@@ -643,27 +640,28 @@ const CalendarScreenPremium = ({ navigation }) => {
         </View>
 
         {/* Calendário */}
-        <View style={styles.calendarSection}>
-          {loading ? (
-            <View style={styles.loadingContainer}>
-              <ActivityIndicator size="large" color={Colors.primary} />
-              <Text style={styles.loadingText}>Carregando plantões...</Text>
-            </View>
-          ) : error ? (
-            <View style={styles.errorContainer}>
-              <Ionicons name="alert-circle-outline" size={48} color={Colors.error} />
-              <Text style={styles.errorText}>Erro ao carregar dados</Text>
-              <Pressable 
-                style={styles.retryButton}
-                onPress={() => loadMonthlyShifts(currentDate.getMonth() + 1, currentDate.getFullYear())}
+        <View style={s.calendarSection}>
+          {error && !loading && !isNavigating ? (
+            <View style={s.errorContainer}>
+              <Ionicons name="alert-circle-outline" size={48} color={C.error} />
+              <Text style={s.errorText}>Erro ao carregar dados</Text>
+              <Pressable
+                style={s.retryButton}
+                onPress={() =>
+                  loadMonthlyShifts(
+                    currentDate.getMonth() + 1,
+                    currentDate.getFullYear(),
+                  )
+                }
               >
-                <Text style={styles.retryButtonText}>Tentar novamente</Text>
+                <Text style={s.retryButtonText}>Tentar novamente</Text>
               </Pressable>
             </View>
           ) : (
             <Calendar
               key={themeKey}
-              current={`${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-${String(currentDate.getDate()).padStart(2, '0')}`}
+              dayComponent={loading || isNavigating ? SkeletonDay : undefined}
+              current={`${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, "0")}-${String(currentDate.getDate()).padStart(2, "0")}`}
               minDate="2020-01-01"
               maxDate="2040-12-31"
               onDayPress={handleDayPress}
@@ -679,20 +677,20 @@ const CalendarScreenPremium = ({ navigation }) => {
               markedDates={markedDates}
               markingType="multi-dot"
               theme={{
-                backgroundColor: 'transparent',
-                calendarBackground: 'transparent',
-                textSectionTitleColor: Colors.text.secondary,
-                selectedDayBackgroundColor: Colors.primary,
-                selectedDayTextColor: Colors.background.primary,
-                todayTextColor: Colors.primary,
-                dayTextColor: Colors.text.primary,
-                textDisabledColor: Colors.text.tertiary,
-                dotColor: Colors.primary,
-                selectedDotColor: Colors.background.primary,
-                arrowColor: Colors.text.primary,
-                disabledArrowColor: Colors.text.tertiary,
-                monthTextColor: Colors.text.primary,
-                indicatorColor: Colors.primary,
+                backgroundColor: "transparent",
+                calendarBackground: "transparent",
+                textSectionTitleColor: C.text.secondary,
+                selectedDayBackgroundColor: C.primary,
+                selectedDayTextColor: C.background.primary,
+                todayTextColor: C.primary,
+                dayTextColor: C.text.primary,
+                textDisabledColor: C.text.tertiary,
+                dotColor: C.primary,
+                selectedDotColor: C.background.primary,
+                arrowColor: C.text.primary,
+                disabledArrowColor: C.text.tertiary,
+                monthTextColor: C.text.primary,
+                indicatorColor: C.primary,
                 textDayFontFamily: Typography.fontFamily.regular,
                 textMonthFontFamily: Typography.fontFamily.semiBold,
                 textDayHeaderFontFamily: Typography.fontFamily.medium,
@@ -703,14 +701,22 @@ const CalendarScreenPremium = ({ navigation }) => {
                 textMonthFontSize: Typography.fontSize.title3,
                 textDayHeaderFontSize: Typography.fontSize.caption1,
                 // Personalização dos dias
-                'stylesheet.calendar.header': {
+                "stylesheet.calendar.header": {
+                  header: {
+                    height: 10,
+                    opacity: 0,
+                  },
+                  monthText: {
+                    height: 0,
+                    opacity: 0,
+                  },
                   week: {
                     marginTop: 5,
-                    flexDirection: 'row',
-                    justifyContent: 'space-around',
+                    flexDirection: "row",
+                    justifyContent: "space-around",
                   },
                 },
-                'stylesheet.calendar.main': {
+                "stylesheet.calendar.main": {
                   container: {
                     paddingLeft: 10,
                     paddingRight: 10,
@@ -718,16 +724,16 @@ const CalendarScreenPremium = ({ navigation }) => {
                   week: {
                     marginTop: 2,
                     marginBottom: 2,
-                    flexDirection: 'row',
-                    justifyContent: 'space-around',
+                    flexDirection: "row",
+                    justifyContent: "space-around",
                   },
                 },
-                'stylesheet.day.basic': {
+                "stylesheet.day.basic": {
                   base: {
                     width: 42,
                     height: 42,
-                    alignItems: 'center',
-                    justifyContent: 'center',
+                    alignItems: "center",
+                    justifyContent: "center",
                     marginVertical: 1,
                   },
                   text: {
@@ -735,30 +741,30 @@ const CalendarScreenPremium = ({ navigation }) => {
                     fontSize: 17,
                     fontFamily: Typography.fontFamily.regular,
                     fontWeight: Typography.fontWeight.regular,
-                    color: Colors.text.primary,
-                    backgroundColor: 'transparent',
+                    color: C.text.primary,
+                    backgroundColor: "transparent",
                   },
                   today: {
-                    backgroundColor: 'transparent',
+                    backgroundColor: "transparent",
                   },
                   todayText: {
-                    color: Colors.primary,
+                    color: C.primary,
                     fontWeight: Typography.fontWeight.semiBold,
                   },
                   selectedText: {
-                    color: Colors.background.primary,
+                    color: C.background.primary,
                     fontWeight: Typography.fontWeight.semiBold,
                   },
                   disabledText: {
-                    color: Colors.text.tertiary,
+                    color: C.text.tertiary,
                   },
                 },
-                'stylesheet.day.multiDot': {
+                "stylesheet.day.multiDot": {
                   base: {
                     width: 42,
                     height: 42,
-                    alignItems: 'center',
-                    justifyContent: 'center',
+                    alignItems: "center",
+                    justifyContent: "center",
                     marginVertical: 1,
                   },
                   text: {
@@ -766,25 +772,25 @@ const CalendarScreenPremium = ({ navigation }) => {
                     fontSize: 17,
                     fontFamily: Typography.fontFamily.regular,
                     fontWeight: Typography.fontWeight.regular,
-                    color: Colors.text.primary,
-                    backgroundColor: 'transparent',
+                    color: C.text.primary,
+                    backgroundColor: "transparent",
                   },
                   today: {
-                    backgroundColor: 'transparent',
+                    backgroundColor: "transparent",
                   },
                   todayText: {
-                    color: Colors.primary,
+                    color: C.primary,
                     fontWeight: Typography.fontWeight.semiBold,
                   },
                   selectedText: {
-                    color: Colors.background.primary,
+                    color: C.background.primary,
                     fontWeight: Typography.fontWeight.semiBold,
                   },
                   disabledText: {
-                    color: Colors.text.tertiary,
+                    color: C.text.tertiary,
                   },
                   selected: {
-                    backgroundColor: Colors.primary,
+                    backgroundColor: C.primary,
                     borderRadius: 8, // Menos circular
                     width: 40,
                     height: 40,
@@ -796,8 +802,8 @@ const CalendarScreenPremium = ({ navigation }) => {
                     borderRadius: 3,
                   },
                   visibleDots: {
-                    flexDirection: 'row',
-                    justifyContent: 'center',
+                    flexDirection: "row",
+                    justifyContent: "center",
                     paddingHorizontal: 2,
                   },
                 },
@@ -821,84 +827,93 @@ const CalendarScreenPremium = ({ navigation }) => {
   );
 };
 
-const styles = StyleSheet.create({
+const makeStyles = (C) => ({
   container: {
     flex: 1,
-    backgroundColor: Colors.background.secondary,
+    backgroundColor: C.background.secondary,
   },
   content: {
-    paddingBottom: Spacing.xxxl + 60, // Extra space for tab bar
+    paddingBottom: Spacing.xxxl + 60,
   },
 
-  // Month Header
+  // Month Header — floating card
   monthHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: Spacing.lg,
-    paddingVertical: Spacing.lg,
-    backgroundColor: Colors.background.primary,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: Colors.border.light,
+    paddingVertical: Spacing.sm,
+    backgroundColor: C.background.primary,
+    marginHorizontal: Spacing.md,
+    marginTop: Spacing.lg,
+    borderRadius: BorderRadius.lg,
+    ...Shadows.small,
   },
   navButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: Colors.background.secondary,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: C.background.secondary,
     alignItems: 'center',
     justifyContent: 'center',
   },
   monthTitle: {
     fontSize: Typography.fontSize.title2,
     fontWeight: Typography.fontWeight.semiBold,
-    color: Colors.text.primary,
+    color: C.text.primary,
     textTransform: 'capitalize',
   },
 
-  // Statistics Section
+  // Statistics Section — card with tinted mini-cards inside
   statsSection: {
-    backgroundColor: Colors.background.primary,
-    paddingVertical: Spacing.lg,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: Colors.border.light,
+    backgroundColor: C.background.primary,
+    marginHorizontal: Spacing.md,
+    marginTop: Spacing.md,
+    borderRadius: BorderRadius.lg,
+    paddingVertical: Spacing.sm,
+    ...Shadows.small,
   },
   statsGrid: {
     flexDirection: 'row',
     justifyContent: 'space-around',
-    paddingHorizontal: Spacing.lg,
+    paddingHorizontal: Spacing.md,
+    gap: Spacing.sm,
   },
   statCard: {
     alignItems: 'center',
     flex: 1,
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.sm,
   },
   statNumber: {
-    fontSize: Typography.fontSize.title3, // Era largeTitle (34), agora title3 (20)
+    fontSize: Typography.fontSize.title3,
     fontWeight: Typography.fontWeight.bold,
-    color: Colors.primary,
+    color: C.primary,
     marginBottom: 4,
   },
   statLabel: {
-    fontSize: Typography.fontSize.caption2, // Era footnote (13), agora caption2 (11)
+    fontSize: Typography.fontSize.caption2,
     fontWeight: Typography.fontWeight.medium,
-    color: Colors.text.secondary,
+    color: C.text.secondary,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
   },
 
-  // Filters Section
+  // Filters Section — card
   filtersSection: {
-    backgroundColor: Colors.background.primary,
-    paddingVertical: Spacing.lg,
+    backgroundColor: C.background.primary,
+    marginHorizontal: Spacing.md,
+    marginTop: Spacing.md,
+    borderRadius: BorderRadius.lg,
+    paddingVertical: Spacing.md,
     paddingHorizontal: Spacing.lg,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: Colors.border.light,
+    ...Shadows.small,
   },
   filtersTitle: {
-    fontSize: Typography.fontSize.subhead,
+    fontSize: Typography.fontSize.footnote,
     fontWeight: Typography.fontWeight.semiBold,
-    color: Colors.text.primary,
-    marginBottom: Spacing.md,
+    color: C.text.secondary,
+    marginBottom: Spacing.sm,
   },
   filtersRow: {
     flexDirection: 'row',
@@ -910,13 +925,13 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: Spacing.xs,
     borderRadius: BorderRadius.pill,
-    minHeight: 44,
+    minHeight: 34,
   },
   filterChipText: {
-    fontSize: Typography.fontSize.subhead,
+    fontSize: Typography.fontSize.footnote,
     fontWeight: Typography.fontWeight.semiBold,
     marginRight: Spacing.xs,
   },
@@ -933,10 +948,15 @@ const styles = StyleSheet.create({
     fontWeight: Typography.fontWeight.bold,
   },
 
-  // Calendar Section
+  // Calendar Section — card, overflow hidden clips the calendar grid to rounded corners
   calendarSection: {
-    backgroundColor: Colors.background.primary,
-    paddingBottom: Spacing.lg,
+    backgroundColor: C.background.primary,
+    marginHorizontal: Spacing.md,
+    marginTop: Spacing.md,
+    borderRadius: BorderRadius.lg,
+    overflow: 'hidden',
+    paddingBottom: Spacing.md,
+    ...Shadows.small,
   },
 
   // Loading & Error States
@@ -949,7 +969,7 @@ const styles = StyleSheet.create({
   loadingText: {
     marginTop: Spacing.md,
     fontSize: Typography.fontSize.subhead,
-    color: Colors.text.secondary,
+    color: C.text.secondary,
   },
   errorContainer: {
     padding: Spacing.xl,
@@ -959,20 +979,20 @@ const styles = StyleSheet.create({
   },
   errorText: {
     fontSize: Typography.fontSize.body,
-    color: Colors.error,
+    color: C.error,
     textAlign: 'center',
     marginVertical: Spacing.md,
     fontWeight: Typography.fontWeight.medium,
   },
   retryButton: {
-    backgroundColor: Colors.primary,
+    backgroundColor: C.primary,
     paddingHorizontal: Spacing.xl,
     paddingVertical: Spacing.md,
     borderRadius: BorderRadius.md,
     marginTop: Spacing.sm,
   },
   retryButtonText: {
-    color: Colors.background.primary,
+    color: C.background.primary,
     fontSize: Typography.fontSize.subhead,
     fontWeight: Typography.fontWeight.semiBold,
   },

@@ -4,6 +4,7 @@ import {
   StyleSheet,
   Animated,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 
 import { AuthContext } from '../context/AuthContext';
 import AppHeader from '../components/AppHeader';
@@ -14,15 +15,18 @@ import ProfileScreen from './ProfileScreen';
 import ConfigScreenPremium from './ConfigScreenPremium';
 import GroupsScreen from './GroupsScreen';
 import ReportsScreen from './ReportsScreen';
+import GroupVisibilityScreen from './GroupVisibilityScreen';
 import TabBarPremium from '../components/TabBarPremium';
-import { Colors, Spacing } from '../constants/DesignSystem';
+import { useColors, Spacing } from '../constants/DesignSystem';
 import Logger from '../utils/Logger';
 
 export default function MainScreenPremium() {
   const [currentTab, setCurrentTab] = useState('home');
   const [currentScreen, setCurrentScreen] = useState(null);
   const [screenParams, setScreenParams] = useState(null);
+  const [groupsRefreshFn, setGroupsRefreshFn] = useState(null);
   const { user } = useContext(AuthContext);
+  const C = useColors();
   const fadeAnim = useRef(new Animated.Value(1)).current;
 
   const fadeTransition = (callback) => {
@@ -54,6 +58,8 @@ export default function MainScreenPremium() {
         setScreenParams(params);
       } else if (screenName === 'HoursReport' || screenName === 'Reports') {
         setCurrentScreen('reports');
+      } else if (screenName === 'GroupVisibilityScreen') {
+        setCurrentScreen('groupVisibility');
       } else if (screenName === 'calendar') {
         setCurrentTab('calendar');
         setCurrentScreen(null);
@@ -71,6 +77,7 @@ export default function MainScreenPremium() {
     fadeTransition(() => {
       setCurrentScreen(null);
       setScreenParams(null);
+      setGroupsRefreshFn(null);
     });
   };
 
@@ -90,6 +97,20 @@ export default function MainScreenPremium() {
       return {
         title: 'Grupos',
         subtitle: 'Seus grupos e membros',
+        showBackButton: true,
+        onBackPress: handleBackNavigation,
+        rightComponent: groupsRefreshFn ? (
+          <Ionicons name="refresh" size={22} color="#FFFFFF" />
+        ) : null,
+        onRightPress: groupsRefreshFn ?? undefined,
+      };
+    }
+
+    // Group visibility screen
+    if (currentScreen === 'groupVisibility') {
+      return {
+        title: 'Visibilidade de grupos',
+        subtitle: 'Escolha quem aparece no seu plantão',
         showBackButton: true,
         onBackPress: handleBackNavigation,
       };
@@ -120,19 +141,19 @@ export default function MainScreenPremium() {
       case 'home':
         return {
           title: 'Início',
-          subtitle: 'Bem-vindo ao Aurora',
+          // subtitle: 'Bem-vindo ao Aurora',
           showBackButton: false,
         };
       case 'calendar':
         return {
           title: 'Calendário',
-          subtitle: 'Seus plantões e horários',
+          // subtitle: 'Seus plantões e horários',
           showBackButton: false,
         };
       case 'settings':
         return {
           title: 'Configurações',
-          subtitle: 'Personalize sua experiência',
+          // subtitle: 'Personalize sua experiência',
           showBackButton: false,
         };
       default:
@@ -148,11 +169,21 @@ export default function MainScreenPremium() {
   const renderCurrentScreen = () => {
     // Sub-screens globais (acessíveis de qualquer tab)
     if (currentScreen === 'groups') {
-      return <GroupsScreen navigation={{ goBack: handleBackNavigation }} focusGroupId={screenParams?.focusGroupId} />;
+      return (
+        <GroupsScreen
+          navigation={{ goBack: handleBackNavigation }}
+          focusGroupId={screenParams?.focusGroupId}
+          onRefreshReady={(fn) => setGroupsRefreshFn(() => fn)}
+        />
+      );
     }
 
     if (currentScreen === 'reports') {
       return <ReportsScreen />;
+    }
+
+    if (currentScreen === 'groupVisibility') {
+      return <GroupVisibilityScreen navigation={{ goBack: handleBackNavigation }} />;
     }
 
     // Sub-screens da tab settings
@@ -185,7 +216,7 @@ export default function MainScreenPremium() {
   };
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { backgroundColor: C.background.secondary }]}>
       {/* Fixed Header */}
       <AppHeader {...getHeaderData()} />
       
@@ -203,7 +234,6 @@ export default function MainScreenPremium() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: Colors.background.secondary,
   },
   content: {
     flex: 1,

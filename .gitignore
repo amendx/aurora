@@ -3,5 +3,27 @@ node_modules/
 dist/
 *.log
 npm-debug.log*
+
+# Environment variables — never commit real secrets
 .env
 .env.local
+.env.development
+.env.production
+.env.staging
+.env.*.local
+# Allow the example file (contains only placeholders, no real values)
+!.env.example
+
+# Firebase service account keys (if ever downloaded)
+*-service-account*.json
+*-firebase-adminsdk*.json
+google-services.json
+GoogleService-Info.plist
+
+# Build artifacts
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+dump data/
+
+# Firebase Cloud Functions (deployed separately, may contain secrets/node_modules)
+functions/

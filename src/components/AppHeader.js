@@ -1,132 +1,107 @@
 import React from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  Pressable,
-  Platform,
-} from 'react-native';
+import { View, Text, StyleSheet, Pressable, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Colors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
+import { useColors, Typography, Spacing } from '../constants/DesignSystem';
 
-export default function AppHeader({ 
-  title, 
+const HEADER_HEIGHT = 64;
+
+export default function AppHeader({
+  title,
   subtitle,
-  showBackButton = false, 
+  showBackButton = false,
   onBackPress,
   rightComponent,
-  isDark = false,
+  onRightPress,
 }) {
   const insets = useSafeAreaInsets();
-  const colorScheme = isDark ? Colors.dark : Colors;
+  const C = useColors();
 
   return (
-    <View style={[styles.container, { 
-      backgroundColor: colorScheme.background.primary,
-      borderBottomColor: colorScheme.border || Colors.border.light,
-      paddingTop: insets.top 
-    }]}>
-      <View style={styles.header}>
-        {/* Left Section - Back Button */}
-        <View style={styles.leftSection}>
+    <View style={{ backgroundColor: C.primary, paddingTop: insets.top }}>
+      <View style={s.header}>
+        {/* Left */}
+        <View style={s.sideSection}>
           {showBackButton ? (
-            <Pressable 
-              style={({ pressed }) => [
-                styles.backButton,
-                pressed && styles.backButtonPressed
-              ]} 
+            <Pressable
+              style={({ pressed }) => [s.sideBtn, pressed && { opacity: 0.7 }]}
               onPress={onBackPress}
-              hitSlop={Spacing.sm}
             >
-              <Ionicons 
-                name={Platform.OS === 'ios' ? 'chevron-back' : 'arrow-back'} 
-                size={24} 
-                color={Colors.interactive.active}
+              <Ionicons
+                name={Platform.OS === 'ios' ? 'chevron-back' : 'arrow-back'}
+                size={24}
+                color="#FFFFFF"
               />
             </Pressable>
           ) : null}
         </View>
 
-        {/* Center Section - Title */}
-        <View style={styles.centerSection}>
-          <Text style={[styles.title, { 
-            color: isDark ? colorScheme.text.primary : Colors.text.primary 
-          }]} numberOfLines={1} ellipsizeMode="tail">
+        {/* Center */}
+        <View style={s.centerSection}>
+          <Text style={s.title} numberOfLines={1} ellipsizeMode="tail">
             {title}
           </Text>
-          {subtitle && (
-            <Text style={[styles.subtitle, { 
-              color: isDark ? colorScheme.text.secondary : Colors.text.secondary 
-            }]} numberOfLines={1}>
+          {subtitle ? (
+            <Text style={s.subtitle} numberOfLines={1}>
               {subtitle}
             </Text>
-          )}
+          ) : null}
         </View>
 
-        {/* Right Section */}
-        <View style={styles.rightSection}>
-          {rightComponent}
+        {/* Right */}
+        <View style={s.sideSection}>
+          {rightComponent ? (
+            <Pressable
+              style={({ pressed }) => [s.sideBtn, pressed && { opacity: 0.7 }]}
+              onPress={onRightPress}
+            >
+              {rightComponent}
+            </Pressable>
+          ) : null}
         </View>
       </View>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    backgroundColor: Colors.background.primary,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: Colors.border.light,
-    ...Shadows.header,
-  },
+const s = StyleSheet.create({
   header: {
     flexDirection: 'row',
-    alignItems: 'center',
-    height: Spacing.header,
+    alignItems: 'stretch',
+    height: HEADER_HEIGHT,
     paddingHorizontal: Spacing.screen,
+    gap: Spacing.sm,
   },
-  leftSection: {
-    width: 50,
+  sideSection: {
+    width: 48,
     justifyContent: 'center',
-    alignItems: 'flex-start',
+    alignItems: 'center',
+  },
+  sideBtn: {
+    width: 48,
+    alignSelf: 'stretch',
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   centerSection: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: Spacing.sm,
-  },
-  rightSection: {
-    width: 50,
-    justifyContent: 'center',
-    alignItems: 'flex-end',
-  },
-  backButton: {
-    width: 44,
-    height: 44,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderRadius: BorderRadius.sm,
-    marginLeft: -Spacing.sm,
-  },
-  backButtonPressed: {
-    backgroundColor: Colors.interactive.pressed + '10',
   },
   title: {
     fontSize: Typography.fontSize.headline,
     fontWeight: Typography.fontWeight.semiBold,
     fontFamily: Typography.fontFamily.semiBold,
+    color: '#FFFFFF',
     textAlign: 'center',
     letterSpacing: Platform.OS === 'ios' ? -0.43 : 0,
-    lineHeight: Typography.fontSize.headline * Typography.lineHeight.tight,
   },
   subtitle: {
     fontSize: Typography.fontSize.caption1,
-    fontWeight: Typography.fontWeight.regular,
-    fontFamily: Typography.fontFamily.regular,
+    color: 'rgba(255, 255, 255, 0.7)',
     textAlign: 'center',
     marginTop: 2,
-    lineHeight: Typography.fontSize.caption1 * Typography.lineHeight.normal,
   },
 });

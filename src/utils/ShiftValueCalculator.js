@@ -115,32 +115,61 @@ export const isBonusApplicable = (dateString, bonusConfig) => {
   return month >= bonusConfig.startMonth && month <= bonusConfig.endMonth;
 };
 
-// Função avançada para calcular valor com breakdown detalhado
+// Função para arredondamento monetário consistente
+export const roundCurrency = (value) => {
+  return Math.round(value * 100) / 100;
+};
+
+/**
+ * SINGLE SOURCE OF TRUTH for shift monetary value.
+ *
+ * Formula (one pass, no intermediate rounding):
+ *   value = roundCurrency( (totalMinutes / 60) × bd.hourlyValue × bonusMult )
+ *
+ * Use this everywhere — BottomSheet, Reports, CSV, totals.
+ * totalMinutes already includes extra/split minutes as computed by the caller.
+ *
+ * Examples (no fidelity unless noted):
+ *   M weekday 360min + 33min extra, R$130/h, fid 25%:
+ *     computeShiftValue(bd, 393) = round(393/60 × 130 × 1.25 × 100)/100 = R$1.064,38
+ *   N weekend 720min − 45min, R$185/h:
+ *     computeShiftValue(bd, 675) = round(675/60 × 185 × 100)/100 = R$2.081,25
+ *   D carryover 420min (Monday night, R$143/h, fid 25%):
+ *     computeShiftValue(bd, 420) = round(420/60 × 143 × 1.25 × 100)/100 = R$1.251,25
+ *   Split N end-of-month 330min, R$185/h:
+ *     computeShiftValue(bd, 330) = round(330/60 × 185 × 100)/100 = R$1.017,50
+ *   Monthly total (M+N above, each fid 25%): R$1.064,38 + R$2.081,25 = R$3.145,63
+ */
+export const computeShiftValue = (bd, totalMinutes) => {
+  // Valor base
+  const baseValue = (totalMinutes / 60) * (bd.hourlyValue || 0);
+  
+  // Bônus de fidelização (sobre base)
+  const loyaltyBonus = baseValue * ((bd.loyaltyPercentage || 0) / 100);
+  
+  // Bônus geral (sobre base)
+  const generalBonus = baseValue * ((bd.generalBonusPercentage || 0) / 100);
+  
+  // Total: base + bônus individuais (não compostos)
+  const totalValue = baseValue + loyaltyBonus + generalBonus;
+  
+  return roundCurrency(totalValue);
+};
+
+// Função avançada para calcular valor com breakdown detalhado - CORRIGIDA
 export const calculateShiftValueWithBreakdown = async (shift, dateString, totalMonthlyHours = 0) => {
   try {
     const config = await getFullShiftConfig();
-    console.log('🔧 Config carregada no breakdown:', {
-      loyaltyEnabled: config.loyaltyEnabled,
-      bonusEnabled: config.bonusEnabled,
-      fridayNightAsWeekend: config.fridayNightAsWeekend,
-      loyaltyOptions: config.loyaltyOptions?.map(opt => ({ minHours: opt.minHours, percentage: opt.percentage, active: opt.active }))
-    });
     
     const isNaturalWeekend = isWeekend(dateString);
     const useWeekendValue = shouldUseWeekendValue(dateString, shift.label, config.fridayNightAsWeekend);
     
-    console.log('📅 Análise da data:', {
-      date: dateString,
-      isNaturalWeekend,
-      useWeekendValue,
-      shiftLabel: shift.label,
-      fridayNightAsWeekend: config.fridayNightAsWeekend
-    });
     
     const period = getShiftPeriod(shift.label);
     const hours = getShiftHours(shift.label);
+    const standardMinutes = hours * 60; // NOVA: base em minutos
     
-    // Valor base
+    // Valor base - CORRIGIDO: usar base em minutos
     let hourlyValue;
     if (useWeekendValue) {
       hourlyValue = parseFloat(config.hourValues.weekend?.[period]) || DEFAULT_VALUES.weekend[period];
@@ -148,52 +177,51 @@ export const calculateShiftValueWithBreakdown = async (shift, dateString, totalM
       hourlyValue = parseFloat(config.hourValues.weekday?.[period]) || DEFAULT_VALUES.weekday[period];
     }
     
-    const baseValue = hourlyValue * hours;
+    // NOVA LÓGICA: Calcular baseado em minutos padrão
+    const baseValue = (standardMinutes / 60) * hourlyValue; // Valor base sem bônus
+    
     let breakdown = {
       baseValue,
       hourlyValue,
       hours,
+      standardMinutes, // NOVO: adicionar minutos padrão
       weekend: useWeekendValue,
       isNaturalWeekend,
       isFridayNight: config.fridayNightAsWeekend && isFriday(dateString) && period === 'night',
       period,
       loyaltyBonus: 0,
+      loyaltyPercentage: 0,
       generalBonus: 0,
+      generalBonusPercentage: 0,
       finalValue: baseValue
     };
 
-    // Aplicar bônus de fidelização se habilitado (sempre aplicar quando ativo - previsão)
+    // Aplicar bônus de fidelização se habilitado - CORRIGIDO: com precisão monetária
     if (config.loyaltyEnabled && config.loyaltyOptions) {
       const activeLoyalty = config.loyaltyOptions.find(option => option.active);
       if (activeLoyalty) {
-        breakdown.loyaltyBonus = (baseValue * activeLoyalty.percentage) / 100;
+        breakdown.loyaltyBonus = roundCurrency((baseValue * activeLoyalty.percentage) / 100);
         breakdown.loyaltyPercentage = activeLoyalty.percentage;
         breakdown.loyaltyMinHours = activeLoyalty.minHours;
-        console.log('💎 Fidelização aplicada (previsão):', {
-          percentage: activeLoyalty.percentage,
-          bonus: breakdown.loyaltyBonus,
-          minHours: activeLoyalty.minHours
-        });
+       
       } else {
         console.log('❌ Nenhuma fidelização ativa configurada');
       }
     }
 
-    // Aplicar bônus geral se habilitado e aplicável
+    // Aplicar bônus geral se habilitado - CORRIGIDO: com precisão monetária
     if (config.bonusEnabled && config.bonus && isBonusApplicable(dateString, config.bonus)) {
       const bonusPercentage = parseFloat(config.bonus.percentage) || 0;
-      breakdown.generalBonus = (baseValue * bonusPercentage) / 100;
+      breakdown.generalBonus = roundCurrency((baseValue * bonusPercentage) / 100);
       breakdown.generalBonusPercentage = bonusPercentage;
-      console.log('🎁 Bônus geral aplicado:', {
-        percentage: bonusPercentage,
-        bonus: breakdown.generalBonus
-      });
+     
     }
 
-    // Valor final
-    breakdown.finalValue = baseValue + breakdown.loyaltyBonus + breakdown.generalBonus;
-    
-    console.log('💰 Breakdown final:', breakdown);
+    // Valor final — usa a função canônica (mesma fórmula de BottomSheet e Reports)
+    breakdown.finalValue = computeShiftValue(breakdown, standardMinutes);
+    breakdown.fractionalExtraHours = config.fractionalExtraHours ?? true;
+
+
     return breakdown;
   } catch (error) {
     console.warn('Erro ao calcular breakdown do plantão:', error);

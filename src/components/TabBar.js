@@ -1,61 +1,36 @@
 import React from 'react';
-import {
-  View,
-  Text,
-  TouchableOpacity,
-  StyleSheet,
-  Platform,
-  useColorScheme,
-} from 'react-native';
-import COLORS from '../constants/Colors';
+import { View, Text, TouchableOpacity, StyleSheet, Platform } from 'react-native';
+import { useColors, Typography } from '../constants/DesignSystem';
 
 export default function TabBar({ currentTab, onTabPress }) {
-  const isDarkMode = useColorScheme() === 'dark';
-  
+  const C = useColors();
+
   const tabs = [
-    { 
-      id: 'home', 
-      label: 'Home',
-      emoji: '🏠'
-    },
-    { 
-      id: 'calendar', 
-      label: 'Calendário',
-      emoji: '📅'
-    },
-    { 
-      id: 'settings', 
-      label: 'Config',
-      emoji: '⚙️'
-    },
+    { id: 'home',     label: 'Home',       emoji: '🏠' },
+    { id: 'calendar', label: 'Calendário', emoji: '📅' },
+    { id: 'settings', label: 'Config',     emoji: '⚙️' },
   ];
 
   return (
-    <View style={[styles.container, { 
-      backgroundColor: isDarkMode ? COLORS.BACKGROUND_DARK_ : COLORS.TEXT_SECONDARY,
-      borderTopColor: isDarkMode ? COLORS.SEPARATOR_COLOR_DARK : COLORS.TEXT_SECONDARY,
+    <View style={[s.container, {
+      backgroundColor: C.background.primary,
+      borderTopColor: C.border.light,
     }]}>
-      <View style={styles.tabBarContent}>
+      <View style={s.tabBarContent}>
         {tabs.map((tab) => {
           const isActive = currentTab === tab.id;
-          
           return (
             <TouchableOpacity
               key={tab.id}
-              style={[
-                styles.tab,
-                isActive && styles.activeTab,
-              ]}
+              style={[s.tab, isActive && { backgroundColor: C.primary + '15' }]}
               onPress={() => onTabPress(tab.id)}
               activeOpacity={0.7}
             >
-              <Text style={styles.emoji}>
-                {tab.emoji}
-              </Text>
+              <Text style={s.emoji}>{tab.emoji}</Text>
               <Text style={[
-                styles.label,
-                { color: isDarkMode ? COLORS.TEXT_SECONDARY_DARK : COLORS.TEXT_SECONDARY_DARK },
-                isActive && styles.activeLabel,
+                s.label,
+                { color: isActive ? C.primary : C.interactive.inactive },
+                isActive && s.activeLabel,
               ]}>
                 {tab.label}
               </Text>
@@ -67,11 +42,10 @@ export default function TabBar({ currentTab, onTabPress }) {
   );
 }
 
-const styles = StyleSheet.create({
+const s = StyleSheet.create({
   container: {
-    borderTopWidth: 1,
-    paddingBottom: Platform.OS === 'ios' ? 30 : 8, // Reduzido para iOS
-    // Garantir que está no limite da tela
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingBottom: Platform.OS === 'ios' ? 30 : 8,
     position: 'absolute',
     bottom: 0,
     left: 0,
@@ -79,14 +53,11 @@ const styles = StyleSheet.create({
   },
   tabBarContent: {
     flexDirection: 'row',
-    paddingTop: 8,        // Reduzido de 12 para 8
-    paddingBottom: 4,     // Reduzido de 8 para 4  
+    paddingTop: 8,
+    paddingBottom: 4,
     paddingHorizontal: 8,
     shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: -2,
-    },
+    shadowOffset: { width: 0, height: -2 },
     shadowOpacity: 0.1,
     shadowRadius: 8,
     elevation: 8,
@@ -94,25 +65,16 @@ const styles = StyleSheet.create({
   tab: {
     flex: 1,
     alignItems: 'center',
-    paddingVertical: 6,   // Reduzido de 8 para 6
+    paddingVertical: 6,
     paddingHorizontal: 8,
-    gap: 2,              // Reduzido de 4 para 2
+    gap: 2,
     borderRadius: 12,
   },
-  activeTab: {
-    backgroundColor: `${COLORS.PRIMARY}15`, // PRIMARY com transparência
-  },
-  emoji: {
-    fontSize: 20,        // Tamanho do emoji
-    textAlign: 'center',
-  },
+  emoji: { fontSize: 20, textAlign: 'center' },
   label: {
-    fontSize: 9,         // Reduzido de 10 para 9
+    fontSize: Typography.fontSize.caption2,
     fontWeight: '500',
     textAlign: 'center',
   },
-  activeLabel: {
-    color: COLORS.PRIMARY, // Verde mint
-    fontWeight: '700',
-  },
+  activeLabel: { fontWeight: '700' },
 });
