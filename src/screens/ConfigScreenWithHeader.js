@@ -2,7 +2,7 @@ import React from 'react';
 import { View, StyleSheet } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import AppHeader from '../components/AppHeader';
-import ConfigScreenPremium from '../screens/ConfigScreenPremium';
+import ConfigScreen from '../screens/ConfigScreen';
 
 export default function ConfigScreenWithHeader() {
   const navigation = useNavigation();

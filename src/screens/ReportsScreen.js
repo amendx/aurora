@@ -12,6 +12,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
 import { useShifts } from '../contexts/ShiftsContext';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
 import { calculateShiftValueWithBreakdown, getShiftHours, getFullShiftConfig, computeShiftValue } from '../utils/ShiftValueCalculator';
 import { formatMoney, formatMoneyCompact } from '../utils/MoneyFormatter';
@@ -67,9 +68,10 @@ const formatHoursWithExtras = (plannedMinutes, extraMinutes) => {
   return TimeUtils.minutesToDisplay(totalMinutes);
 };
 
-export default function ReportsScreen() {
+export default function ReportsScreen({ onExportReady } = {}) {
   const { daysWithShifts, loading, loadMonthlyShifts } = useShifts();
   const C = useColors();
+  const insets = useSafeAreaInsets();
   const s = makeStyles(C);
   const [viewDate, setViewDate] = useState(new Date());
   const [rows, setRows] = useState([]);
@@ -300,8 +302,13 @@ export default function ReportsScreen() {
     } catch (_) {}
   };
 
+  useEffect(() => {
+    if (onExportReady) onExportReady(rows.length > 0 ? exportCSV : null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows.length]);
+
   return (
-    <ScrollView style={s.container} showsVerticalScrollIndicator={false}>
+    <ScrollView style={s.container} contentContainerStyle={{ paddingBottom: insets.bottom + Spacing.lg }} showsVerticalScrollIndicator={false}>
       {/* Month switcher */}
       <View style={s.monthHeader}>
         <Pressable style={s.navButton} onPress={goToPrev}>
@@ -314,14 +321,6 @@ export default function ReportsScreen() {
           <Ionicons name="chevron-forward" size={20} color={C.interactive.active} />
         </Pressable>
       </View>
-
-      {/* Export CSV */}
-      {!isLoading && rows.length > 0 && (
-        <Pressable style={s.exportButton} onPress={exportCSV}>
-          <Ionicons name="download-outline" size={16} color={C.interactive.active} />
-          <Text style={s.exportButtonText}>Exportar CSV</Text>
-        </Pressable>
-      )}
 
       {/* Totals summary — structure always visible, values skeletonized while loading */}
       <View style={s.summaryCard}>
@@ -364,9 +363,10 @@ export default function ReportsScreen() {
             </View>
           ))
         ) : rows.length === 0 ? (
-          <View style={s.empty}>
+          <View style={[s.empty, { borderWidth: 1, borderStyle: 'dashed', borderColor: C.border.light, borderRadius: BorderRadius.lg }]}>
             <Ionicons name="document-text-outline" size={48} color={C.text.tertiary} />
             <Text style={s.emptyText}>Nenhum plantão neste mês</Text>
+            <Text style={s.emptySubtext}>Os plantões do mês aparecerão aqui</Text>
           </View>
         ) : (
           rows.map((row, idx) => {
@@ -462,18 +462,16 @@ const makeStyles = (C) => ({
   },
   monthTitle: {
     fontSize: Typography.fontSize.title2,
-    fontWeight: Typography.fontWeight.semiBold,
+    fontFamily: Typography.fontFamily.display,
     color: C.text.primary,
     textTransform: 'capitalize',
   },
 
   exportButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
     alignSelf: 'flex-end',
-    marginTop: Spacing.md,
+    marginTop: Spacing.sm,
     marginRight: Spacing.lg,
-    gap: Spacing.xs,
+    paddingVertical: Spacing.xs,
   },
   exportButtonText: {
     fontSize: Typography.fontSize.footnote,
@@ -615,10 +613,17 @@ const makeStyles = (C) => ({
   empty: {
     alignItems: 'center',
     paddingVertical: 48,
-    gap: Spacing.md,
+    paddingHorizontal: Spacing.lg,
+    gap: Spacing.sm,
   },
   emptyText: {
     fontSize: Typography.fontSize.body,
+    fontWeight: Typography.fontWeight.semiBold,
+    color: C.text.primary,
+  },
+  emptySubtext: {
+    fontSize: Typography.fontSize.subhead,
     color: C.text.secondary,
+    textAlign: 'center',
   },
 });

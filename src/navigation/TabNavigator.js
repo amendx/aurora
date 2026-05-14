@@ -21,8 +21,8 @@ export default function TabNavigator({ navigation }) {
 
   const handleNavigation = (screenName) => {
     Logger.debug(`📱 Navegação interna para: ${screenName}`);
-    if (screenName === 'ConfigScreenPremium') {
-      navigation.navigate('ConfigScreenPremium');
+    if (screenName === 'ConfigScreen') {
+      navigation.navigate('ConfigScreen');
     } else if (screenName === 'GroupVisibilityScreen') {
       navigation.navigate('GroupVisibilityScreen');
     }

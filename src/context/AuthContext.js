@@ -147,7 +147,15 @@ export const AuthProvider = ({ children }) => {
       try {
         const aurora = await loginAuroraUser(email, password);
         if (aurora) {
-          const { userInfo, idToken } = aurora;
+          const { userInfo: rawAuroraInfo, idToken } = aurora;
+          const prevUserData = await StorageService.getUserData();
+          const isFirstLogin = !prevUserData || prevUserData.id !== rawAuroraInfo.id;
+          const userInfo = {
+            ...rawAuroraInfo,
+            showOnboarding: isFirstLogin
+              ? true
+              : (rawAuroraInfo.showOnboarding ?? prevUserData?.showOnboarding ?? false),
+          };
           await StorageService.saveToken(idToken);
           await StorageService.saveUserData(userInfo);
           setToken(idToken);
@@ -195,6 +203,9 @@ export const AuthProvider = ({ children }) => {
         return { success: false, error: 'Token não recebido pelo servidor.' };
       }
 
+      const prevUserData = await StorageService.getUserData();
+      const isFirstLogin = !prevUserData || prevUserData.id !== (apiData.id || apiData.user_id);
+
       const userInfo = {
         id: apiData.id || apiData.user_id,
         name: apiData.name || apiData.full_name || apiData.username || email,
@@ -205,6 +216,7 @@ export const AuthProvider = ({ children }) => {
         council: apiData.council || { id: '', state: '' },
         phone: apiData.phone || '',
         is_premium: apiData.is_premium || false,
+        showOnboarding: isFirstLogin ? true : (prevUserData?.showOnboarding ?? false),
         // source intentionally absent — treated as 'webClient' everywhere
       };
 
@@ -233,7 +245,8 @@ export const AuthProvider = ({ children }) => {
   const signup = async (signupData) => {
     try {
       setLoading(true);
-      const userInfo = await createAccount(signupData);
+      const rawUserInfo = await createAccount(signupData);
+      const userInfo = { ...rawUserInfo, showOnboarding: true };
       const idToken = await getFirebaseIdToken();
 
       await StorageService.saveToken(idToken);
@@ -260,7 +273,16 @@ export const AuthProvider = ({ children }) => {
   const loginWithGoogle = async (accessToken) => {
     try {
       setLoading(true);
-      const { userInfo, idToken } = await handleGoogleSignIn(accessToken);
+      const { userInfo: rawUserInfo, idToken } = await handleGoogleSignIn(accessToken);
+
+      const prevUserData = await StorageService.getUserData();
+      const isFirstLogin = !prevUserData || prevUserData.id !== rawUserInfo.id;
+      const userInfo = {
+        ...rawUserInfo,
+        showOnboarding: isFirstLogin
+          ? true
+          : (rawUserInfo.showOnboarding ?? prevUserData?.showOnboarding ?? false),
+      };
 
       await StorageService.saveToken(idToken);
       await StorageService.saveUserData(userInfo);
@@ -333,6 +355,20 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
+  const completeOnboarding = async () => {
+    if (!user) return;
+    const updated = { ...user, showOnboarding: false };
+    await StorageService.saveUserData(updated).catch(() => {});
+    setUser(updated);
+    try {
+      const { db: firestoreDb } = await import('../services/firebase/config');
+      const { doc, setDoc } = await import('firebase/firestore');
+      if (firestoreDb && user.id) {
+        await setDoc(doc(firestoreDb, 'users', user.id), { showOnboarding: false }, { merge: true });
+      }
+    } catch {}
+  };
+
   const value = {
     isAuthenticated,
     user,
@@ -343,6 +379,7 @@ export const AuthProvider = ({ children }) => {
     loginWithGoogle,
     logout,
     updatePhoto,
+    completeOnboarding,
   };
 
   return (
