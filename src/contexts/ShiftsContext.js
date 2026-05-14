@@ -557,12 +557,12 @@ export const ShiftsProvider = ({ children }) => {
     }
   };
 
-  // Alias mantido para compatibilidade com HomeScreenPremium
+  // Alias mantido para compatibilidade com HomeScreen
   const loadTwoMonthsData = (month, year) => loadMonthlyShifts(month, year);
 
   /**
    * Write time entries for a day into LocalCache and mark the month summary dirty.
-   * Called after ShiftBottomSheet saves real hours (via CalendarScreenPremium.handleHoursChanged).
+   * Called after ShiftBottomSheet saves real hours (via CalendarScreen.handleHoursChanged).
    *
    * @param {string} dateKey    "YYYY-MM-DD"
    * @param {object} hoursMap   { [shiftIndex]: { startTime, endTime, shiftId, ... } }
@@ -700,7 +700,9 @@ export const ShiftsProvider = ({ children }) => {
     
     hasDataFor: (month, year) => {
       return shiftsData.loadedFor === `${year}-${month}`;
-    }
+    },
+
+    getMonthCache: (month, year) => monthsCache.current[`${year}-${month}`],
   };
 
   return (

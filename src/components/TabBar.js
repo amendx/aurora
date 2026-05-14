@@ -1,80 +1,164 @@
-import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Platform } from 'react-native';
-import { useColors, Typography } from '../constants/DesignSystem';
+/**
+ * TabBar — native-feeling floating tab bar.
+ *
+ * AUDIT (motion refactor):
+ *   Was: instant icon/indicator switch, no press feedback.
+ *   Now: icon + container scale bounce on press (spring, 120ms).
+ *        Active background + pill indicator fade in/out (150ms).
+ *        No translation between tabs — crossfade only (correct native behavior).
+ */
 
-export default function TabBar({ currentTab, onTabPress }) {
-  const C = useColors();
+import React, { useRef, useEffect } from 'react';
+import { View, StyleSheet, Pressable, Platform, Animated, Easing } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useColors, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
 
-  const tabs = [
-    { id: 'home',     label: 'Home',       emoji: '🏠' },
-    { id: 'calendar', label: 'Calendário', emoji: '📅' },
-    { id: 'settings', label: 'Config',     emoji: '⚙️' },
-  ];
+// ─── Animation constants ───────────────────────────────────────────────────────
+const DURATION_INDICATOR = 150;
+const SPRING_PRESS       = { damping: 12, stiffness: 400, mass: 0.6, useNativeDriver: true };
+const EASING_OUT         = Easing.bezier(0, 0, 0.2, 1);
+
+const tabs = [
+  { id: 'home',     icon: 'home-outline',     iconActive: 'home',     label: 'Início' },
+  { id: 'calendar', icon: 'calendar-outline',  iconActive: 'calendar', label: 'Calendário' },
+  { id: 'settings', icon: 'settings-outline',  iconActive: 'settings', label: 'Configurações' },
+];
+
+const TabBar = ({ currentTab, onTabPress }) => {
+  const insets = useSafeAreaInsets();
+  const C      = useColors();
+
+  // One Animated.Value per tab: 0 = inactive, 1 = active
+  const activeAnims = useRef(tabs.map(t => new Animated.Value(t.id === 'home' ? 1 : 0))).current;
+  // One Animated.Value per tab for press scale
+  const scaleAnims  = useRef(tabs.map(() => new Animated.Value(1))).current;
+
+  // Animate indicator when currentTab changes
+  useEffect(() => {
+    tabs.forEach((tab, i) => {
+      Animated.timing(activeAnims[i], {
+        toValue: tab.id === currentTab ? 1 : 0,
+        duration: DURATION_INDICATOR,
+        easing: EASING_OUT,
+        useNativeDriver: true,
+      }).start();
+    });
+  }, [currentTab]);
+
+  const handlePress = (tab, index) => {
+    // Scale bounce: in → spring back
+    Animated.sequence([
+      Animated.timing(scaleAnims[index], {
+        toValue: 1.1,
+        duration: 60,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.spring(scaleAnims[index], {
+        toValue: 1,
+        ...SPRING_PRESS,
+      }),
+    ]).start();
+
+    onTabPress(tab.id);
+  };
 
   return (
-    <View style={[s.container, {
-      backgroundColor: C.background.primary,
-      borderTopColor: C.border.light,
-    }]}>
-      <View style={s.tabBarContent}>
-        {tabs.map((tab) => {
-          const isActive = currentTab === tab.id;
+    <View style={[s.container, { paddingBottom: Math.max(insets.bottom, Spacing.md) }]}>
+      <View style={[
+        s.tabBar,
+        { backgroundColor: C.background.primary, borderColor: C.border.light },
+        Platform.OS === 'ios' ? Shadows.medium : { elevation: 8 },
+      ]}>
+        {tabs.map((tab, index) => {
+          const isActive      = currentTab === tab.id;
+          const activeAnim    = activeAnims[index];
+          const scaleAnim     = scaleAnims[index];
+
+          const bgOpacity    = activeAnim;
+          const pillOpacity  = activeAnim;
+
           return (
-            <TouchableOpacity
+            <Pressable
               key={tab.id}
-              style={[s.tab, isActive && { backgroundColor: C.primary + '15' }]}
-              onPress={() => onTabPress(tab.id)}
-              activeOpacity={0.7}
+              style={s.tab}
+              onPress={() => handlePress(tab, index)}
+              hitSlop={Spacing.sm}
             >
-              <Text style={s.emoji}>{tab.emoji}</Text>
-              <Text style={[
-                s.label,
-                { color: isActive ? C.primary : C.interactive.inactive },
-                isActive && s.activeLabel,
-              ]}>
-                {tab.label}
-              </Text>
-            </TouchableOpacity>
+              <Animated.View style={[s.tabContent, { transform: [{ scale: scaleAnim }] }]}>
+                {/* Active background fade */}
+                <Animated.View
+                  style={[
+                    StyleSheet.absoluteFill,
+                    s.tabBg,
+                    { backgroundColor: C.background.secondary, opacity: bgOpacity },
+                  ]}
+                />
+                <Ionicons
+                  name={isActive ? tab.iconActive : tab.icon}
+                  size={24}
+                  color={isActive ? C.interactive.active : C.interactive.inactive}
+                  style={s.tabIcon}
+                />
+                {/* Active pill indicator — fade in/out */}
+                <Animated.View
+                  style={[s.pillIndicator, { backgroundColor: C.interactive.active, opacity: pillOpacity }]}
+                />
+              </Animated.View>
+            </Pressable>
           );
         })}
       </View>
     </View>
   );
-}
+};
 
 const s = StyleSheet.create({
   container: {
-    borderTopWidth: StyleSheet.hairlineWidth,
-    paddingBottom: Platform.OS === 'ios' ? 30 : 8,
     position: 'absolute',
     bottom: 0,
     left: 0,
     right: 0,
+    paddingHorizontal: Spacing.md,
+    paddingBottom: Spacing.md,
+    backgroundColor: 'transparent',
   },
-  tabBarContent: {
+  tabBar: {
     flexDirection: 'row',
-    paddingTop: 8,
-    paddingBottom: 4,
-    paddingHorizontal: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: -2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 8,
+    alignItems: 'center',
+    justifyContent: 'space-around',
+    borderRadius: BorderRadius.xxl,
+    height: 68,
+    paddingHorizontal: Spacing.lg,
+    borderWidth: StyleSheet.hairlineWidth,
   },
   tab: {
     flex: 1,
     alignItems: 'center',
-    paddingVertical: 6,
-    paddingHorizontal: 8,
-    gap: 2,
-    borderRadius: 12,
+    justifyContent: 'center',
+    paddingVertical: Spacing.sm,
   },
-  emoji: { fontSize: 20, textAlign: 'center' },
-  label: {
-    fontSize: Typography.fontSize.caption2,
-    fontWeight: '500',
-    textAlign: 'center',
+  tabContent: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    overflow: 'hidden',
   },
-  activeLabel: { fontWeight: '700' },
+  tabBg: {
+    borderRadius: 25,
+  },
+  tabIcon: { zIndex: 1 },
+  pillIndicator: {
+    position: 'absolute',
+    bottom: 4,
+    width: 20,
+    height: 3,
+    borderRadius: BorderRadius.pill,
+    zIndex: 1,
+  },
 });
+
+export default TabBar;

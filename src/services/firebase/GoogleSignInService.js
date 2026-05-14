@@ -72,6 +72,8 @@ export const handleGoogleSignIn = async (accessToken) => {
 
   const idToken = await getFirebaseIdToken();
 
+  const existingData = existingDoc?.exists() ? existingDoc.data() : null;
+
   return {
     userInfo: {
       id: userId,
@@ -84,6 +86,7 @@ export const handleGoogleSignIn = async (accessToken) => {
       phone: '',
       is_premium: false,
       source: 'aurora',
+      showOnboarding: existingData?.showOnboarding ?? null,
     },
     idToken,
   };

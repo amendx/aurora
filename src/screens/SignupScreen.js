@@ -1,4 +1,4 @@
-import { useState, useContext } from 'react';
+import { useState, useContext, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -11,13 +11,18 @@ import {
   Pressable,
   Image,
   ScrollView,
+  Animated,
+  Dimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { AuthContext } from '../context/AuthContext';
-import { useColors, Typography, Spacing, Shadows, BorderRadius, Layout } from '../constants/DesignSystem';
+import { useColors, Typography, Spacing, BorderRadius, Layout } from '../constants/DesignSystem';
 import Logger from '../utils/Logger';
+
+const { width: W, height: H } = Dimensions.get('window');
 
 const CRM_STATES = [
   'AC','AL','AP','AM','BA','CE','DF','ES','GO','MA',
@@ -25,10 +30,11 @@ const CRM_STATES = [
   'RS','RO','RR','SC','SP','SE','TO',
 ];
 
+const HERO_H = H * 0.28;
+
 export default function SignupScreen({ onBack }) {
   const { signup } = useContext(AuthContext);
   const C = useColors();
-  const s = makeStyles(C);
 
   const [name, setName] = useState('');
   const [username, setUsername] = useState('');
@@ -45,6 +51,12 @@ export default function SignupScreen({ onBack }) {
   const [isRepeatPasswordVisible, setIsRepeatPasswordVisible] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [showStateList, setShowStateList] = useState(false);
+  const [focusedField, setFocusedField] = useState(null);
+
+  const formAnim = useRef(new Animated.Value(24)).current;
+  useEffect(() => {
+    Animated.spring(formAnim, { toValue: 0, useNativeDriver: true, damping: 20, stiffness: 200 }).start();
+  }, []);
 
   const pickPhoto = async () => {
     setIsPickingPhoto(true);
@@ -64,7 +76,6 @@ export default function SignupScreen({ onBack }) {
         setPhotoUri(result.assets[0].uri);
       }
     } catch (err) {
-      console.error('[SignupScreen] pickPhoto error:', err);
       Alert.alert('Erro', 'Não foi possível abrir a galeria. Tente novamente.');
     } finally {
       setIsPickingPhoto(false);
@@ -78,9 +89,7 @@ export default function SignupScreen({ onBack }) {
   };
 
   const handleRepeatPasswordBlur = () => {
-    if (repeatPassword.length > 0) {
-      setPasswordMismatch(password !== repeatPassword);
-    }
+    if (repeatPassword.length > 0) setPasswordMismatch(password !== repeatPassword);
   };
 
   const handleSignup = async () => {
@@ -94,75 +103,78 @@ export default function SignupScreen({ onBack }) {
       setPasswordMismatch(true);
       return Alert.alert('Erro', 'As senhas não coincidem.');
     }
-
-    Logger.info('📝 Signup — username:', username.trim(), 'email:', email.trim(), 'photo:', !!photoUri);
     setIsLoading(true);
     const result = await signup({
-      name: name.trim(),
-      username: username.trim(),
-      email: email.trim(),
-      password,
-      photoUri,
-      crm: crm.trim(),
-      crmState,
+      name: name.trim(), username: username.trim(), email: email.trim(),
+      password, photoUri, crm: crm.trim(), crmState,
     });
     Logger.info('📝 Signup result:', JSON.stringify(result));
     setIsLoading(false);
-
-    if (!result.success) {
-      Alert.alert('Erro ao criar conta', result.error || 'Tente novamente.');
-    }
+    if (!result.success) Alert.alert('Erro ao criar conta', result.error || 'Tente novamente.');
   };
 
-  const photoOverlay = isPickingPhoto || (isLoading && photoUri);
+  const s = makeStyles(C);
 
   return (
-    <SafeAreaView style={s.container}>
-      <KeyboardAvoidingView
-        style={s.keyboardView}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      >
-        <ScrollView
-          contentContainerStyle={s.scrollContent}
-          keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
-        >
-          {/* Header */}
-          <View style={s.header}>
-            <Pressable style={s.backButton} onPress={onBack} hitSlop={Spacing.md}>
-              <Ionicons name="arrow-back" size={24} color={C.text.primary} />
-            </Pressable>
-            <Text style={s.headerTitle}>Criar conta</Text>
-            <View style={s.headerSpacer} />
-          </View>
+    <View style={s.root}>
 
-          {/* Photo picker */}
-          <View style={s.photoSection}>
-            <Pressable style={s.photoPicker} onPress={pickPhoto} disabled={isLoading}>
-              {photoUri ? (
-                <Image source={{ uri: photoUri }} style={s.photoImage} />
-              ) : (
-                <View style={s.photoPlaceholder}>
-                  <Ionicons name="camera-outline" size={32} color={C.text.secondary} />
-                  <Text style={s.photoPlaceholderText}>Foto de perfil</Text>
-                </View>
-              )}
-              {photoOverlay && (
-                <View style={s.photoOverlay}>
-                  <ActivityIndicator size="small" color="#fff" />
-                </View>
-              )}
-            </Pressable>
-            <Text style={s.photoHint}>
-              {isPickingPhoto ? 'Selecionando...' : isLoading && photoUri ? 'Enviando foto...' : 'Toque para adicionar foto'}
-            </Text>
+      {/* ── Hero ── */}
+      <View style={s.hero}>
+        <LinearGradient
+          colors={['#1a2535', '#263340', '#1a2535']}
+          style={StyleSheet.absoluteFill}
+          start={{ x: 0.2, y: 0 }}
+          end={{ x: 0.8, y: 1 }}
+        />
+        <SafeAreaView edges={['top']} style={s.heroContent}>
+          <Pressable style={s.backBtn} onPress={onBack} hitSlop={Spacing.md}>
+            <Ionicons name={Platform.OS === 'ios' ? 'chevron-back' : 'arrow-back'} size={26} color="rgba(255,255,255,0.85)" />
+          </Pressable>
+          <View style={s.heroCenter}>
+            <Text style={s.heroTitle}>Criar conta</Text>
+            <Text style={s.heroSub}>Bem-vindo ao Aurora</Text>
           </View>
+          <View style={s.heroSpacer} />
+        </SafeAreaView>
+        <View style={[s.heroWave, { backgroundColor: C.background.primary }]} />
+      </View>
 
-          <View style={s.formSection}>
-            <Field label="Nome" s={s}>
-              <Ionicons name="person-circle-outline" size={20} color={C.interactive.inactive} style={s.inputIcon} />
+      {/* ── Form ── */}
+      <KeyboardAvoidingView style={s.formArea} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <Animated.View style={[{ flex: 1 }, { transform: [{ translateY: formAnim }] }]}>
+          <ScrollView
+            contentContainerStyle={s.formScroll}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+
+            {/* Photo picker */}
+            <View style={s.photoRow}>
+              <Pressable style={[s.photoPicker, { backgroundColor: C.background.secondary, borderColor: C.border.light }]} onPress={pickPhoto} disabled={isLoading}>
+                {photoUri ? (
+                  <Image source={{ uri: photoUri }} style={s.photoImage} />
+                ) : (
+                  <View style={s.photoPlaceholder}>
+                    <Ionicons name="camera" size={24} color={C.primary} />
+                  </View>
+                )}
+                {(isPickingPhoto || (isLoading && photoUri)) && (
+                  <View style={s.photoOverlay}>
+                    <ActivityIndicator size="small" color="#fff" />
+                  </View>
+                )}
+                <View style={[s.photoBadge, { backgroundColor: C.primary }]}>
+                  <Ionicons name="add" size={14} color="#fff" />
+                </View>
+              </Pressable>
+              <Text style={[s.photoHint, { color: C.text.tertiary }]}>
+                {isPickingPhoto ? 'Selecionando...' : 'Foto de perfil'}
+              </Text>
+            </View>
+
+            <Field label="Nome" icon="person-circle-outline" error={false} focused={focusedField === 'name'} C={C} s={s}>
               <TextInput
-                style={s.textInput}
+                style={s.fieldInput}
                 value={name}
                 onChangeText={(v) => setName(v.replace(/[<>"';\\]/g, ''))}
                 placeholder="Seu nome completo"
@@ -170,376 +182,350 @@ export default function SignupScreen({ onBack }) {
                 autoCapitalize="words"
                 autoCorrect={false}
                 maxLength={80}
+                onFocus={() => setFocusedField('name')}
+                onBlur={() => setFocusedField(null)}
               />
             </Field>
 
-            <Field label="Usuário" s={s}>
-              <Ionicons name="person-outline" size={20} color={C.interactive.inactive} style={s.inputIcon} />
+            <Field label="Usuário" icon="person-outline" error={false} focused={focusedField === 'username'} C={C} s={s}>
               <TextInput
-                style={s.textInput}
+                style={s.fieldInput}
                 value={username}
                 onChangeText={(v) => setUsername(v.toLowerCase().replace(/[^a-z0-9._-]/g, ''))}
-                placeholder="Nome de usuário"
+                placeholder="nome_de_usuario"
                 placeholderTextColor={C.text.placeholder}
                 autoCapitalize="none"
                 autoCorrect={false}
                 maxLength={30}
+                onFocus={() => setFocusedField('username')}
+                onBlur={() => setFocusedField(null)}
               />
             </Field>
 
-            <View style={s.inputGroup}>
-              <Text style={s.inputLabel}>Email</Text>
-              <View style={[s.inputContainer, emailError && s.inputContainerError]}>
-                <Ionicons name="mail-outline" size={20} color={emailError ? C.error : C.interactive.inactive} style={s.inputIcon} />
-                <TextInput
-                  style={s.textInput}
-                  value={email}
-                  onChangeText={(v) => { setEmail(v.replace(/[<>"';\\]/g, '')); if (emailError) setEmailError(false); }}
-                  onBlur={handleEmailBlur}
-                  placeholder="seu@email.com"
-                  placeholderTextColor={C.text.placeholder}
-                  keyboardType="email-address"
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  autoComplete="email"
-                />
-              </View>
-              {emailError && <Text style={s.errorText}>Email inválido</Text>}
-            </View>
-
-            <View style={s.inputGroup}>
-              <Text style={s.inputLabel}>Senha</Text>
-              <View style={s.inputContainer}>
-                <Ionicons name="lock-closed-outline" size={20} color={C.interactive.inactive} style={s.inputIcon} />
-                <TextInput
-                  style={[s.textInput, s.passwordInput]}
-                  value={password}
-                  onChangeText={setPassword}
-                  placeholder="Mínimo 6 caracteres"
-                  placeholderTextColor={C.text.placeholder}
-                  secureTextEntry={!isPasswordVisible}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                />
-                <Pressable style={s.visibilityButton} onPress={() => setIsPasswordVisible(v => !v)} hitSlop={Spacing.sm}>
-                  <Ionicons name={isPasswordVisible ? 'eye-outline' : 'eye-off-outline'} size={20} color={C.interactive.inactive} />
-                </Pressable>
-              </View>
-              <View style={s.passwordTip}>
-                <Ionicons name="information-circle-outline" size={14} color={C.text.tertiary} />
-                <Text style={s.passwordTipText}>Use ao menos uma letra maiúscula para maior segurança</Text>
-              </View>
-            </View>
-
-            <View style={s.inputGroup}>
-              <Text style={s.inputLabel}>Confirmar senha</Text>
-              <View style={[s.inputContainer, passwordMismatch && s.inputContainerError]}>
-                <Ionicons name="lock-closed-outline" size={20} color={passwordMismatch ? C.error : C.interactive.inactive} style={s.inputIcon} />
-                <TextInput
-                  style={[s.textInput, s.passwordInput]}
-                  value={repeatPassword}
-                  onChangeText={(v) => { setRepeatPassword(v); if (passwordMismatch) setPasswordMismatch(false); }}
-                  onBlur={handleRepeatPasswordBlur}
-                  placeholder="Repita a senha"
-                  placeholderTextColor={C.text.placeholder}
-                  secureTextEntry={!isRepeatPasswordVisible}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                />
-                <Pressable style={s.visibilityButton} onPress={() => setIsRepeatPasswordVisible(v => !v)} hitSlop={Spacing.sm}>
-                  <Ionicons name={isRepeatPasswordVisible ? 'eye-outline' : 'eye-off-outline'} size={20} color={C.interactive.inactive} />
-                </Pressable>
-              </View>
-              {passwordMismatch && (
-                <Text style={s.errorText}>As senhas não coincidem</Text>
-              )}
-            </View>
-
-            <Field label="CRM (opcional)" s={s}>
-              <Ionicons name="card-outline" size={20} color={C.interactive.inactive} style={s.inputIcon} />
+            <Field label="Email" icon={emailError ? 'alert-circle-outline' : 'mail-outline'} error={emailError ? 'Email inválido' : false} focused={focusedField === 'email'} C={C} s={s}>
               <TextInput
-                style={s.textInput}
+                style={s.fieldInput}
+                value={email}
+                onChangeText={(v) => { setEmail(v.replace(/[<>"';\\]/g, '')); if (emailError) setEmailError(false); }}
+                onBlur={() => { handleEmailBlur(); setFocusedField(null); }}
+                placeholder="seu@email.com"
+                placeholderTextColor={C.text.placeholder}
+                keyboardType="email-address"
+                autoCapitalize="none"
+                autoCorrect={false}
+                autoComplete="email"
+                onFocus={() => setFocusedField('email')}
+              />
+            </Field>
+
+            <Field label="Senha" icon="lock-closed-outline" error={false} focused={focusedField === 'password'} C={C} s={s}>
+              <TextInput
+                style={[s.fieldInput, { flex: 1 }]}
+                value={password}
+                onChangeText={setPassword}
+                placeholder="Mínimo 6 caracteres"
+                placeholderTextColor={C.text.placeholder}
+                secureTextEntry={!isPasswordVisible}
+                autoCapitalize="none"
+                autoCorrect={false}
+                onFocus={() => setFocusedField('password')}
+                onBlur={() => setFocusedField(null)}
+              />
+              <Pressable onPress={() => setIsPasswordVisible(v => !v)} hitSlop={Spacing.sm}>
+                <Ionicons name={isPasswordVisible ? 'eye-outline' : 'eye-off-outline'} size={20} color={C.text.tertiary} />
+              </Pressable>
+            </Field>
+
+            <Field label="Confirmar senha" icon="lock-closed-outline" error={passwordMismatch ? 'As senhas não coincidem' : false} focused={focusedField === 'repeatPassword'} C={C} s={s}>
+              <TextInput
+                style={[s.fieldInput, { flex: 1 }]}
+                value={repeatPassword}
+                onChangeText={(v) => { setRepeatPassword(v); if (passwordMismatch) setPasswordMismatch(false); }}
+                onBlur={() => { handleRepeatPasswordBlur(); setFocusedField(null); }}
+                placeholder="Repita a senha"
+                placeholderTextColor={C.text.placeholder}
+                secureTextEntry={!isRepeatPasswordVisible}
+                autoCapitalize="none"
+                autoCorrect={false}
+                onFocus={() => setFocusedField('repeatPassword')}
+              />
+              <Pressable onPress={() => setIsRepeatPasswordVisible(v => !v)} hitSlop={Spacing.sm}>
+                <Ionicons name={isRepeatPasswordVisible ? 'eye-outline' : 'eye-off-outline'} size={20} color={C.text.tertiary} />
+              </Pressable>
+            </Field>
+
+            <Field label="CRM (opcional)" icon="card-outline" error={false} focused={focusedField === 'crm'} C={C} s={s}>
+              <TextInput
+                style={s.fieldInput}
                 value={crm}
                 onChangeText={(v) => setCrm(v.replace(/[^0-9]/g, ''))}
                 placeholder="Número do CRM"
                 placeholderTextColor={C.text.placeholder}
                 keyboardType="numeric"
                 maxLength={10}
+                onFocus={() => setFocusedField('crm')}
+                onBlur={() => setFocusedField(null)}
               />
             </Field>
 
-            <Field label="Estado do CRM (opcional)" s={s}>
-              <Ionicons name="location-outline" size={20} color={C.interactive.inactive} style={s.inputIcon} />
-              <Pressable style={s.pickerButton} onPress={() => setShowStateList(v => !v)}>
-                <Text style={crmState ? s.pickerText : s.pickerPlaceholder}>
+            <Field label="Estado do CRM (opcional)" icon="location-outline" error={false} focused={focusedField === 'crmState'} C={C} s={s}>
+              <Pressable style={s.pickerBtn} onPress={() => setShowStateList(v => !v)}>
+                <Text style={[s.fieldInput, !crmState && { color: C.text.placeholder }]}>
                   {crmState || 'Selecionar estado'}
                 </Text>
-                <Ionicons name={showStateList ? 'chevron-up' : 'chevron-down'} size={16} color={C.text.secondary} />
+                <Ionicons name={showStateList ? 'chevron-up' : 'chevron-down'} size={16} color={C.text.tertiary} />
               </Pressable>
             </Field>
 
             {showStateList && (
-              <View style={s.stateList}>
+              <View style={[s.stateGrid, { backgroundColor: C.background.secondary, borderColor: C.border.light }]}>
                 {CRM_STATES.map(st => (
                   <Pressable
                     key={st}
-                    style={[s.stateItem, crmState === st && s.stateItemSelected]}
+                    style={[s.stateChip, { backgroundColor: C.background.primary, borderColor: C.border.light }, crmState === st && { backgroundColor: C.primary, borderColor: C.primary }]}
                     onPress={() => { setCrmState(st); setShowStateList(false); }}
                   >
-                    <Text style={[s.stateItemText, crmState === st && s.stateItemTextSelected]}>{st}</Text>
+                    <Text style={[s.stateChipText, { color: C.text.primary }, crmState === st && { color: '#fff' }]}>{st}</Text>
                   </Pressable>
                 ))}
               </View>
             )}
 
             <Pressable
-              style={({ pressed }) => [
-                s.signupButton,
-                pressed && s.signupButtonPressed,
-                isLoading && s.signupButtonDisabled,
-              ]}
+              style={({ pressed }) => [s.ctaBtn, { backgroundColor: C.primary }, pressed && { backgroundColor: C.primaryDark, transform: [{ scale: 0.98 }] }, isLoading && { backgroundColor: C.primary + '80' }]}
               onPress={handleSignup}
               disabled={isLoading}
             >
               {isLoading ? (
-                <View style={s.loadingRow}>
-                  <ActivityIndicator size="small" color={C.background.primary} />
-                  <Text style={[s.signupButtonText, { marginLeft: Spacing.sm }]}>
-                    {photoUri ? 'Enviando...' : 'Criando conta...'}
-                  </Text>
-                </View>
+                <ActivityIndicator size="small" color="#fff" />
               ) : (
-                <Text style={s.signupButtonText}>Criar conta</Text>
+                <View style={s.ctaBtnContent}>
+                  <Text style={s.ctaBtnText}>Criar conta</Text>
+                  <Ionicons name="arrow-forward" size={20} color="#fff" style={{ marginLeft: Spacing.sm }} />
+                </View>
               )}
             </Pressable>
-          </View>
-        </ScrollView>
+
+          </ScrollView>
+        </Animated.View>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </View>
   );
 }
 
-function Field({ label, children, s }) {
+function Field({ label, icon, error, focused, C, s, children }) {
   return (
-    <View style={s.inputGroup}>
-      <Text style={s.inputLabel}>{label}</Text>
-      <View style={s.inputContainer}>{children}</View>
+    <View style={s.fieldGroup}>
+      <Text style={[s.fieldLabel, { color: error ? C.error : C.text.secondary }]}>{label}</Text>
+      <View style={[
+        s.fieldRow,
+        { borderColor: error ? C.error : focused ? C.primary : 'transparent', backgroundColor: C.background.secondary }
+      ]}>
+        <Ionicons name={icon} size={18} color={error ? C.error : focused ? C.primary : C.text.tertiary} style={s.fieldIcon} />
+        {children}
+      </View>
+      {error && typeof error === 'string' && (
+        <Text style={[s.errorInline, { color: C.error }]}>{error}</Text>
+      )}
     </View>
   );
 }
 
 const makeStyles = (C) => ({
-  container: {
+  root: {
     flex: 1,
     backgroundColor: C.background.primary,
   },
-  keyboardView: {
-    flex: 1,
+
+  // ── Hero ──────────────────────────────────────────────────────────────────────
+  hero: {
+    height: HERO_H,
+    overflow: 'hidden',
   },
-  scrollContent: {
-    paddingHorizontal: Spacing.xl,
+  heroContent: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: Spacing.md,
+    paddingBottom: Spacing.lg,
+  },
+  backBtn: {
+    width: 40,
+    alignItems: 'flex-start',
+    justifyContent: 'center',
+  },
+  heroCenter: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  heroTitle: {
+    fontFamily: Typography.fontFamily.display,
+    fontSize: 26,
+    color: 'rgba(255,255,255,0.95)',
+    letterSpacing: -0.4,
+  },
+  heroSub: {
+    fontSize: Typography.fontSize.footnote,
+    color: 'rgba(255,255,255,0.5)',
+    marginTop: 2,
+  },
+  heroSpacer: {
+    width: 40,
+  },
+  heroWave: {
+    position: 'absolute',
+    bottom: -28,
+    left: -16,
+    right: -16,
+    height: 56,
+    borderTopLeftRadius: 36,
+    borderTopRightRadius: 36,
+  },
+
+  // ── Form ──────────────────────────────────────────────────────────────────────
+  formArea: {
+    flex: 1,
+    backgroundColor: C.background.primary,
+  },
+  formScroll: {
+    paddingHorizontal: 24,
+    paddingTop: Spacing.lg,
     paddingBottom: Spacing.xxxl,
   },
 
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingTop: Spacing.lg,
-    marginBottom: Spacing.xl,
-  },
-  backButton: {
-    padding: Spacing.xs,
-  },
-  headerTitle: {
-    flex: 1,
-    textAlign: 'center',
-    fontSize: Typography.fontSize.title3,
-    fontWeight: Typography.fontWeight.semiBold,
-    fontFamily: Typography.fontFamily.semiBold,
-    color: C.text.primary,
-    letterSpacing: -0.5,
-  },
-  headerSpacer: {
-    width: 32,
-  },
-
-  photoSection: {
+  // ── Photo ─────────────────────────────────────────────────────────────────────
+  photoRow: {
     alignItems: 'center',
     marginBottom: Spacing.xl,
     gap: Spacing.sm,
   },
   photoPicker: {
-    width: 96,
-    height: 96,
-    borderRadius: 48,
-    overflow: 'hidden',
-    backgroundColor: C.background.secondary,
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    overflow: 'visible',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: C.border.light,
-    ...Shadows.small,
-  },
-  photoImage: {
-    width: '100%',
-    height: '100%',
-  },
-  photoPlaceholder: {
-    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: Spacing.xs,
   },
-  photoPlaceholderText: {
-    fontSize: Typography.fontSize.caption1,
-    color: C.text.secondary,
-    textAlign: 'center',
+  photoImage: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+  },
+  photoPlaceholder: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   photoOverlay: {
     ...StyleSheet.absoluteFillObject,
+    borderRadius: 40,
     backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  photoBadge: {
+    position: 'absolute',
+    bottom: 0,
+    right: 0,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
   },
   photoHint: {
     fontSize: Typography.fontSize.caption1,
-    color: C.text.tertiary,
   },
 
-  formSection: {},
-  inputGroup: {
-    marginBottom: Spacing.lg,
+  // ── Fields ──────────────────────────────────────────────────────────────────
+  fieldGroup: {
+    marginBottom: 24,
   },
-  inputLabel: {
-    fontSize: Typography.fontSize.subhead,
-    fontWeight: Typography.fontWeight.medium,
-    fontFamily: Typography.fontFamily.medium,
-    color: C.text.primary,
-    marginBottom: Spacing.sm,
+  fieldLabel: {
+    fontSize: Typography.fontSize.footnote,
+    fontWeight: Typography.fontWeight.semiBold,
+    fontFamily: Typography.fontFamily.semiBold,
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: 8,
   },
-  inputContainer: {
+  fieldRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: C.background.secondary,
     borderRadius: BorderRadius.md,
+    borderWidth: 1.5,
     paddingHorizontal: Spacing.md,
-    height: Layout.input.height + 6,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: C.border.light,
+    paddingVertical: 14,
   },
-  inputContainerError: {
-    borderColor: C.error,
-    borderWidth: 1,
-  },
-  inputIcon: {
+  fieldIcon: {
     marginRight: Spacing.sm,
   },
-  textInput: {
+  fieldInput: {
     flex: 1,
     fontSize: Typography.fontSize.body,
-    fontWeight: Typography.fontWeight.regular,
     fontFamily: Typography.fontFamily.regular,
     color: C.text.primary,
     paddingVertical: 0,
   },
-  passwordInput: {
-    paddingRight: Spacing.md,
-  },
-  visibilityButton: {
-    padding: Spacing.sm,
-    marginRight: -Spacing.sm,
-  },
-  passwordTip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.xs,
-    marginTop: Spacing.xs,
-    paddingHorizontal: Spacing.xs,
-  },
-  passwordTipText: {
-    flex: 1,
-    fontSize: Typography.fontSize.caption1,
-    color: C.text.tertiary,
-    lineHeight: Typography.fontSize.caption1 * 1.4,
-  },
-  errorText: {
-    fontSize: Typography.fontSize.caption1,
-    color: C.error,
-    marginTop: Spacing.xs,
-    paddingHorizontal: Spacing.xs,
-  },
-  pickerButton: {
+  pickerBtn: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  pickerText: {
-    fontSize: Typography.fontSize.body,
-    color: C.text.primary,
-  },
-  pickerPlaceholder: {
-    fontSize: Typography.fontSize.body,
-    color: C.text.placeholder,
+  errorInline: {
+    fontSize: Typography.fontSize.caption1,
+    marginTop: 4,
+    paddingHorizontal: 2,
   },
 
-  stateList: {
+  // ── State grid ─────────────────────────────────────────────────────────────────
+  stateGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: Spacing.xs,
-    backgroundColor: C.background.secondary,
     borderRadius: BorderRadius.md,
     padding: Spacing.md,
     marginBottom: Spacing.lg,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: C.border.light,
   },
-  stateItem: {
+  stateChip: {
     paddingHorizontal: Spacing.md,
     paddingVertical: Spacing.sm,
     minWidth: 48,
     alignItems: 'center',
     borderRadius: BorderRadius.sm,
-    backgroundColor: C.background.primary,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: C.border.light,
   },
-  stateItemSelected: {
-    backgroundColor: C.primary,
-    borderColor: C.primary,
-  },
-  stateItemText: {
+  stateChipText: {
     fontSize: Typography.fontSize.subhead,
     fontWeight: Typography.fontWeight.medium,
-    color: C.text.primary,
-  },
-  stateItemTextSelected: {
-    color: C.background.primary,
-    fontWeight: Typography.fontWeight.semiBold,
   },
 
-  signupButton: {
-    backgroundColor: C.primary,
-    borderRadius: BorderRadius.md,
-    height: Layout.button.height + 2,
+  // ── CTA ────────────────────────────────────────────────────────────────────────
+  ctaBtn: {
+    borderRadius: 50,
+    height: 54,
     alignItems: 'center',
     justifyContent: 'center',
     marginTop: Spacing.lg,
-    ...Shadows.small,
+    ...Platform.select({
+      ios:     { shadowColor: '#6cc1c0', shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.35, shadowRadius: 14 },
+      android: { elevation: 6 },
+    }),
   },
-  signupButtonPressed: {
-    backgroundColor: C.primaryDark,
-    transform: [{ scale: 0.98 }],
+  ctaBtnContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
-  signupButtonDisabled: {
-    backgroundColor: C.interactive.disabled,
-  },
-  signupButtonText: {
+  ctaBtnText: {
     fontSize: Typography.fontSize.body,
     fontWeight: Typography.fontWeight.semiBold,
     fontFamily: Typography.fontFamily.semiBold,
-    color: C.background.primary,
-  },
-  loadingRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    color: '#fff',
   },
 });

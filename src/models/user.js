@@ -88,6 +88,7 @@
  * @property {string}  phone
  * @property {boolean} is_premium
  * @property {'webClient'|'aurora'} [source]  absent = legacy WebClient user
+ * @property {boolean} [showOnboarding]  true on first login/signup, false after onboarding completes
  */
 
 export {};

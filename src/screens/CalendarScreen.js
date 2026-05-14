@@ -57,7 +57,15 @@ const SkeletonDay = () => (
   </View>
 );
 
-const CalendarScreenPremium = ({ navigation }) => {
+const formatHours = (decimalHours) => {
+  if (!decimalHours) return '0h';
+  const totalMin = Math.round(decimalHours * 60);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return m === 0 ? `${h}h` : `${h}h${String(m).padStart(2, '0')}`;
+};
+
+const CalendarScreen = ({ navigation }) => {
   useContext(AuthContext);
   const {
     daysWithShifts,
@@ -126,23 +134,20 @@ const CalendarScreenPremium = ({ navigation }) => {
     }, 500);
   }, [loadMonthlyShifts]);
 
-  // Load data immediately on mount, then rely on navigateToMonth for subsequent changes
+  // Load data on mount — skip if ShiftsContext already has this month loaded
   useEffect(() => {
     const month = currentDate.getMonth() + 1;
     const year = currentDate.getFullYear();
+    const key = `${year}-${month}`;
 
-    // Only load on initial mount
-    if (!isNavigatingRef.current) {
+    if (!isNavigatingRef.current && loadedFor !== key) {
       loadMonthlyShifts(month, year);
     }
 
-    // Cleanup function to clear timeout on unmount
     return () => {
-      if (navigationTimeoutRef.current) {
-        clearTimeout(navigationTimeoutRef.current);
-      }
+      if (navigationTimeoutRef.current) clearTimeout(navigationTimeoutRef.current);
     };
-  }, []); // Only run on mount
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Remount Calendar component when month/year changes so it displays the new month
   useEffect(() => {
@@ -347,11 +352,15 @@ const CalendarScreenPremium = ({ navigation }) => {
       selectedDate = new Date(currentDate.getFullYear(), currentDate.getMonth(), parseInt(day.day));
     }
 
-    setSelectedDayData({
-      date: selectedDate,
-      shifts: dayData.shifts
-    });
-    setBottomSheetVisible(true);
+    if (navigation?.navigate) {
+      navigation.navigate('DayView', { date: selectedDate });
+    } else {
+      setSelectedDayData({
+        date: selectedDate,
+        shifts: dayData.shifts
+      });
+      setBottomSheetVisible(true);
+    }
   };
 
   const handleCloseBottomSheet = () => {
@@ -566,7 +575,7 @@ const CalendarScreenPremium = ({ navigation }) => {
                   <Text style={s.statLabel}>Plantões</Text>
                 </View>
                 <View style={s.statCard}>
-                  <Text style={s.statNumber}>{stats.totalHours}h</Text>
+                  <Text style={s.statNumber}>{formatHours(stats.totalHours)}</Text>
                   <Text style={s.statLabel}>Horas totais</Text>
                 </View>
               </>
@@ -859,7 +868,7 @@ const makeStyles = (C) => ({
   },
   monthTitle: {
     fontSize: Typography.fontSize.title2,
-    fontWeight: Typography.fontWeight.semiBold,
+    fontFamily: Typography.fontFamily.display,
     color: C.text.primary,
     textTransform: 'capitalize',
   },
@@ -910,9 +919,11 @@ const makeStyles = (C) => ({
     ...Shadows.small,
   },
   filtersTitle: {
-    fontSize: Typography.fontSize.footnote,
+    fontSize: Typography.fontSize.caption1,
     fontWeight: Typography.fontWeight.semiBold,
-    color: C.text.secondary,
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    color: C.text.tertiary,
     marginBottom: Spacing.sm,
   },
   filtersRow: {
@@ -998,4 +1009,4 @@ const makeStyles = (C) => ({
   },
 });
 
-export default CalendarScreenPremium;
+export default CalendarScreen;

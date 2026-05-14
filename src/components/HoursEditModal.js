@@ -5,625 +5,379 @@ import {
   StyleSheet,
   Modal,
   TextInput,
-  TouchableOpacity,
   Pressable,
   Animated,
+  Easing,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { useColors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
+import { IconX, IconClock, IconArrowRight, IconCheck } from '@tabler/icons-react-native';
+import { useColors, Typography, Spacing, BorderRadius } from '../constants/DesignSystem';
 
-const HoursEditModal = ({
-  visible,
-  onClose,
-  onSave,
-  shift,
-  currentHours = {}
-}) => {
+const SPRING = { damping: 22, stiffness: 320, mass: 0.8, useNativeDriver: true };
+
+const HoursEditModal = ({ visible, onClose, onSave, shift, currentHours = {} }) => {
   const C = useColors();
-  const s = makeStyles(C);
+  const [startTime, setStartTime] = useState('');
+  const [endTime, setEndTime] = useState('');
+  const [startErr, setStartErr] = useState(null);
+  const [endErr, setEndErr] = useState(null);
+  const endRef = useRef(null);
 
-  const [startTime, setStartTime] = useState(currentHours.startTime || '');
-  const [endTime, setEndTime] = useState(currentHours.endTime || '');
-  const [fadeAnim] = useState(new Animated.Value(0));
-  const endTimeRef = useRef(null);
-  const [startTimeError, setStartTimeError] = useState(null);
-  const [endTimeError, setEndTimeError] = useState(null);
-
-  // Obter horários previstos baseados no tipo de plantão
-  const getPredictedHours = () => {
-    const shiftType = shift?.label?.charAt(0) || 'M';
-
-    const defaultHours = {
-      'M': { start: '07:00', end: '13:00' },
-      'T': { start: '13:00', end: '19:00' },
-      'N': { start: '19:00', end: '07:00' }
-    };
-
-    if (shift?.time) {
-      const shiftTime = shift.time || '';
-      let timeParts = shiftTime.split(' – ');
-      if (timeParts.length !== 2) {
-        timeParts = shiftTime.split(' - ');
-      }
-
-      if (timeParts.length === 2) {
-        const [predictedStart, predictedEnd] = timeParts.map(time =>
-          time.replace(/\s*\([^)]*\)/, '').trim()
-        );
-        return { start: predictedStart, end: predictedEnd };
-      }
-    }
-
-    return defaultHours[shiftType] || defaultHours['M'];
-  };
+  const slideY = useRef(new Animated.Value(400)).current;
+  const backdropOpacity = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     if (visible) {
       setStartTime(currentHours.startTime || '');
       setEndTime(currentHours.endTime || '');
-
-      Animated.timing(fadeAnim, {
-        toValue: 1,
-        duration: 300,
-        useNativeDriver: true,
-      }).start();
-    } else {
-      Animated.timing(fadeAnim, {
-        toValue: 0,
-        duration: 250,
-        useNativeDriver: true,
-      }).start();
+      setStartErr(null);
+      setEndErr(null);
+      slideY.setValue(400);
+      backdropOpacity.setValue(0);
+      Animated.parallel([
+        Animated.spring(slideY, { toValue: 0, ...SPRING }),
+        Animated.timing(backdropOpacity, { toValue: 1, duration: 240, easing: Easing.out(Easing.quad), useNativeDriver: true }),
+      ]).start();
     }
-  }, [visible, currentHours]);
+  }, [visible]);
 
-  // Validador de horários válidos (00:00 - 23:59)
-  const validateTimeInput = (timeString) => {
-    if (!/^\d{2}:\d{2}$/.test(timeString)) {
-      return { isValid: true, errorMessage: null };
-    }
-
-    const [hours, minutes] = timeString.split(':').map(Number);
-
-    if (hours < 0 || hours > 23) {
-      return {
-        isValid: false,
-        errorMessage: 'Horas entre 00 e 23'
-      };
-    }
-
-    if (minutes < 0 || minutes > 59) {
-      return {
-        isValid: false,
-        errorMessage: 'Minutos entre 00 e 59'
-      };
-    }
-
-    return { isValid: true, errorMessage: null };
+  const close = () => {
+    Animated.parallel([
+      Animated.timing(slideY, { toValue: 400, duration: 240, easing: Easing.in(Easing.quad), useNativeDriver: true }),
+      Animated.timing(backdropOpacity, { toValue: 0, duration: 200, easing: Easing.in(Easing.quad), useNativeDriver: true }),
+    ]).start(() => onClose());
   };
 
-  // Formatação inteligente de tempo
-  const formatTimeInput = (text) => {
-    const numbers = text.replace(/\D/g, '');
+  const fmt = (text) => {
+    const n = text.replace(/\D/g, '');
+    if (n.length <= 2) return n;
+    return `${n.slice(0, 2)}:${n.slice(2, 4)}`;
+  };
 
-    if (numbers.length <= 2) {
-      return numbers;
-    } else if (numbers.length <= 4) {
-      return `${numbers.slice(0, 2)}:${numbers.slice(2)}`;
-    } else {
-      return `${numbers.slice(0, 2)}:${numbers.slice(2, 4)}`;
+  const validateTime = (t) => {
+    if (!t || t.length < 5) return null;
+    const [h, m] = t.split(':').map(Number);
+    if (h > 23) return 'Horas: 00–23';
+    if (m > 59) return 'Minutos: 00–59';
+    return null;
+  };
+
+  const calcDuration = (s, e) => {
+    if (!s || !e || s.length < 5 || e.length < 5) return null;
+    const [sh, sm] = s.split(':').map(Number);
+    const [eh, em] = e.split(':').map(Number);
+    if ([sh, sm, eh, em].some(isNaN)) return null;
+    const start = sh * 60 + sm;
+    let end = eh * 60 + em;
+    if (end < start) end += 1440;
+    return end - start;
+  };
+
+  const fmtMin = (min) => {
+    if (min == null) return '—';
+    const h = Math.floor(min / 60), m = min % 60;
+    return m === 0 ? `${h}h` : `${h}h${String(m).padStart(2, '0')}`;
+  };
+
+  const getPredicted = () => {
+    const parts = (shift?.time || '').split(/\s[–-]\s/);
+    if (parts.length === 2) {
+      return { start: parts[0].replace(/\s*\(.*\)/, '').trim(), end: parts[1].replace(/\s*\(.*\)/, '').trim() };
     }
+    const defaults = { M: { start: '07:00', end: '13:00' }, T: { start: '13:00', end: '19:00' }, N: { start: '19:00', end: '07:00' } };
+    return defaults[shift?.label?.charAt(0)] || defaults.M;
   };
 
-  const handleStartTimeChange = (text) => {
-    const formattedTime = formatTimeInput(text);
-    setStartTime(formattedTime);
-    setStartTimeError(null);
-    if (formattedTime.length === 5) {
-      endTimeRef.current?.focus();
-    }
-  };
-
-  const handleEndTimeChange = (text) => {
-    const formattedTime = formatTimeInput(text);
-    setEndTime(formattedTime);
-    setEndTimeError(null);
-  };
-
-  // Calcular diferença de horas
-  const calculateHoursDifference = () => {
-    if (!startTime || !endTime || !shift?.time) return null;
-
-    const shiftTime = shift.time || '';
-    let timeParts = shiftTime.split(' – ');
-    if (timeParts.length !== 2) {
-      timeParts = shiftTime.split(' - ');
-    }
-
-    if (timeParts.length !== 2) return null;
-
-    const [predictedStart, predictedEnd] = timeParts.map(time => time.replace(/\s*\([^)]*\)/, '').trim());
-    const predictedDurationMin = calculateDuration(predictedStart, predictedEnd);
-    const realDurationMin = calculateDuration(startTime, endTime);
-
-    if (predictedDurationMin === null || realDurationMin === null) return null;
-
-    const differenceMin = realDurationMin - predictedDurationMin;
-
-    return {
-      predictedHours: predictedDurationMin / 60,
-      realHours: realDurationMin / 60,
-      difference: differenceMin / 60,
-      differenceMinutes: differenceMin
-    };
-  };
-
-  // Calcular duração entre horários (retorna minutos para precisão)
-  const calculateDuration = (start, end) => {
-    try {
-      const [startHour, startMin] = start.split(':').map(Number);
-      const [endHour, endMin] = end.split(':').map(Number);
-
-      if (isNaN(startHour) || isNaN(startMin) || isNaN(endHour) || isNaN(endMin)) {
-        return null;
-      }
-
-      const startTotalMin = startHour * 60 + startMin;
-      let endTotalMin = endHour * 60 + endMin;
-
-      if (endTotalMin < startTotalMin) {
-        endTotalMin += 24 * 60;
-      }
-
-      return endTotalMin - startTotalMin;
-    } catch (error) {
-      return null;
-    }
-  };
-
-  // Formatar duração
-  const formatDuration = (hours) => {
-    if (hours === null || isNaN(hours)) return '0h';
-
-    const wholeHours = Math.floor(hours);
-    const minutes = Math.round((hours - wholeHours) * 60);
-
-    if (minutes === 0) {
-      return `${wholeHours}h`;
-    }
-
-    return `${wholeHours}h${minutes.toString().padStart(2, '0')}`;
-  };
-
-  // Formatar diferença em minutos de forma precisa
-  const formatMinutesDifference = (minutes) => {
-    if (!minutes || minutes === 0) return '0min';
-
-    const absMinutes = Math.abs(minutes);
-    const hours = Math.floor(absMinutes / 60);
-    const remainingMinutes = absMinutes % 60;
-
-    if (hours === 0) {
-      return `${remainingMinutes}min`;
-    } else if (remainingMinutes === 0) {
-      return `${hours}h`;
-    } else {
-      return `${hours}h${remainingMinutes.toString().padStart(2, '0')}`;
-    }
-  };
-
-  // Obter tipo do plantão
-  const getShiftTypeLabel = (label) => {
-    if (!label) return 'Plantão';
-
-    const typeMap = {
-      'M': 'Manhã',
-      'T': 'Tarde',
-      'N': 'Noite'
-    };
-
-    const type = label.charAt(0);
-    return typeMap[type] || label;
-  };
-
-  // Salvar horas com validação
   const handleSave = () => {
-    setStartTimeError(null);
-    setEndTimeError(null);
-
-    let hasErrors = false;
-
-    if (startTime && startTime.length === 5) {
-      const startValidation = validateTimeInput(startTime);
-      if (!startValidation.isValid) {
-        setStartTimeError(startValidation.errorMessage);
-        hasErrors = true;
-      }
-    }
-
-    if (endTime && endTime.length === 5) {
-      const endValidation = validateTimeInput(endTime);
-      if (!endValidation.isValid) {
-        setEndTimeError(endValidation.errorMessage);
-        hasErrors = true;
-      }
-    }
-
-    if (hasErrors) {
-      return;
-    }
-
+    const se = validateTime(startTime);
+    const ee = validateTime(endTime);
+    setStartErr(se);
+    setEndErr(ee);
+    if (se || ee) return;
     if (startTime && endTime) {
       onSave({ startTime, endTime });
-      onClose();
+      close();
     }
   };
 
-  const hoursDiff = calculateHoursDifference();
-  const hasValidTimes = startTime && endTime &&
-                       startTime.length >= 4 && endTime.length >= 4;
-  const hasErrors = startTimeError || endTimeError;
-  const canSave = hasValidTimes && !hasErrors;
+  const predicted = getPredicted();
+  const predMin = calcDuration(predicted.start, predicted.end);
+  const realMin = calcDuration(startTime, endTime);
+  const diffMin = predMin != null && realMin != null ? realMin - predMin : null;
+  const canSave = startTime.length === 5 && endTime.length === 5 && !startErr && !endErr;
 
-  const getExtrasColor = (difference) => {
-    if (!difference) return C.text.tertiary;
-    if (difference > 0) return C.success;
-    if (difference < 0) return C.warning;
-    return C.text.tertiary;
-  };
+  const shiftLabel = { M: 'Manhã', T: 'Tarde', N: 'Noite' }[shift?.label?.charAt(0)] || 'Plantão';
+
+  if (!visible) return null;
 
   return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="none"
-      onRequestClose={onClose}
-    >
-      <View style={s.modalOverlay}>
-        <Pressable style={s.backdrop} onPress={onClose} />
+    <Modal visible={visible} transparent animationType="none" onRequestClose={close}>
+      {/* Backdrop */}
+      <Animated.View style={[s.backdrop, { opacity: backdropOpacity }]} />
+      <Pressable style={StyleSheet.absoluteFill} onPress={close} />
 
-        <Animated.View
-          style={[
-            s.modalContainer,
-            { opacity: fadeAnim }
-          ]}
-        >
-          {/* Cabeçalho */}
-          <View style={s.header}>
-            <View style={s.headerContent}>
-              <Text style={s.modalTitle}>Ajustar horas do plantão</Text>
-              <Text style={s.modalSubtitle}>
-                {getShiftTypeLabel(shift?.label)} · {shift?.group?.name}
-              </Text>
-              <Text style={s.predictedTime}>
-                Previsto {shift?.time}
-              </Text>
-            </View>
-            <TouchableOpacity
-              style={s.closeButton}
-              onPress={onClose}
-            >
-              <Ionicons name="close" size={24} color={C.text.tertiary} />
-            </TouchableOpacity>
+      {/* Sheet */}
+      <Animated.View style={[s.sheet, { backgroundColor: C.background.primary, transform: [{ translateY: slideY }] }]}>
+        {/* Handle */}
+        <View style={[s.handle, { backgroundColor: C.border.medium }]} />
+
+        {/* Header */}
+        <View style={s.header}>
+          <View style={[s.iconBadge, { backgroundColor: C.primary + '18' }]}>
+            <IconClock size={20} color={C.primary} strokeWidth={2} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={[s.title, { color: C.text.primary }]}>Ajustar horas</Text>
+            <Text style={[s.subtitle, { color: C.text.secondary }]}>
+              {shiftLabel}{shift?.group?.name ? ` · ${shift.group.name}` : ''}
+            </Text>
+          </View>
+          <Pressable onPress={close} style={[s.closeBtn, { backgroundColor: C.background.secondary }]} hitSlop={8}>
+            <IconX size={18} color={C.text.tertiary} strokeWidth={2} />
+          </Pressable>
+        </View>
+
+        {/* Predicted time pill */}
+        <View style={[s.predictedPill, { backgroundColor: C.background.secondary }]}>
+          <Text style={[s.predictedLabel, { color: C.text.tertiary }]}>Previsto</Text>
+          <Text style={[s.predictedValue, { color: C.text.secondary }]}>
+            {predicted.start} → {predicted.end}
+            {predMin != null ? `  ·  ${fmtMin(predMin)}` : ''}
+          </Text>
+        </View>
+
+        {/* Time inputs */}
+        <View style={s.inputRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={[s.inputLabel, { color: C.text.tertiary }]}>Entrada real</Text>
+            <TextInput
+              style={[s.input, { color: C.text.primary, borderColor: startErr ? C.error : startTime.length === 5 ? C.primary : C.border.light, backgroundColor: C.background.secondary }]}
+              value={startTime}
+              onChangeText={(t) => { setStartTime(fmt(t)); setStartErr(null); if (fmt(t).length === 5) endRef.current?.focus(); }}
+              keyboardType="numeric"
+              placeholder={predicted.start}
+              placeholderTextColor={C.text.quaternary}
+              maxLength={5}
+            />
+            {startErr ? <Text style={[s.errText, { color: C.error }]}>{startErr}</Text> : null}
           </View>
 
-          {/* Inputs de horário */}
-          <View style={s.inputSection}>
-            <View style={s.inputRow}>
-              <View style={s.inputGroup}>
-                <Text style={s.inputLabel}>Entrada real</Text>
-                <TextInput
-                  style={[
-                    s.timeInput,
-                    startTimeError && s.timeInputError
-                  ]}
-                  value={startTime}
-                  onChangeText={handleStartTimeChange}
-                  keyboardType="numeric"
-                  placeholder={getPredictedHours().start}
-                  placeholderTextColor={C.text.tertiary}
-                  maxLength={5}
-                />
-                {startTimeError && (
-                  <Text style={s.errorText}>{startTimeError}</Text>
-                )}
-              </View>
-
-              <View style={s.inputGroup}>
-                <Text style={s.inputLabel}>Saída real</Text>
-                <TextInput
-                  ref={endTimeRef}
-                  style={[
-                    s.timeInput,
-                    endTimeError && s.timeInputError
-                  ]}
-                  value={endTime}
-                  onChangeText={handleEndTimeChange}
-                  keyboardType="numeric"
-                  placeholder={getPredictedHours().end}
-                  placeholderTextColor={C.text.tertiary}
-                  maxLength={5}
-                />
-                {endTimeError && (
-                  <Text style={s.errorText}>{endTimeError}</Text>
-                )}
-              </View>
-            </View>
+          <View style={[s.arrowWrap]}>
+            <IconArrowRight size={18} color={C.text.quaternary} strokeWidth={2} />
           </View>
 
-          {/* Resumo do plantão */}
-          {hasValidTimes && hoursDiff && (
-            <View style={s.summaryCard}>
-              <Text style={s.summaryTitle}>Resumo do plantão</Text>
-
-              <View style={s.summaryRow}>
-                <View style={s.summaryItem}>
-                  <Text style={s.summaryLabel}>Previsto</Text>
-                  <Text style={s.summaryValue}>
-                    {formatDuration(hoursDiff.predictedHours)}
-                  </Text>
-                </View>
-
-                <View style={s.summaryItem}>
-                  <Text style={s.summaryLabel}>Real</Text>
-                  <Text style={s.summaryValue}>
-                    {formatDuration(hoursDiff.realHours)}
-                  </Text>
-                </View>
-
-                <View style={s.summaryItem}>
-                  <Text style={s.summaryLabel}>Extras</Text>
-                  <Text style={[
-                    s.summaryValue,
-                    s.extrasValue,
-                    { color: getExtrasColor(hoursDiff.differenceMinutes) }
-                  ]}>
-                    {formatMinutesDifference(hoursDiff.differenceMinutes >= 0 ? hoursDiff.differenceMinutes : -hoursDiff.differenceMinutes)}
-                    {hoursDiff.differenceMinutes !== 0 && (
-                      <Text style={{ fontSize: 12 }}>
-                        {hoursDiff.differenceMinutes >= 0 ? '' : ' menos'}
-                      </Text>
-                    )}
-                  </Text>
-                </View>
-              </View>
-            </View>
-          )}
-
-          {/* Botões */}
-          <View style={s.buttonRow}>
-            <TouchableOpacity
-              style={s.cancelButton}
-              onPress={onClose}
-            >
-              <Text style={s.cancelButtonText}>Cancelar</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[
-                s.saveButton,
-                !canSave && s.saveButtonDisabled
-              ]}
-              onPress={handleSave}
-              disabled={!canSave}
-            >
-              <Text style={[
-                s.saveButtonText,
-                !canSave && s.saveButtonTextDisabled
-              ]}>
-                Salvar horas
-              </Text>
-            </TouchableOpacity>
+          <View style={{ flex: 1 }}>
+            <Text style={[s.inputLabel, { color: C.text.tertiary }]}>Saída real</Text>
+            <TextInput
+              ref={endRef}
+              style={[s.input, { color: C.text.primary, borderColor: endErr ? C.error : endTime.length === 5 ? C.primary : C.border.light, backgroundColor: C.background.secondary }]}
+              value={endTime}
+              onChangeText={(t) => { setEndTime(fmt(t)); setEndErr(null); }}
+              keyboardType="numeric"
+              placeholder={predicted.end}
+              placeholderTextColor={C.text.quaternary}
+              maxLength={5}
+            />
+            {endErr ? <Text style={[s.errText, { color: C.error }]}>{endErr}</Text> : null}
           </View>
-        </Animated.View>
-      </View>
+        </View>
+
+        {/* Summary — only when both times valid */}
+        {canSave && realMin != null && (
+          <View style={[s.summary, { backgroundColor: C.background.secondary }]}>
+            <SummaryItem label="Previsto" value={fmtMin(predMin)} color={C.text.primary} />
+            <View style={[s.summaryDivider, { backgroundColor: C.border.light }]} />
+            <SummaryItem label="Real" value={fmtMin(realMin)} color={C.text.primary} />
+            <View style={[s.summaryDivider, { backgroundColor: C.border.light }]} />
+            <SummaryItem
+              label="Diferença"
+              value={(diffMin >= 0 ? '+' : '') + fmtMin(Math.abs(diffMin))}
+              color={diffMin > 0 ? C.success : diffMin < 0 ? C.warning : C.text.tertiary}
+            />
+          </View>
+        )}
+
+        {/* Buttons */}
+        <View style={s.buttons}>
+          <Pressable
+            style={({ pressed }) => [s.btn, s.btnSecondary, { borderColor: C.border.light, backgroundColor: pressed ? C.background.secondary : 'transparent' }]}
+            onPress={close}
+          >
+            <Text style={[s.btnText, { color: C.text.secondary }]}>Cancelar</Text>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [s.btn, s.btnPrimary, { backgroundColor: canSave ? (pressed ? C.primaryDark : C.primary) : C.border.light }]}
+            onPress={handleSave}
+            disabled={!canSave}
+          >
+            <IconCheck size={16} color={canSave ? '#fff' : C.text.tertiary} strokeWidth={2.5} />
+            <Text style={[s.btnText, { color: canSave ? '#fff' : C.text.tertiary, marginLeft: 6 }]}>Salvar</Text>
+          </Pressable>
+        </View>
+      </Animated.View>
     </Modal>
   );
 };
 
-const makeStyles = (C) => ({
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: C.shadow.overlay,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: Spacing.lg,
-  },
+const SummaryItem = ({ label, value, color }) => {
+  const C = useColors();
+  return (
+    <View style={s.summaryItem}>
+      <Text style={[s.summaryLabel, { color: C.text.tertiary }]}>{label}</Text>
+      <Text style={[s.summaryValue, { color }]}>{value}</Text>
+    </View>
+  );
+};
 
+const s = StyleSheet.create({
   backdrop: {
     ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.45)',
   },
-
-  modalContainer: {
-    backgroundColor: C.background.elevated,
-    borderRadius: BorderRadius.lg,
-    width: '100%',
-    maxWidth: 420,
-    ...Shadows.strong,
-    overflow: 'hidden',
+  sheet: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    paddingBottom: 36,
   },
-
-  // Header
-  header: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-    padding: 20,
-    paddingBottom: 16,
-  },
-
-  headerContent: {
-    flex: 1,
-    marginRight: Spacing.md,
-  },
-
-  modalTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: C.text.primary,
+  handle: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    alignSelf: 'center',
+    marginTop: 10,
     marginBottom: 4,
   },
-
-  modalSubtitle: {
-    fontSize: 14,
-    color: C.text.secondary,
-    fontWeight: '500',
-    marginBottom: 6,
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: Spacing.lg,
+    paddingTop: Spacing.md,
+    paddingBottom: Spacing.sm,
+    gap: Spacing.sm,
   },
-
-  predictedTime: {
-    fontSize: 13,
-    color: C.text.tertiary,
+  iconBadge: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-
-  closeButton: {
+  title: {
+    fontSize: Typography.fontSize.headline,
+    fontWeight: Typography.fontWeight.semiBold,
+    fontFamily: Typography.fontFamily.semiBold,
+  },
+  subtitle: {
+    fontSize: Typography.fontSize.caption1,
+    marginTop: 1,
+  },
+  closeBtn: {
     width: 32,
     height: 32,
     borderRadius: 16,
-    backgroundColor: C.background.secondary,
     alignItems: 'center',
     justifyContent: 'center',
   },
-
-  // Input Section
-  inputSection: {
-    paddingHorizontal: 20,
-    paddingBottom: 24,
-  },
-
-  inputRow: {
+  predictedPill: {
     flexDirection: 'row',
-    gap: 16,
-  },
-
-  inputGroup: {
-    flex: 1,
-  },
-
-  inputLabel: {
-    fontSize: 13,
-    fontWeight: '500',
-    color: C.text.secondary,
-    marginBottom: 8,
-  },
-
-  timeInput: {
-    backgroundColor: C.background.secondary,
-    borderWidth: 1,
-    borderColor: C.border.light,
-    borderRadius: BorderRadius.md,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    fontSize: 16,
-    color: C.text.primary,
-    textAlign: 'center',
-    fontWeight: '500',
-  },
-
-  // Summary Card
-  summaryCard: {
-    backgroundColor: C.background.secondary,
-    marginHorizontal: 20,
-    borderRadius: BorderRadius.md,
-    padding: 16,
-    marginBottom: 24,
-  },
-
-  summaryTitle: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: C.text.primary,
-    marginBottom: 12,
-  },
-
-  summaryRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-
-  summaryItem: {
     alignItems: 'center',
-    flex: 1,
+    gap: 8,
+    marginHorizontal: Spacing.lg,
+    marginBottom: Spacing.lg,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: 8,
+    borderRadius: BorderRadius.md,
   },
-
-  summaryLabel: {
-    fontSize: 12,
-    color: C.text.tertiary,
-    marginBottom: 4,
+  predictedLabel: {
+    fontSize: Typography.fontSize.caption1,
+    fontWeight: Typography.fontWeight.semiBold,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
   },
-
-  summaryValue: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: C.text.primary,
+  predictedValue: {
+    fontSize: Typography.fontSize.footnote,
   },
-
-  extrasValue: {
-    fontSize: 16,
-    fontWeight: '700',
-  },
-
-  // Buttons
-  buttonRow: {
+  inputRow: {
     flexDirection: 'row',
-    paddingHorizontal: 20,
-    paddingVertical: 20,
-    gap: 12,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: C.border.light,
+    alignItems: 'flex-start',
+    paddingHorizontal: Spacing.lg,
+    gap: 0,
+    marginBottom: Spacing.md,
   },
-
-  cancelButton: {
-    flex: 1,
-    paddingVertical: 14,
+  arrowWrap: {
+    paddingTop: 34,
+    paddingHorizontal: 8,
+  },
+  inputLabel: {
+    fontSize: Typography.fontSize.caption1,
+    fontWeight: Typography.fontWeight.medium,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+    marginBottom: 8,
+  },
+  input: {
+    borderWidth: 1.5,
     borderRadius: BorderRadius.md,
-    alignItems: 'center',
-    backgroundColor: C.background.primary,
-    borderWidth: 1,
-    borderColor: C.border.light,
-  },
-
-  cancelButtonText: {
-    fontSize: 16,
-    fontWeight: '500',
-    color: C.text.secondary,
-  },
-
-  saveButton: {
-    flex: 2,
     paddingVertical: 14,
-    borderRadius: BorderRadius.md,
-    alignItems: 'center',
-    backgroundColor: C.primary,
+    paddingHorizontal: 12,
+    fontSize: 22,
+    fontWeight: Typography.fontWeight.semiBold,
+    textAlign: 'center',
+    letterSpacing: 1,
   },
-
-  saveButtonDisabled: {
-    backgroundColor: C.interactive.disabled,
-  },
-
-  saveButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: C.background.primary,
-  },
-
-  saveButtonTextDisabled: {
-    color: C.text.tertiary,
-  },
-
-  timeInputError: {
-    borderColor: C.error,
-    borderWidth: 1,
-    backgroundColor: C.error + '08',
-  },
-
-  errorText: {
-    fontSize: 12,
-    color: C.error,
-    fontWeight: '500',
+  errText: {
+    fontSize: Typography.fontSize.caption2,
     marginTop: 4,
-    marginLeft: 2,
+  },
+  summary: {
+    flexDirection: 'row',
+    marginHorizontal: Spacing.lg,
+    borderRadius: BorderRadius.lg,
+    marginBottom: Spacing.lg,
+    overflow: 'hidden',
+  },
+  summaryItem: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: Spacing.md,
+  },
+  summaryDivider: {
+    width: StyleSheet.hairlineWidth,
+  },
+  summaryLabel: {
+    fontSize: Typography.fontSize.caption2,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 4,
+  },
+  summaryValue: {
+    fontSize: Typography.fontSize.callout,
+    fontWeight: Typography.fontWeight.semiBold,
+  },
+  buttons: {
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    paddingHorizontal: Spacing.lg,
+  },
+  btn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 14,
+    borderRadius: BorderRadius.lg,
+  },
+  btnSecondary: {
+    borderWidth: 1.5,
+  },
+  btnPrimary: {},
+  btnText: {
+    fontSize: Typography.fontSize.callout,
+    fontWeight: Typography.fontWeight.semiBold,
+    fontFamily: Typography.fontFamily.semiBold,
   },
 });
 

@@ -182,6 +182,7 @@ export const loginAuroraUser = async (email, password) => {
         phone: d.phone || '',
         is_premium: d.is_premium || false,
         source: 'aurora',
+        showOnboarding: d.showOnboarding ?? null,
       };
     }
   }

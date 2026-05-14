@@ -11,6 +11,7 @@
  *   Mint Leaf      #41b883  — success / positive
  */
 import { Dimensions, Platform } from 'react-native';
+import { useTheme as _useTheme } from '../contexts/ThemeContext';
 
 const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
 
@@ -124,12 +125,16 @@ export const Colors = {
 };
 
 export const Typography = {
-  // System Font Stack
+  // Font families
+  // DM Sans (body) + DM Serif Display (display/headings)
+  // To activate: place TTF files in assets/fonts/ and add useFonts() in App.js
   fontFamily: {
-    regular: Platform.OS === 'ios' ? 'System' : 'Roboto',
-    medium: Platform.OS === 'ios' ? 'System' : 'Roboto-Medium',
-    semiBold: Platform.OS === 'ios' ? 'System' : 'Roboto-Medium',
-    bold: Platform.OS === 'ios' ? 'System' : 'Roboto-Bold',
+    regular:     'Nexa-Regular',
+    medium:      'Nexa-Regular',
+    semiBold:    'Nexa-Bold',
+    bold:        'Nexa-Bold',
+    display:     'Nexa-Heavy',
+    displayItalic: 'Nexa-Heavy',
   },
   
   // Scale System (iOS Human Interface Guidelines)
@@ -244,7 +249,16 @@ export const Shadows = {
     shadowOpacity: 1,
     shadowRadius: 0,
     elevation: 1,
-  }
+  },
+
+  // Deep shadow for bottom sheets, modals, FABs
+  strong: {
+    shadowColor: 'rgba(0,0,0,1)',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.15,
+    shadowRadius: 24,
+    elevation: 12,
+  },
 };
 
 export const Layout = {
@@ -302,12 +316,12 @@ export const Animation = {
 // Utility Functions
 export const getColorScheme = (isDark = false) => isDark ? Colors.dark : Colors;
 
+// Re-export so components can import from one place.
+export { _useTheme as useTheme };
+
 // Hook — returns the active palette based on current theme.
-// Usage: const colors = useColors();
 export const useColors = () => {
-  // Lazy import to avoid circular dep at module load time.
-  const { useTheme } = require('../contexts/ThemeContext');
-  const { isDark } = useTheme();
+  const { isDark } = _useTheme();
   return isDark ? Colors.dark : Colors;
 };
 

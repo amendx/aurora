@@ -19,55 +19,38 @@ hero:
 
 <div class="aurora-features-section">
 <div class="aurora-inner">
-<div class="aurora-features-grid">
+<div class="aurora-bento">
 
-<div class="aurora-feature-card">
-  <div class="aurora-feature-icon">
-    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="16" rx="2"/><line x1="16" y1="3" x2="16" y2="7"/><line x1="8" y1="3" x2="8" y2="7"/><line x1="4" y1="11" x2="20" y2="11"/><rect x="8" y="15" width="2" height="2"/><rect x="14" y="15" width="2" height="2"/></svg>
+  <div class="ab-card ab-card--wide ab-card--teal">
+    <div class="ab-label">Calendário</div>
+    <div class="ab-title">Seus plantões,<br>visíveis de uma vez.</div>
+    <div class="ab-body">Turnos M/T/N em cores por grupo. Navegação mensal fluida, sem surpresas.</div>
+    <div class="ab-accent-num">31</div>
   </div>
-  <h3>Calendário Inteligente</h3>
-  <p>Visualize todos os seus plantões num calendário mensal. Turnos M/T/N, cores por grupo, navegação fluida.</p>
-</div>
 
-<div class="aurora-feature-card">
-  <div class="aurora-feature-icon">
-    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="12" width="4" height="8" rx="1"/><rect x="9" y="8" width="4" height="12" rx="1"/><rect x="15" y="4" width="4" height="16" rx="1"/><line x1="3" y1="20" x2="21" y2="20"/></svg>
+  <div class="ab-card ab-card--dark">
+    <div class="ab-label">Financeiro</div>
+    <div class="ab-title">Quanto você ganhou<br>este mês?</div>
+    <div class="ab-body">Extras, adicional noturno, fidelização — calculado em tempo real.</div>
   </div>
-  <h3>Relatórios Financeiros</h3>
-  <p>Quanto você ganhou este mês? Horas extras, adicional noturno, fidelização — tudo calculado automaticamente.</p>
-</div>
 
-<div class="aurora-feature-card">
-  <div class="aurora-feature-icon">
-    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="4"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/><path d="M21 21v-2a4 4 0 0 0-3-3.85"/></svg>
+  <div class="ab-card ab-card--mint ab-card--tall">
+    <div class="ab-label">Colegas</div>
+    <div class="ab-title">Quem está de plantão<br>com você hoje.</div>
+    <div class="ab-body">Por grupo e instituição. Sem ligar pra ninguém.</div>
   </div>
-  <h3>Rede de Colegas</h3>
-  <p>Descubra quem está de plantão com você hoje, por grupo e instituição, sem precisar ligar pra ninguém.</p>
-</div>
 
-<div class="aurora-feature-card">
-  <div class="aurora-feature-icon">
-    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="12 2 22 8.5 12 15 2 8.5 12 2"/><line x1="2" y1="15.5" x2="12" y2="22"/><line x1="22" y1="15.5" x2="12" y2="22"/></svg>
+  <div class="ab-card ab-card--dark">
+    <div class="ab-label">Grupos</div>
+    <div class="ab-title">Hospital, clínica, UPA.</div>
+    <div class="ab-body">Organize por instituição. Controle cores, visibilidade e filtros dos relatórios.</div>
   </div>
-  <h3>Gestão de Grupos</h3>
-  <p>Organize por hospital, clínica ou instituição. Controle visibilidade, cores e filtre o que aparece nos relatórios.</p>
-</div>
 
-<div class="aurora-feature-card">
-  <div class="aurora-feature-icon">
-    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 15l6-6"/><path d="M11 6l.463-.536a5 5 0 0 1 7.071 7.072l-.534.464"/><path d="M13 18l-.464.536a5 5 0 0 1-7.07-7.07l.534-.466"/></svg>
+  <div class="ab-card ab-card--ghost">
+    <div class="ab-label">Integração</div>
+    <div class="ab-title">Conecta.<br>Sincroniza.<br>Pronto.</div>
+    <div class="ab-body">Login com sua conta existente. Sem cadastro extra, sem digitação.</div>
   </div>
-  <h3>Integração nativa</h3>
-  <p>Conecte sua conta existente e seus plantões sincronizam automaticamente. Sem cadastro extra, sem digitação.</p>
-</div>
-
-<div class="aurora-feature-card">
-  <div class="aurora-feature-icon">
-    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1-8.313-12.454z"/></svg>
-  </div>
-  <h3>Dark Mode</h3>
-  <p>Interface elegante que se adapta ao ambiente. Bonito de dia, gentil de noite — perfeito para a rotina hospitalar.</p>
-</div>
 
 </div>
 </div>
@@ -109,8 +92,8 @@ hero:
       <div class="aurora-shift-date-col"><div class="aurora-shift-day-num">08</div><div class="aurora-shift-weekday">QUI</div></div>
       <div class="aurora-shift-info-col">
         <div class="aurora-shift-card-title">Plantão Noite</div>
-        <div class="aurora-shift-coworker-row"><span class="aurora-cw-dot" style="background:#007AFF30;color:#007AFF">C</span><span class="aurora-cw-dot" style="background:#34C75930;color:#34C759">R</span><span class="aurora-cw-dot" style="background:#FF9F0A30;color:#FF9F0A">P</span><span class="aurora-cw-extra">+4</span></div>
-        <div class="aurora-shift-group-row"><span class="aurora-group-dot" style="background:#007AFF"></span><span class="aurora-group-name" style="color:#007AFF">Hospital São Lucas</span></div>
+        <div class="aurora-shift-coworker-row"><span class="aurora-cw-dot" style="background:#6cc1c030;color:#6cc1c0">C</span><span class="aurora-cw-dot" style="background:#34C75930;color:#34C759">R</span><span class="aurora-cw-dot" style="background:#FF9F0A30;color:#FF9F0A">P</span><span class="aurora-cw-extra">+4</span></div>
+        <div class="aurora-shift-group-row"><span class="aurora-group-dot" style="background:#6cc1c0"></span><span class="aurora-group-name" style="color:#6cc1c0">Hospital São Lucas</span></div>
       </div>
       <div class="aurora-shift-chevron">›</div>
     </div>
@@ -118,7 +101,7 @@ hero:
       <div class="aurora-shift-date-col"><div class="aurora-shift-day-num">09</div><div class="aurora-shift-weekday">SEX</div></div>
       <div class="aurora-shift-info-col">
         <div class="aurora-shift-card-title">Plantão Manhã</div>
-        <div class="aurora-shift-group-row"><span class="aurora-group-dot" style="background:#5AC8FA"></span><span class="aurora-group-name" style="color:#5AC8FA">UPA Central</span></div>
+        <div class="aurora-shift-group-row"><span class="aurora-group-dot" style="background:#97cafc"></span><span class="aurora-group-name" style="color:#97cafc">UPA Central</span></div>
       </div>
       <div class="aurora-shift-chevron">›</div>
     </div>
@@ -146,15 +129,15 @@ hero:
     <div class="aurora-cal-weekdays"><span>D</span><span>S</span><span>T</span><span>Q</span><span>Q</span><span>S</span><span>S</span></div>
     <div class="aurora-cal-grid">
       <span class="aurora-cal-empty"></span><span class="aurora-cal-empty"></span><span class="aurora-cal-empty"></span>
-      <span class="aurora-cal-day">1</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#007AFF">2</span><span class="aurora-cal-day">3</span><span class="aurora-cal-day">4</span>
-      <span class="aurora-cal-day">5</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#007AFF">6</span><span class="aurora-cal-day">7</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#5AC8FA">8</span><span class="aurora-cal-day">9</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#34C759">10</span><span class="aurora-cal-day">11</span>
-      <span class="aurora-cal-day">12</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#007AFF">13</span><span class="aurora-cal-day">14</span><span class="aurora-cal-day">15</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#FF9F0A">16</span><span class="aurora-cal-day">17</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#007AFF">18</span>
-      <span class="aurora-cal-day">19</span><span class="aurora-cal-day aurora-cal-today">20</span><span class="aurora-cal-day">21</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#5AC8FA">22</span><span class="aurora-cal-day">23</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#34C759">24</span><span class="aurora-cal-day">25</span>
-      <span class="aurora-cal-day">26</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#007AFF">27</span><span class="aurora-cal-day">28</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#007AFF">29</span><span class="aurora-cal-day">30</span><span class="aurora-cal-day">31</span>
+      <span class="aurora-cal-day">1</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#6cc1c0">2</span><span class="aurora-cal-day">3</span><span class="aurora-cal-day">4</span>
+      <span class="aurora-cal-day">5</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#6cc1c0">6</span><span class="aurora-cal-day">7</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#97cafc">8</span><span class="aurora-cal-day">9</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#34C759">10</span><span class="aurora-cal-day">11</span>
+      <span class="aurora-cal-day">12</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#6cc1c0">13</span><span class="aurora-cal-day">14</span><span class="aurora-cal-day">15</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#FF9F0A">16</span><span class="aurora-cal-day">17</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#6cc1c0">18</span>
+      <span class="aurora-cal-day">19</span><span class="aurora-cal-day aurora-cal-today">20</span><span class="aurora-cal-day">21</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#97cafc">22</span><span class="aurora-cal-day">23</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#34C759">24</span><span class="aurora-cal-day">25</span>
+      <span class="aurora-cal-day">26</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#6cc1c0">27</span><span class="aurora-cal-day">28</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#6cc1c0">29</span><span class="aurora-cal-day">30</span><span class="aurora-cal-day">31</span>
     </div>
     <div class="aurora-app-section-label" style="margin-top:10px">Dia 20 · Ter</div>
-    <div class="aurora-app-shift-card aurora-app-shift-card-sm" style="--dot:#007AFF"><div class="aurora-app-shift-dot"></div><div class="aurora-app-shift-body"><div class="aurora-app-shift-title">Hospital São Lucas</div><div class="aurora-app-shift-meta">Noite · 19h – 07h · 12h</div></div><div class="aurora-app-shift-badge">N</div></div>
-    <div class="aurora-cal-legend"><span class="aurora-cal-legend-dot" style="background:#007AFF"></span> H. São Lucas <span class="aurora-cal-legend-dot" style="background:#5AC8FA;margin-left:6px"></span> UPA Central <span class="aurora-cal-legend-dot" style="background:#34C759;margin-left:6px"></span> Cl. Mater</div>
+    <div class="aurora-app-shift-card aurora-app-shift-card-sm" style="--dot:#6cc1c0"><div class="aurora-app-shift-dot"></div><div class="aurora-app-shift-body"><div class="aurora-app-shift-title">Hospital São Lucas</div><div class="aurora-app-shift-meta">Noite · 19h – 07h · 12h</div></div><div class="aurora-app-shift-badge">N</div></div>
+    <div class="aurora-cal-legend"><span class="aurora-cal-legend-dot" style="background:#6cc1c0"></span> H. São Lucas <span class="aurora-cal-legend-dot" style="background:#97cafc;margin-left:6px"></span> UPA Central <span class="aurora-cal-legend-dot" style="background:#34C759;margin-left:6px"></span> Cl. Mater</div>
   </div>
   <div class="aurora-phone-tabbar">
     <div class="aurora-phone-tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div>
@@ -197,7 +180,7 @@ hero:
     <div class="aurora-report-shift-row">
       <div class="aurora-rsr-date"><div class="aurora-rsr-day">10</div><div class="aurora-rsr-mon">mai</div></div>
       <div class="aurora-rsr-info">
-        <div class="aurora-rsr-badges"><span class="aurora-rsr-badge" style="color:#007AFF;background:#007AFF15;border-color:#007AFF40">Tarde</span></div>
+        <div class="aurora-rsr-badges"><span class="aurora-rsr-badge" style="color:#6cc1c0;background:#6cc1c015;border-color:#6cc1c040">Tarde</span></div>
         <div class="aurora-rsr-group">Clínica Mater</div>
         <div class="aurora-rsr-hours">6h</div>
       </div>

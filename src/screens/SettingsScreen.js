@@ -1,13 +1,15 @@
 import React, { useContext } from "react";
 import { View, Text, StyleSheet, ScrollView, Pressable, Alert, Switch } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AuthContext } from "../context/AuthContext";
 import { useTheme } from "../contexts/ThemeContext";
 import { useColors, Typography, Spacing, Shadows, BorderRadius } from "../constants/DesignSystem";
 
-const SettingsScreenPremium = ({ navigation }) => {
+const SettingsScreen = ({ navigation }) => {
   const { logout } = useContext(AuthContext);
   const { isDark, preference, setTheme } = useTheme();
+  const insets = useSafeAreaInsets();
   const C = useColors();
 
   const themeLabel = preference === 'system' ? 'Automático' : preference === 'dark' ? 'Escuro' : 'Claro';
@@ -37,7 +39,7 @@ const SettingsScreenPremium = ({ navigation }) => {
       title: "Valores do Plantão",
       subtitle: "Configure valores e parâmetros",
       icon: "calculator-outline",
-      onPress: () => navigation?.navigate("ConfigScreenPremium"),
+      onPress: () => navigation?.navigate("ConfigScreen"),
     },
     {
       id: "groups",
@@ -89,7 +91,7 @@ const SettingsScreenPremium = ({ navigation }) => {
   const groupsItems = settingsItems.slice(2, 4);
 
   return (
-    <ScrollView style={s.container} showsVerticalScrollIndicator={false}>
+    <ScrollView style={s.container} contentContainerStyle={{ paddingBottom: insets.bottom + Spacing.lg }} showsVerticalScrollIndicator={false}>
       <View style={s.content}>
         {renderSection("Conta", accountItems)}
         {renderSection("Grupos", groupsItems)}
@@ -139,7 +141,7 @@ const SettingsScreenPremium = ({ navigation }) => {
 
 const makeStyles = (C) => ({
   container: { flex: 1, backgroundColor: C.background.secondary },
-  content: { padding: Spacing.screen, paddingBottom: Spacing.xxxl + 60 },
+  content: { padding: Spacing.screen },
   section: { marginBottom: Spacing.lg },
   sectionTitle: {
     fontSize: Typography.fontSize.subhead,
@@ -201,4 +203,4 @@ const makeStyles = (C) => ({
   },
 });
 
-export default SettingsScreenPremium;
+export default SettingsScreen;

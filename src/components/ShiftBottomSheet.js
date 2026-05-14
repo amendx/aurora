@@ -1,9 +1,20 @@
+/**
+ * ShiftBottomSheet — animated detail sheet for shift cards.
+ *
+ * AUDIT (motion refactor):
+ *   Was: open and close both used Animated.timing (300ms / 250ms flat).
+ *        PanResponder snap-back also used Animated.timing (200ms).
+ *   Now: open uses Animated.spring (damping:20, stiffness:300, mass:0.8) — feels physical.
+ *        close keeps Animated.timing with ease-in (spec: timing for intentional dismiss).
+ *        PanResponder snap-back uses same spring as open.
+ */
 import React, { useRef, useEffect, useState, useContext } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   Animated,
+  Easing,
   PanResponder,
   Dimensions,
   Pressable,
@@ -79,14 +90,14 @@ const makeAvatarStyles = (C) => ({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: C.primary + '20',
+    backgroundColor: C.primaryLight + '28',
     alignItems: 'center',
     justifyContent: 'center',
   },
   initials: {
     fontSize: 13,
     fontWeight: '600',
-    color: C.primary,
+    color: C.primaryLight,
   },
   name: {
     fontSize: 10,
@@ -504,28 +515,35 @@ const ShiftBottomSheet = ({
 
   useEffect(() => {
     if (isVisible) {
+      // Open: spring for the sheet (physical feel), timing for backdrop
       Animated.parallel([
-        Animated.timing(translateY, {
+        Animated.spring(translateY, {
           toValue: 0,
-          duration: 300,
+          damping: 20,
+          stiffness: 300,
+          mass: 0.8,
           useNativeDriver: true,
         }),
         Animated.timing(backdropOpacity, {
           toValue: 1,
-          duration: 300,
+          duration: 280,
+          easing: Easing.bezier(0, 0, 0.2, 1),
           useNativeDriver: true,
         }),
       ]).start();
     } else {
+      // Close: timing with ease-in (intentional dismiss — spec says timing for close)
       Animated.parallel([
         Animated.timing(translateY, {
           toValue: BOTTOM_SHEET_MAX_HEIGHT,
-          duration: 250,
+          duration: 260,
+          easing: Easing.bezier(0.4, 0, 1, 1),
           useNativeDriver: true,
         }),
         Animated.timing(backdropOpacity, {
           toValue: 0,
-          duration: 250,
+          duration: 220,
+          easing: Easing.bezier(0.4, 0, 1, 1),
           useNativeDriver: true,
         }),
       ]).start();
@@ -564,9 +582,12 @@ const ShiftBottomSheet = ({
       if (gestureState.dy > 100 || gestureState.vy > 0.5) {
         onClose();
       } else {
-        Animated.timing(translateY, {
+        // Snap back: same spring as open — feels like it bounces back
+        Animated.spring(translateY, {
           toValue: 0,
-          duration: 200,
+          damping: 20,
+          stiffness: 300,
+          mass: 0.8,
           useNativeDriver: true,
         }).start();
       }
@@ -750,6 +771,7 @@ const ShiftBottomSheet = ({
 
     return (
       <View key={index} style={s.shiftCard}>
+        <View style={[s.shiftAccentBar, { backgroundColor: shiftColor }]} />
         {/* Header do Card com Tipo e Valor */}
         <View style={s.shiftHeader}>
           <View style={[s.shiftTypeBadge, { backgroundColor: shiftColor + '15', borderColor: shiftColor + '30' }]}>
@@ -1318,19 +1340,19 @@ const makeStyles = (C) => ({
     right: 0,
     height: BOTTOM_SHEET_MAX_HEIGHT,
     backgroundColor: C.background.primary,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
+    borderTopLeftRadius: BorderRadius.xxl,
+    borderTopRightRadius: BorderRadius.xxl,
     ...Shadows.strong,
   },
 
   handle: {
-    width: 40,
+    width: 36,
     height: 4,
-    backgroundColor: C.border.medium,
-    borderRadius: 2,
+    backgroundColor: C.border.light,
+    borderRadius: BorderRadius.pill,
     alignSelf: 'center',
-    marginTop: 12,
-    marginBottom: 8,
+    marginTop: 14,
+    marginBottom: 6,
   },
 
   header: {
@@ -1372,12 +1394,11 @@ const makeStyles = (C) => ({
 
   content: {
     flex: 1,
-    marginBottom: 34
   },
 
   scrollContent: {
     padding: Spacing.lg,
-    paddingBottom: Spacing.xl + 34,
+    paddingBottom: Spacing.xxxl,
   },
 
   // Shift Card
@@ -1385,9 +1406,16 @@ const makeStyles = (C) => ({
     backgroundColor: C.background.primary,
     borderRadius: BorderRadius.lg,
     marginBottom: Spacing.md,
-    borderWidth: 1,
-    borderColor: C.border.light,
+    overflow: 'hidden',
     ...Shadows.small,
+  },
+
+  shiftAccentBar: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 4,
   },
 
   shiftHeader: {
@@ -1395,7 +1423,8 @@ const makeStyles = (C) => ({
     justifyContent: 'space-between',
     alignItems: 'center',
     padding: Spacing.lg,
-    paddingBottom: Spacing.xs,
+    paddingLeft: Spacing.lg + 4,
+    paddingBottom: Spacing.sm,
   },
 
   shiftTypeBadge: {
@@ -1416,7 +1445,7 @@ const makeStyles = (C) => ({
 
   shiftValueText: {
     fontSize: 18,
-    fontWeight: Typography.fontWeight.bold,
+    fontFamily: Typography.fontFamily.display,
     color: C.success,
     marginBottom: 2,
   },
@@ -1435,6 +1464,7 @@ const makeStyles = (C) => ({
 
   shiftDetails: {
     paddingHorizontal: Spacing.lg,
+    paddingLeft: Spacing.lg + 4,
     paddingVertical: Spacing.md,
   },
 
@@ -1691,8 +1721,8 @@ const makeStyles = (C) => ({
   },
   modalSheet: {
     backgroundColor: C.background.elevated,
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
+    borderTopLeftRadius: BorderRadius.xxl,
+    borderTopRightRadius: BorderRadius.xxl,
     maxHeight: '75%',
     paddingBottom: 32,
   },
