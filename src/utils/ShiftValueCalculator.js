@@ -196,16 +196,15 @@ export const calculateShiftValueWithBreakdown = async (shift, dateString, totalM
       finalValue: baseValue
     };
 
-    // Aplicar bônus de fidelização se habilitado - CORRIGIDO: com precisão monetária
+    // Aplicar bônus de fidelização — tier mais alto que o usuário qualifica por horas do mês
     if (config.loyaltyEnabled && config.loyaltyOptions) {
-      const activeLoyalty = config.loyaltyOptions.find(option => option.active);
+      const activeLoyalty = config.loyaltyOptions
+        .filter(o => o.minHours <= totalMonthlyHours)
+        .sort((a, b) => b.minHours - a.minHours)[0] || null;
       if (activeLoyalty) {
         breakdown.loyaltyBonus = roundCurrency((baseValue * activeLoyalty.percentage) / 100);
         breakdown.loyaltyPercentage = activeLoyalty.percentage;
         breakdown.loyaltyMinHours = activeLoyalty.minHours;
-       
-      } else {
-        console.log('❌ Nenhuma fidelização ativa configurada');
       }
     }
 

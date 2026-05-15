@@ -48,15 +48,33 @@ Uma versão para gestores de escala hospitalares:
 
 ---
 
-## Descartado / não vamos fazer
+## Aurora Web — em desenvolvimento
 
-Coisas que consideramos mas descartamos:
+<div class="aurora-web-banner" style="text-align:left; margin: 2rem 0; padding: 2.5rem 2rem;">
+<div class="aurora-web-banner-eyebrow">Plataforma web</div>
+<h2 style="font-size:1.8rem; color:#E8F4FD">Aurora chega ao <span class="gradient-text">navegador</span></h2>
+<p style="color:#97cafc; margin-bottom:1.5rem; opacity:0.9">A web app espelha o app mobile e vai além com ferramentas exclusivas para gestores de escala hospitalar.</p>
+<div style="display:flex; flex-wrap:wrap; gap:1rem; margin-bottom:1.5rem">
+  <div class="aurora-role-pill"><div class="aurora-role-pill-dot" style="background:#3FA9A7"></div><strong>Profissional</strong> — plantões, financeiro, calendário pessoal</div>
+  <div class="aurora-role-pill"><div class="aurora-role-pill-dot" style="background:#41b883"></div><strong>Gestor</strong> — dashboard de equipe, aprovações, relatórios</div>
+</div>
+<div class="aurora-wip-badge"><div class="aurora-wip-pulse"></div>Em desenvolvimento ativo</div>
+</div>
 
-**Entrada manual de plantões:** A Aurora não vai se tornar uma plataforma de gestão de escalas. A fonte de verdade é o PlantaoAPI. Aurora é uma camada de visualização e análise sobre essa plataforma.
+**Funcionalidades planejadas (Gestor):**
+- Dashboard de cobertura de escala em tempo real
+- Fluxo de aprovação de trocas de plantão
+- Gestão de grupos, hospitais e perfis de profissionais
+- Exportação de relatórios institucionais (PDF / CSV)
+- KPIs financeiros e de utilização de equipe
 
-**Versão web:** O foco é mobile. A experiência de plantão é intrinsecamente móvel.
+---
 
-**Integração com outras plataformas além de WebClient:** Por enquanto, o foco é ser o melhor app para o ecossistema WebClient/PlantaoAPI.
+## Fora do escopo
+
+**Entrada manual como fonte primária:** Aurora não vira plataforma de escalas. Registro manual existe para complementar o PlantaoAPI, não substituí-lo.
+
+**Integração com outras plataformas além de WebClient/PlantaoAPI:** Foco total no ecossistema enquanto a base cresce.
 
 ---
 

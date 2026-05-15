@@ -9,11 +9,14 @@ export default defineConfig({
   appearance: 'dark',
 
   head: [
-    ['meta', { name: 'theme-color', content: '#007AFF' }],
+    ['meta', { name: 'theme-color', content: '#3FA9A7' }],
     ['meta', { name: 'og:type', content: 'website' }],
     ['meta', { name: 'og:title', content: 'Aurora — Seus plantões sob controle' }],
     ['meta', { name: 'og:description', content: 'Gestão inteligente de plantões para médicos e profissionais de saúde brasileiros.' }],
     ['link', { rel: 'icon', href: '/aurora/favicon.ico' }],
+    ['link', { rel: 'preconnect', href: 'https://fonts.googleapis.com' }],
+    ['link', { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: '' }],
+    ['link', { rel: 'stylesheet', href: 'https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800;900&family=IBM+Plex+Mono:wght@400;500;600&display=swap' }],
   ],
 
   themeConfig: {
@@ -30,6 +33,7 @@ export default defineConfig({
       //     { text: '⌥ Guia do Desenvolvedor', link: '/guide/developer' },
       //   ],
       // },
+      { text: 'Roadmap', link: '/roadmap' },
       { text: 'FAQ', link: '/faq' },
       { text: 'Sobre', link: '/about' },
     ],

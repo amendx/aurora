@@ -151,7 +151,7 @@ const ShiftBottomSheet = ({
 
   // ── "Quem está também" state ────────────────────────────────────────────────
   const { user } = useContext(AuthContext);
-  const { deleteManualShift } = useShifts();
+  const { deleteManualShift, hoursReport } = useShifts();
   const { coworkersById, groupsById } = useGroups();
   const [deleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
   const [enabledGroupIds, setEnabledGroupIds] = useState(null);
@@ -501,7 +501,8 @@ const ShiftBottomSheet = ({
       for (let i = 0; i < shifts.length; i++) {
         const shift = shifts[i];
         try {
-          const result = await calculateShiftValueWithBreakdown(shift, dateString, 0);
+          const monthlyHours = hoursReport?.realHours || 0;
+          const result = await calculateShiftValueWithBreakdown(shift, dateString, monthlyHours);
           breakdowns[i] = result;
         } catch (error) {
           console.warn('Erro ao carregar breakdown para shift:', error);

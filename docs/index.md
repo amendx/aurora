@@ -2,9 +2,9 @@
 layout: home
 
 hero:
-  name: "Aurora"
+  name: "Aurora•"
   text: "Seus plantões,\nfinalmente sob controle."
-  tagline: "Calendário inteligente, relatórios financeiros em tempo real e a rede de colegas de plantão — num único app nativo e bonito."
+  tagline: "Calendário inteligente, cálculo financeiro em tempo real, rede de colegas e relatórios — num único app nativo feito para profissionais de saúde brasileiros."
   image:
     src: /icon.png
     alt: Aurora
@@ -23,20 +23,20 @@ hero:
 
   <div class="ab-card ab-card--wide ab-card--teal">
     <div class="ab-label">Calendário</div>
-    <div class="ab-title">Seus plantões,<br>visíveis de uma vez.</div>
+    <div class="ab-title">Seus plantões,<br />visíveis de uma vez.</div>
     <div class="ab-body">Turnos M/T/N em cores por grupo. Navegação mensal fluida, sem surpresas.</div>
     <div class="ab-accent-num">31</div>
   </div>
 
   <div class="ab-card ab-card--dark">
     <div class="ab-label">Financeiro</div>
-    <div class="ab-title">Quanto você ganhou<br>este mês?</div>
+    <div class="ab-title">Quanto você ganhou<br />este mês?</div>
     <div class="ab-body">Extras, adicional noturno, fidelização — calculado em tempo real.</div>
   </div>
 
   <div class="ab-card ab-card--mint ab-card--tall">
     <div class="ab-label">Colegas</div>
-    <div class="ab-title">Quem está de plantão<br>com você hoje.</div>
+    <div class="ab-title">Quem está de plantão<br />com você hoje.</div>
     <div class="ab-body">Por grupo e instituição. Sem ligar pra ninguém.</div>
   </div>
 
@@ -48,7 +48,7 @@ hero:
 
   <div class="ab-card ab-card--ghost">
     <div class="ab-label">Integração</div>
-    <div class="ab-title">Conecta.<br>Sincroniza.<br>Pronto.</div>
+    <div class="ab-title">Conecta.<br />Sincroniza.<br />Pronto.</div>
     <div class="ab-body">Login com sua conta existente. Sem cadastro extra, sem digitação.</div>
   </div>
 
@@ -56,155 +56,65 @@ hero:
 </div>
 </div>
 
-<div class="aurora-inner" style="margin-top: 4rem;">
-
 <div class="aurora-section-header">
   <div class="aurora-badge">Aurora em uso</div>
-  <h2>O app, tela a tela.</h2>
-  <p>Três momentos do dia de quem trabalha com plantões.</p>
+  <div class="aurora-h2">Cada tela, uma resposta.</div>
+  <p>Dashboard financeiro, detalhe do plantão, calendário, gráficos — tudo conectado.</p>
 </div>
 
-<div class="aurora-phone-showcase">
+<!-- Row 1: Home + DayView -->
+<div class="aurora-device-showcase">
 
-<div class="aurora-phone">
-  <div class="aurora-phone-status"><span>9:41</span><span class="aurora-phone-status-icons"><svg width="14" height="10" viewBox="0 0 14 10" fill="white"><rect x="0" y="4" width="2" height="6" rx="0.5"/><rect x="3" y="2" width="2" height="8" rx="0.5"/><rect x="6" y="0" width="2" height="10" rx="0.5"/><rect x="9" y="2" width="4" height="8" rx="0.5"/></svg></span></div>
-  <div class="aurora-phone-header"><span class="aurora-phone-header-title">Início</span><span class="aurora-phone-header-sub">Bem-vindo, Dr. Lucas</span></div>
-  <div class="aurora-phone-body">
-    <!-- Welcome card -->
-    <div class="aurora-welcome-card">
-      <div class="aurora-welcome-content">
-        <div class="aurora-greeting-text">Boa tarde,</div>
-        <div class="aurora-username-text">Dr. Lucas</div>
-        <div class="aurora-welcome-sub">Você tem 4 plantões próximos</div>
-      </div>
-      <div class="aurora-welcome-avatar">L</div>
-    </div>
-    <!-- Stats cards -->
-    <div class="aurora-stats-row">
-      <div class="aurora-stat-card"><div class="aurora-stat-number">12</div><div class="aurora-stat-label">TOTAL</div></div>
-      <div class="aurora-stat-card"><div class="aurora-stat-number">8</div><div class="aurora-stat-label">CONCLUÍDOS</div></div>
-      <div class="aurora-stat-card"><div class="aurora-stat-number">4</div><div class="aurora-stat-label">PRÓXIMOS</div></div>
-    </div>
-    <!-- Section header -->
-    <div class="aurora-section-row"><span class="aurora-section-title-sm">Próximos Plantões</span><span class="aurora-section-link">Ver todos ›</span></div>
-    <!-- Shift cards -->
-    <div class="aurora-shift-card-new">
-      <div class="aurora-shift-date-col"><div class="aurora-shift-day-num">08</div><div class="aurora-shift-weekday">QUI</div></div>
-      <div class="aurora-shift-info-col">
-        <div class="aurora-shift-card-title">Plantão Noite</div>
-        <div class="aurora-shift-coworker-row"><span class="aurora-cw-dot" style="background:#6cc1c030;color:#6cc1c0">C</span><span class="aurora-cw-dot" style="background:#34C75930;color:#34C759">R</span><span class="aurora-cw-dot" style="background:#FF9F0A30;color:#FF9F0A">P</span><span class="aurora-cw-extra">+4</span></div>
-        <div class="aurora-shift-group-row"><span class="aurora-group-dot" style="background:#6cc1c0"></span><span class="aurora-group-name" style="color:#6cc1c0">Hospital São Lucas</span></div>
-      </div>
-      <div class="aurora-shift-chevron">›</div>
-    </div>
-    <div class="aurora-shift-card-new">
-      <div class="aurora-shift-date-col"><div class="aurora-shift-day-num">09</div><div class="aurora-shift-weekday">SEX</div></div>
-      <div class="aurora-shift-info-col">
-        <div class="aurora-shift-card-title">Plantão Manhã</div>
-        <div class="aurora-shift-group-row"><span class="aurora-group-dot" style="background:#97cafc"></span><span class="aurora-group-name" style="color:#97cafc">UPA Central</span></div>
-      </div>
-      <div class="aurora-shift-chevron">›</div>
-    </div>
-    <div class="aurora-shift-card-new">
-      <div class="aurora-shift-date-col"><div class="aurora-shift-day-num">10</div><div class="aurora-shift-weekday">SÁB</div></div>
-      <div class="aurora-shift-info-col">
-        <div class="aurora-shift-card-title">Plantão Tarde</div>
-        <div class="aurora-shift-group-row"><span class="aurora-group-dot" style="background:#34C759"></span><span class="aurora-group-name" style="color:#34C759">Clínica Mater</span></div>
-      </div>
-      <div class="aurora-shift-chevron">›</div>
-    </div>
+<!-- iPhone: Home dashboard -->
+<div class="aurora-device-col">
+<div class="device-frame iphone">
+  <div class="device-island"></div>
+  <div class="device-status-time">9:41</div>
+  <div class="device-status-icons">
+    <svg width="12" height="9" viewBox="0 0 14 10" fill="currentColor"><rect x="0" y="4" width="2" height="6" rx="0.5"/><rect x="3" y="2" width="2" height="8" rx="0.5"/><rect x="6" y="0" width="2" height="10" rx="0.5"/><rect x="9" y="2" width="4" height="8" rx="0.5"/></svg>
   </div>
-  <div class="aurora-phone-tabbar">
-    <div class="aurora-phone-tab aurora-phone-tab-active"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div>
-    <div class="aurora-phone-tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="5" width="16" height="16" rx="2"/><line x1="16" y1="3" x2="16" y2="7"/><line x1="8" y1="3" x2="8" y2="7"/><line x1="4" y1="11" x2="20" y2="11"/></svg></div>
-    <div class="aurora-phone-tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="12" width="4" height="8" rx="1"/><rect x="9" y="8" width="4" height="12" rx="1"/><rect x="15" y="4" width="4" height="16" rx="1"/></svg></div>
+  <div class="device-screen device-screen--iframe">
+    <iframe
+      src="mockup-hero.html"
+      class="device-mockup-iframe"
+      scrolling="no"
+      frameborder="0"
+      title="Aurora — dashboard"
+    ></iframe>
   </div>
-</div>
+</div><!-- /device-frame.iphone -->
+<div class="aurora-device-label"><div class="aurora-device-label-dot"></div>iOS · iPhone 16 Pro</div>
+</div><!-- /aurora-device-col -->
 
-<div class="aurora-phone aurora-phone-tall">
-  <div class="aurora-phone-status"><span>9:41</span><span class="aurora-phone-status-icons"><svg width="14" height="10" viewBox="0 0 14 10" fill="white"><rect x="0" y="4" width="2" height="6" rx="0.5"/><rect x="3" y="2" width="2" height="8" rx="0.5"/><rect x="6" y="0" width="2" height="10" rx="0.5"/><rect x="9" y="2" width="4" height="8" rx="0.5"/></svg></span></div>
-  <div class="aurora-phone-header"><span class="aurora-phone-header-title">Calendário</span><span class="aurora-phone-header-sub">Seus plantões e horários</span></div>
-  <div class="aurora-phone-body">
-    <div class="aurora-cal-nav"><span class="aurora-cal-arrow">‹</span><span class="aurora-cal-month">Maio 2025</span><span class="aurora-cal-arrow">›</span></div>
-    <div class="aurora-cal-weekdays"><span>D</span><span>S</span><span>T</span><span>Q</span><span>Q</span><span>S</span><span>S</span></div>
-    <div class="aurora-cal-grid">
-      <span class="aurora-cal-empty"></span><span class="aurora-cal-empty"></span><span class="aurora-cal-empty"></span>
-      <span class="aurora-cal-day">1</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#6cc1c0">2</span><span class="aurora-cal-day">3</span><span class="aurora-cal-day">4</span>
-      <span class="aurora-cal-day">5</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#6cc1c0">6</span><span class="aurora-cal-day">7</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#97cafc">8</span><span class="aurora-cal-day">9</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#34C759">10</span><span class="aurora-cal-day">11</span>
-      <span class="aurora-cal-day">12</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#6cc1c0">13</span><span class="aurora-cal-day">14</span><span class="aurora-cal-day">15</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#FF9F0A">16</span><span class="aurora-cal-day">17</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#6cc1c0">18</span>
-      <span class="aurora-cal-day">19</span><span class="aurora-cal-day aurora-cal-today">20</span><span class="aurora-cal-day">21</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#97cafc">22</span><span class="aurora-cal-day">23</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#34C759">24</span><span class="aurora-cal-day">25</span>
-      <span class="aurora-cal-day">26</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#6cc1c0">27</span><span class="aurora-cal-day">28</span><span class="aurora-cal-day aurora-cal-has-dot" style="--c:#6cc1c0">29</span><span class="aurora-cal-day">30</span><span class="aurora-cal-day">31</span>
-    </div>
-    <div class="aurora-app-section-label" style="margin-top:10px">Dia 20 · Ter</div>
-    <div class="aurora-app-shift-card aurora-app-shift-card-sm" style="--dot:#6cc1c0"><div class="aurora-app-shift-dot"></div><div class="aurora-app-shift-body"><div class="aurora-app-shift-title">Hospital São Lucas</div><div class="aurora-app-shift-meta">Noite · 19h – 07h · 12h</div></div><div class="aurora-app-shift-badge">N</div></div>
-    <div class="aurora-cal-legend"><span class="aurora-cal-legend-dot" style="background:#6cc1c0"></span> H. São Lucas <span class="aurora-cal-legend-dot" style="background:#97cafc;margin-left:6px"></span> UPA Central <span class="aurora-cal-legend-dot" style="background:#34C759;margin-left:6px"></span> Cl. Mater</div>
+<!-- Android: DayView shift detail -->
+<div class="aurora-device-col">
+<div class="device-frame android">
+  <div class="device-camera"></div>
+  <div class="device-status-time">9:41</div>
+  <div class="device-status-icons">
+    <svg width="11" height="9" viewBox="0 0 14 10" fill="currentColor"><rect x="0" y="4" width="2" height="6" rx="0.5"/><rect x="3" y="2" width="2" height="8" rx="0.5"/><rect x="6" y="0" width="2" height="10" rx="0.5"/><rect x="9" y="2" width="4" height="8" rx="0.5"/></svg>
   </div>
-  <div class="aurora-phone-tabbar">
-    <div class="aurora-phone-tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div>
-    <div class="aurora-phone-tab aurora-phone-tab-active"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="5" width="16" height="16" rx="2"/><line x1="16" y1="3" x2="16" y2="7"/><line x1="8" y1="3" x2="8" y2="7"/><line x1="4" y1="11" x2="20" y2="11"/></svg></div>
-    <div class="aurora-phone-tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></div>
+  <div class="device-screen device-screen--iframe">
+    <iframe
+      src="mockup-detail.html"
+      class="device-mockup-iframe device-mockup-iframe--zoomed"
+      scrolling="no"
+      frameborder="0"
+      title="Aurora — detalhes financeiros"
+    ></iframe>
   </div>
-</div>
+  <div class="device-navbar">
+    <div class="device-nav-btn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg></div>
+    <div class="device-nav-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/></svg></div>
+    <div class="device-nav-btn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="6" height="16" rx="1"/><rect x="14" y="4" width="6" height="16" rx="1"/></svg></div>
+  </div>
+</div><!-- /device-frame.android -->
+<div class="aurora-device-label"><div class="aurora-device-label-dot" style="background:#41b883"></div>Android · Pixel 9</div>
+</div><!-- /aurora-device-col -->
 
-<div class="aurora-phone">
-  <div class="aurora-phone-status"><span>9:41</span><span class="aurora-phone-status-icons"><svg width="14" height="10" viewBox="0 0 14 10" fill="white"><rect x="0" y="4" width="2" height="6" rx="0.5"/><rect x="3" y="2" width="2" height="8" rx="0.5"/><rect x="6" y="0" width="2" height="10" rx="0.5"/><rect x="9" y="2" width="4" height="8" rx="0.5"/></svg></span></div>
-  <div class="aurora-phone-header"><span class="aurora-phone-header-title">Relatórios</span><span class="aurora-phone-header-sub">Histórico e totais mensais</span></div>
-  <div class="aurora-phone-body">
-    <!-- Month nav -->
-    <div class="aurora-reports-month-nav"><span class="aurora-reports-nav-btn">‹</span><span class="aurora-reports-month-title">Maio 2025</span><span class="aurora-reports-nav-btn">›</span></div>
-    <!-- Summary card -->
-    <div class="aurora-summary-card">
-      <div class="aurora-summary-item"><div class="aurora-summary-val">72h 30min</div><div class="aurora-summary-lbl">Horas no mês</div></div>
-      <div class="aurora-summary-divider"></div>
-      <div class="aurora-summary-item"><div class="aurora-summary-val aurora-summary-green">R$ 1.346,00</div><div class="aurora-summary-lbl">Estimado no mês</div></div>
-    </div>
-    <!-- Shift rows -->
-    <div class="aurora-report-shift-row">
-      <div class="aurora-rsr-date"><div class="aurora-rsr-day">8</div><div class="aurora-rsr-mon">mai</div></div>
-      <div class="aurora-rsr-info">
-        <div class="aurora-rsr-badges"><span class="aurora-rsr-badge" style="color:#FF9F0A;background:#FF9F0A15;border-color:#FF9F0A40">Noite</span></div>
-        <div class="aurora-rsr-group">Hospital São Lucas</div>
-        <div class="aurora-rsr-hours">12h</div>
-      </div>
-      <div class="aurora-rsr-value"><div class="aurora-rsr-val">R$ 540</div><div class="aurora-rsr-est">estimado</div></div>
-    </div>
-    <div class="aurora-report-shift-row">
-      <div class="aurora-rsr-date"><div class="aurora-rsr-day">9</div><div class="aurora-rsr-mon">mai</div></div>
-      <div class="aurora-rsr-info">
-        <div class="aurora-rsr-badges"><span class="aurora-rsr-badge" style="color:#34C759;background:#34C75915;border-color:#34C75940">Manhã</span></div>
-        <div class="aurora-rsr-group">UPA Central</div>
-        <div class="aurora-rsr-hours">6h</div>
-      </div>
-      <div class="aurora-rsr-value"><div class="aurora-rsr-val">R$ 270</div><div class="aurora-rsr-est">estimado</div></div>
-    </div>
-    <div class="aurora-report-shift-row">
-      <div class="aurora-rsr-date"><div class="aurora-rsr-day">10</div><div class="aurora-rsr-mon">mai</div></div>
-      <div class="aurora-rsr-info">
-        <div class="aurora-rsr-badges"><span class="aurora-rsr-badge" style="color:#6cc1c0;background:#6cc1c015;border-color:#6cc1c040">Tarde</span></div>
-        <div class="aurora-rsr-group">Clínica Mater</div>
-        <div class="aurora-rsr-hours">6h</div>
-      </div>
-      <div class="aurora-rsr-value"><div class="aurora-rsr-val">R$ 240</div><div class="aurora-rsr-est">estimado</div></div>
-    </div>
-    <div class="aurora-report-shift-row">
-      <div class="aurora-rsr-date"><div class="aurora-rsr-day">13</div><div class="aurora-rsr-mon">mai</div></div>
-      <div class="aurora-rsr-info">
-        <div class="aurora-rsr-badges"><span class="aurora-rsr-badge" style="color:#FF9F0A;background:#FF9F0A15;border-color:#FF9F0A40">Noite</span></div>
-        <div class="aurora-rsr-group">Hospital São Lucas</div>
-        <div class="aurora-rsr-hours">12h <span style="color:#34C759;font-size:9px">c/ extras</span></div>
-      </div>
-      <div class="aurora-rsr-value"><div class="aurora-rsr-val">R$ 296</div><div class="aurora-rsr-est">estimado</div></div>
-    </div>
-  </div>
-  <div class="aurora-phone-tabbar">
-    <div class="aurora-phone-tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div>
-    <div class="aurora-phone-tab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="5" width="16" height="16" rx="2"/><line x1="16" y1="3" x2="16" y2="7"/><line x1="8" y1="3" x2="8" y2="7"/><line x1="4" y1="11" x2="20" y2="11"/></svg></div>
-    <div class="aurora-phone-tab aurora-phone-tab-active"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="12" width="4" height="8" rx="1"/><rect x="9" y="8" width="4" height="12" rx="1"/><rect x="15" y="4" width="4" height="16" rx="1"/></svg></div>
-  </div>
-</div>
+</div><!-- /aurora-device-showcase -->
 
-</div>
-
+<!-- Row 2: How it works -->
 <div class="aurora-how-it-works">
   <div class="aurora-section-header">
     <div class="aurora-badge">Como funciona</div>
@@ -231,12 +141,10 @@ hero:
 </div>
 
 <div class="aurora-cta">
-  <h2>Pronto para ter clareza<br><span class="gradient-text">sobre seus plantões?</span></h2>
+  <h2>Pronto para ter clareza<br /><span class="gradient-text">sobre seus plantões?</span></h2>
   <p>Aurora é gratuito para começar. Conecte sua conta e veja a diferença em minutos.</p>
   <div class="aurora-cta-buttons">
     <a href="/aurora/getting-started" class="aurora-btn-primary">Começar gratuitamente →</a>
     <a href="/aurora/features" class="aurora-btn-secondary">Ver todas as funcionalidades</a>
   </div>
-</div>
-
 </div>
