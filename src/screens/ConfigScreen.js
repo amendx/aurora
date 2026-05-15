@@ -1,690 +1,486 @@
-import React, { useState, useContext } from 'react';
+import React, { useState, useContext, useLayoutEffect } from 'react';
 import {
-  View,
-  Text,
-  ScrollView,
-  TextInput,
-  Pressable,
-  Alert,
-  Switch,
+  View, Text, ScrollView, TextInput, Pressable, Switch, StyleSheet,
 } from 'react-native';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
-import { useColors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useColors, Typography, Spacing, Shadows } from '../constants/DesignSystem';
 import { AuthContext } from '../context/AuthContext';
 import LocalCache from '../services/LocalCache';
+import Logger from '../utils/Logger';
+
+const MONTHS_FULL_PT = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
 
 export default function ConfigScreen({ navigation }) {
   const { user } = useContext(AuthContext);
   const userId = user?.id || 0;
   const C = useColors();
-  const s = makeStyles(C);
+  const insets = useSafeAreaInsets();
 
   const [hourValues, setHourValues] = useState({
     weekday: { day: 130, night: 143 },
     weekend: { day: 170, night: 185 },
   });
-
-  // Carregar configurações salvas quando o componente for montado
-  React.useEffect(() => {
-    loadSavedConfigurations();
-  }, []);
-
-  const loadSavedConfigurations = async () => {
-    try {
-      // Prefer LocalCache (post-migration). Fall back to SecureStore for compat.
-      let parsedConfig = null;
-      if (userId) {
-        parsedConfig = await LocalCache.getFinancialConfig(userId);
-      }
-      if (!parsedConfig) {
-        const raw = await SecureStore.getItemAsync('shift_configurations');
-        if (raw) parsedConfig = JSON.parse(raw);
-      }
-      if (parsedConfig) {
-        console.log('Configurações carregadas:', parsedConfig);
-
-        if (parsedConfig.hourValues) {
-          setHourValues(parsedConfig.hourValues);
-        }
-        if (parsedConfig.loyaltyEnabled !== undefined) {
-          setLoyaltyEnabled(parsedConfig.loyaltyEnabled);
-        }
-        if (parsedConfig.loyaltyOptions) {
-          setLoyaltyOptions(parsedConfig.loyaltyOptions);
-        }
-        if (parsedConfig.bonusEnabled !== undefined) {
-          setBonusEnabled(parsedConfig.bonusEnabled);
-        }
-        if (parsedConfig.bonus) {
-          setBonus(parsedConfig.bonus);
-        }
-        if (parsedConfig.fridayNightAsWeekend !== undefined) {
-          setFridayNightAsWeekend(parsedConfig.fridayNightAsWeekend);
-        }
-        if (parsedConfig.fractionalExtraHours !== undefined) {
-          setFractionalExtraHours(parsedConfig.fractionalExtraHours);
-        }
-      }
-    } catch (error) {
-      console.warn('Erro ao carregar configurações:', error);
-    }
-  };
-
-  const [loyaltyEnabled, setLoyaltyEnabled] = useState(false);
   const [loyaltyOptions, setLoyaltyOptions] = useState([
-    { percentage: 10, minHours: 72, active: false },
+    { percentage: 10, minHours: 72,  active: false },
     { percentage: 20, minHours: 120, active: false },
     { percentage: 25, minHours: 168, active: false },
     { percentage: 30, minHours: 264, active: false },
   ]);
-
-  const [bonusEnabled, setBonusEnabled] = useState(false);
-  const [bonus, setBonus] = useState({
-    percentage: 20,
-    startMonth: 2,
-    endMonth: 4,
-  });
-
+  const [bonusEnabled, setBonusEnabled]           = useState(false);
+  const [bonus, setBonus]                         = useState({ percentage: 5, startMonth: 3, endMonth: 4 });
   const [fridayNightAsWeekend, setFridayNightAsWeekend] = useState(false);
   const [fractionalExtraHours, setFractionalExtraHours] = useState(true);
 
-  const handleHourChange = (period, type, value) => {
-    setHourValues((prev) => ({
-      ...prev,
-      [period]: {
-        ...prev[period],
-        [type]: value,
-      },
-    }));
-  };
+  React.useEffect(() => { loadSaved(); }, []);
 
-  const handleLoyaltyOptionToggle = (index) => {
-    setLoyaltyOptions((prev) =>
-      prev.map((option, i) => ({
-        ...option,
-        active: i === index ? !option.active : false,
-      }))
-    );
-  };
-
-  const handleBonusChange = (field, value) => {
-    setBonus((prev) => ({
-      ...prev,
-      [field]: value,
-    }));
-  };
-
-  const getMonthName = (monthNumber) => {
-    const months = [
-      '', 'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
-      'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro',
-    ];
-    return months[monthNumber] || '';
-  };
-
-  const saveConfigurations = async () => {
+  const loadSaved = async () => {
     try {
-      const now = new Date();
-      const effectiveFrom = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-
-      const configData = {
-        hourValues,
-        loyaltyEnabled,
-        loyaltyOptions,
-        bonusEnabled,
-        bonus,
-        fridayNightAsWeekend,
-        fractionalExtraHours,
-        savedAt: now.toISOString(),
-      };
-
-      // Keep writing to SecureStore — ShiftValueCalculator still reads from there.
-      await SecureStore.setItemAsync('shift_configurations', JSON.stringify(configData));
-
-      // Also write to LocalCache with versioning so MonthSummary can track config changes.
-      if (userId) {
-        const existing = await LocalCache.getFinancialConfig(userId);
-        const nextVersion = (existing?.version || 0) + 1;
-        const lcConfig = {
-          ...configData,
-          userId,
-          version:       nextVersion,
-          effectiveFrom,
-          updatedAt:     now.toISOString(),
-        };
-        // saveFinancialConfig marks current + next month summaries dirty automatically
-        await LocalCache.saveFinancialConfig(userId, lcConfig);
+      let cfg = userId ? await LocalCache.getFinancialConfig(userId) : null;
+      if (!cfg) {
+        const raw = await SecureStore.getItemAsync('shift_configurations');
+        if (raw) cfg = JSON.parse(raw);
       }
-
-      Alert.alert(
-        'Configurações Salvas',
-        'Suas configurações foram salvas com sucesso!',
-        [{ text: 'OK', style: 'default' }]
-      );
-      console.log('Configurações salvas:', configData);
-    } catch (error) {
-      console.error('Erro ao salvar configurações:', error);
-      Alert.alert(
-        'Erro',
-        'Não foi possível salvar as configurações. Tente novamente.',
-        [{ text: 'OK', style: 'default' }]
-      );
+      if (!cfg) return;
+      if (cfg.hourValues)               setHourValues(cfg.hourValues);
+      if (cfg.loyaltyOptions)           setLoyaltyOptions(cfg.loyaltyOptions);
+      if (cfg.bonusEnabled !== undefined) setBonusEnabled(cfg.bonusEnabled);
+      if (cfg.bonus)                    setBonus(cfg.bonus);
+      if (cfg.fridayNightAsWeekend !== undefined) setFridayNightAsWeekend(cfg.fridayNightAsWeekend);
+      if (cfg.fractionalExtraHours !== undefined) setFractionalExtraHours(cfg.fractionalExtraHours);
+    } catch (e) {
+      Logger.warn('ConfigScreen: erro ao carregar', e);
     }
   };
 
-  const resetToDefaults = () => {
-    Alert.alert(
-      'Restaurar Configurações',
-      'Tem certeza que deseja restaurar as configurações padrão?',
-      [
-        { text: 'Cancelar', style: 'cancel' },
-        {
-          text: 'Restaurar',
-          style: 'destructive',
-          onPress: () => {
-            setHourValues({
-              weekday: { day: 130, night: 143 },
-              weekend: { day: 170, night: 185 },
-            });
-            setLoyaltyEnabled(false);
-            setLoyaltyOptions([
-              { percentage: 10, minHours: 72, active: false },
-              { percentage: 20, minHours: 120, active: false },
-              { percentage: 25, minHours: 168, active: false },
-              { percentage: 30, minHours: 264, active: false },
-            ]);
-            setBonusEnabled(false);
-            setBonus({ percentage: 20, startMonth: 2, endMonth: 4 });
-            setFridayNightAsWeekend(false);
-            setFractionalExtraHours(true);
-          },
-        },
-      ]
-    );
+  const save = async () => {
+    try {
+      const now = new Date();
+      const loyaltyEnabled = loyaltyOptions.some(o => o.active);
+      const cfg = {
+        hourValues, loyaltyEnabled, loyaltyOptions,
+        bonusEnabled, bonus, fridayNightAsWeekend, fractionalExtraHours,
+        savedAt: now.toISOString(),
+      };
+      await SecureStore.setItemAsync('shift_configurations', JSON.stringify(cfg));
+      if (userId) {
+        const existing = await LocalCache.getFinancialConfig(userId);
+        await LocalCache.saveFinancialConfig(userId, {
+          ...cfg, userId,
+          version: (existing?.version || 0) + 1,
+          effectiveFrom: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`,
+          updatedAt: now.toISOString(),
+        });
+      }
+      navigation?.goBack?.();
+    } catch (e) {
+      Logger.error('ConfigScreen: erro ao salvar', e);
+    }
   };
 
-  const renderInputField = (label, value, onChangeText, suffix = '', placeholder = '0') => {
-    const filled = value !== '' && value !== undefined && value !== null;
-    return (
-      <View style={s.inputBlock}>
-        <Text style={s.inputLabel}>{label}</Text>
-        <View style={[s.inputRow, filled && s.inputRowFilled]}>
-          {suffix === '' && <Text style={s.inputPrefix}>R$</Text>}
-          <TextInput
-            style={s.textInput}
-            value={String(value || '')}
-            onChangeText={onChangeText}
-            keyboardType="numeric"
-            placeholder={placeholder}
-            placeholderTextColor={C.text.placeholder}
-            selectTextOnFocus
-          />
-          {suffix !== '' && <Text style={s.inputSuffix}>{suffix}</Text>}
-        </View>
-      </View>
-    );
-  };
+  useLayoutEffect(() => {
+    navigation?.setOptions?.({
+      headerRight: () => (
+        <Pressable onPress={save} hitSlop={12} style={{ paddingRight: 4 }}>
+          <Text style={{ color: C.primary, fontSize: 15, fontFamily: Typography.fontFamily.semiBold, fontWeight: '700' }}>Salvar</Text>
+        </Pressable>
+      ),
+    });
+  }, [hourValues, loyaltyOptions, bonusEnabled, bonus, fridayNightAsWeekend, fractionalExtraHours]);
+
+  const handleHourChange = (period, type, value) =>
+    setHourValues(p => ({ ...p, [period]: { ...p[period], [type]: value } }));
+
+  const handleBonusChange = (field, value) =>
+    setBonus(p => ({ ...p, [field]: value }));
+
+  const activeTier = loyaltyOptions.find(o => o.active);
+
+  const vals = [hourValues.weekday.day, hourValues.weekday.night, hourValues.weekend.day, hourValues.weekend.night];
+  const avgRate = vals.reduce((a, b) => a + Number(b || 0), 0) / vals.length;
 
   return (
-    <View style={s.container}>
-      <ScrollView
-        style={s.scrollView}
-        contentContainerStyle={s.scrollContent}
-        showsVerticalScrollIndicator={false}
-      >
-
-        {/* ── Valores durante a semana ── */}
-        <Text style={s.sectionLabel}>Semana</Text>
-        <View style={s.card}>
-          <View style={s.cardAccent} />
-          <View style={s.cardBody}>
-            <View style={s.cardTitleRow}>
-              <View style={[s.cardIconWrap, { backgroundColor: C.primary + '18' }]}>
-                <MaterialCommunityIcons name="calendar-outline" size={18} color={C.primary} />
-              </View>
-              <View>
-                <Text style={s.cardTitle}>Dias úteis</Text>
-                <Text style={s.cardSubtitle}>Segunda a quinta</Text>
-              </View>
-            </View>
-            <View style={s.inputGrid}>
-              {renderInputField('Manhã / Tarde', hourValues.weekday.day, (v) => handleHourChange('weekday', 'day', v))}
-              {renderInputField('Noite', hourValues.weekday.night, (v) => handleHourChange('weekday', 'night', v))}
-            </View>
-          </View>
+    <ScrollView
+      style={{ flex: 1, backgroundColor: C.background.secondary }}
+      contentContainerStyle={{ paddingBottom: insets.bottom + 32 }}
+      showsVerticalScrollIndicator={false}
+    >
+      {/* Hero */}
+      <View style={{ paddingHorizontal: Spacing.screen, paddingTop: 14, paddingBottom: 0 }}>
+        <Text style={[t.eyebrow, { color: C.text.tertiary }]}>Hora média efetiva</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 6, marginTop: 4 }}>
+          <Text style={[t.heroValue, { color: C.money, fontFamily: Typography.fontFamily.display }]}>
+            R$ {avgRate.toFixed(2).replace('.', ',')}
+          </Text>
+          <Text style={[t.heroUnit, { color: C.text.secondary }]}>/hora</Text>
         </View>
+        <Text style={[t.heroHint, { color: C.text.tertiary }]}>
+          Inclui fidelização e bônus geral. Multiplicadores aplicados nos plantões.
+        </Text>
+      </View>
 
-        {/* ── Valores fim de semana ── */}
-        <Text style={s.sectionLabel}>Fim de semana</Text>
-        <View style={s.card}>
-          <View style={[s.cardAccent, { backgroundColor: C.primaryDark }]} />
-          <View style={s.cardBody}>
-            <View style={s.cardTitleRow}>
-              <View style={[s.cardIconWrap, { backgroundColor: C.primaryDark + '18' }]}>
-                <MaterialCommunityIcons name="calendar" size={18} color={C.primaryDark} />
-              </View>
-              <View>
-                <Text style={s.cardTitle}>Sábado e domingo</Text>
-                <Text style={s.cardSubtitle}>Inclui feriados</Text>
-              </View>
-            </View>
-            <View style={s.inputGrid}>
-              {renderInputField('Manhã / Tarde', hourValues.weekend.day, (v) => handleHourChange('weekend', 'day', v))}
-              {renderInputField('Noite', hourValues.weekend.night, (v) => handleHourChange('weekend', 'night', v))}
-            </View>
-          </View>
+      {/* Valor por hora */}
+      <SL C={C} top>Valor por hora</SL>
+      <View style={{ paddingHorizontal: Spacing.screen, gap: 10 }}>
+        <RateBlock title="Plantões de semana" subtitle="seg → sex" accent={C.primary} C={C}>
+          <RateInputRow C={C} icon="sunny-outline" label="Manhã / Tarde" sub="07:00 – 19:00"
+            value={hourValues.weekday.day} onChange={v => handleHourChange('weekday', 'day', v)} />
+          <RateInputRow C={C} icon="moon-outline" label="Noite" sub="19:00 – 07:00"
+            value={hourValues.weekday.night} onChange={v => handleHourChange('weekday', 'night', v)} last />
+        </RateBlock>
+        <RateBlock title="Plantões de FDS" subtitle="sáb · dom · feriado" accent={C.warning} C={C}>
+          <RateInputRow C={C} icon="sunny-outline" label="Manhã / Tarde" sub="07:00 – 19:00"
+            value={hourValues.weekend.day} onChange={v => handleHourChange('weekend', 'day', v)} />
+          <RateInputRow C={C} icon="moon-outline" label="Noite" sub="19:00 – 07:00"
+            value={hourValues.weekend.night} onChange={v => handleHourChange('weekend', 'night', v)} last />
+        </RateBlock>
+      </View>
+
+      {/* Regras FDS */}
+      <SL C={C} top>Regras de fim de semana</SL>
+      <View style={[card(C), { marginHorizontal: Spacing.screen }]}>
+        <ToggleRow C={C}
+          iconName="partly-sunny-outline" iconColor={C.warning} iconBg={C.warning + '1a'}
+          label="Sex. noite conta como FDS"
+          hint="19:00 sex → 07:00 sáb"
+          value={fridayNightAsWeekend}
+          onValueChange={setFridayNightAsWeekend}
+        />
+      </View>
+
+      {/* Fidelização */}
+      <SL C={C} top>
+        {'Fidelização'}
+        <Text style={{ color: C.text.tertiary, fontWeight: '400', textTransform: 'none', letterSpacing: 0 }}> · definido pelo hospital</Text>
+      </SL>
+      <View style={[card(C), { marginHorizontal: Spacing.screen, padding: 14 }]}>
+        <Text style={[t.fidelityHint, { color: C.text.secondary }]}>
+          {activeTier
+            ? `Você está em +${activeTier.percentage}%. Bônus aplicado conforme as horas trabalhadas no mês.`
+            : 'Selecione a faixa de fidelização ativa do seu hospital.'}
+        </Text>
+        <View style={{ marginTop: 12 }}>
+          <FidelityScale
+            C={C}
+            tiers={loyaltyOptions.map(o => ({ hours: o.minHours, pct: o.percentage }))}
+            current={activeTier?.minHours ?? null}
+            onSelect={hours => setLoyaltyOptions(p => p.map(o => ({ ...o, active: o.minHours === hours && !o.active ? true : o.minHours === hours ? false : false })))}
+            onToggle={hours => setLoyaltyOptions(p => p.map(o => ({ ...o, active: o.minHours === hours ? !o.active : false })))}
+          />
         </View>
+      </View>
 
-        {/* ── Ajustes de cálculo ── */}
-        <Text style={s.sectionLabel}>Ajustes de cálculo</Text>
-        <View style={s.card}>
-          <View style={[s.cardAccent, { backgroundColor: C.warning }]} />
-          <View style={s.cardBody}>
+      {/* Bônus geral */}
+      <SL C={C} top>Bônus geral</SL>
+      <View style={[card(C), { marginHorizontal: Spacing.screen }]}>
+        <ToggleRow C={C}
+          iconName="sparkles-outline" iconColor={C.primary} iconBg={C.accentSoft}
+          label="Aplicar bônus geral"
+          hint={`+ ${bonus.percentage}% sobre todos os plantões`}
+          value={bonusEnabled}
+          onValueChange={setBonusEnabled}
+        />
+        {bonusEnabled && (
+          <>
+            <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: C.border.light, marginLeft: 14 }} />
+            <BonusDetail C={C} bonus={bonus} onChange={handleBonusChange} />
+          </>
+        )}
+      </View>
 
-            {/* Fidelização */}
-            <View style={s.toggleRow}>
-              <View style={s.toggleInfo}>
-                <Text style={s.toggleTitle}>Fidelização</Text>
-                <Text style={s.toggleDesc}>Bônus por horas trabalhadas no mês</Text>
-              </View>
-              <Switch
-                value={loyaltyEnabled}
-                onValueChange={setLoyaltyEnabled}
-                trackColor={{ false: C.interactive.disabled, true: C.primary + '50' }}
-                thumbColor={loyaltyEnabled ? C.primary : C.interactive.inactive}
-              />
-            </View>
-            {loyaltyEnabled && (
-              <View style={s.optionsContainer}>
-                {loyaltyOptions.map((option, index) => {
-                  const OPTION_COLORS = [C.primary, C.info, C.primaryDark, C.warning];
-                  const color = OPTION_COLORS[index] || C.primary;
-                  return (
-                  <Pressable
-                    key={index}
-                    style={[
-                      s.optionItem,
-                      { borderColor: option.active ? color : color + '35', backgroundColor: option.active ? color + '10' : C.background.primary },
-                    ]}
-                    onPress={() => handleLoyaltyOptionToggle(index)}
-                  >
-                    <View style={s.optionContent}>
-                      <Text style={[s.optionTitle, { color: option.active ? color : C.text.primary }]}>
-                        +{option.percentage}%
-                      </Text>
-                      <Text style={[s.optionSubtitle, { color: option.active ? color + 'aa' : C.text.secondary }]}>
-                        ≥ {option.minHours}h no mês
-                      </Text>
-                    </View>
-                    <View style={[s.radio, { borderColor: option.active ? color : color + '60' }, option.active && { backgroundColor: color }]}>
-                      {option.active && <Ionicons name="checkmark" size={12} color="#fff" />}
-                    </View>
-                  </Pressable>
-                  );
-                })}
-              </View>
-            )}
+      {/* Outros */}
+      <SL C={C} top>Outros</SL>
+      <View style={[card(C), { marginHorizontal: Spacing.screen }]}>
+        <ToggleRow C={C}
+          iconName="timer-outline" iconColor={C.primary} iconBg={C.accentSoft}
+          label="Frações de hora"
+          hint="Cobrar minutos extras proporcionalmente"
+          value={fractionalExtraHours}
+          onValueChange={setFractionalExtraHours}
+        />
+      </View>
 
-            <View style={s.divider} />
+      <Text style={[t.disclaimer, { color: C.text.tertiary }]}>
+        Estas configurações são salvas no seu dispositivo. A fidelização e os valores-base vêm do hospital — alterações aqui afetam apenas a estimativa exibida no app.
+      </Text>
+    </ScrollView>
+  );
+}
 
-            {/* Bônus Geral */}
-            <View style={s.toggleRow}>
-              <View style={s.toggleInfo}>
-                <Text style={s.toggleTitle}>Bônus geral</Text>
-                <Text style={s.toggleDesc}>Percentual adicional por período</Text>
-              </View>
-              <Switch
-                value={bonusEnabled}
-                onValueChange={setBonusEnabled}
-                trackColor={{ false: C.interactive.disabled, true: C.primaryDark + '50' }}
-                thumbColor={bonusEnabled ? C.primaryDark : C.interactive.inactive}
-              />
-            </View>
-            {bonusEnabled && (
-              <View style={s.bonusContainer}>
-                <View style={s.bonusGrid}>
-                  {renderInputField('Percentual', bonus.percentage, (v) => handleBonusChange('percentage', v), '%', '0')}
-                </View>
-                <Text style={s.periodLabel}>Período de vigência</Text>
-                <View style={s.bonusGrid}>
-                  {renderInputField('Mês inicial', bonus.startMonth, (v) => handleBonusChange('startMonth', v), '', '1')}
-                  {renderInputField('Mês final', bonus.endMonth, (v) => handleBonusChange('endMonth', v), '', '12')}
-                </View>
-                <View style={s.infoCard}>
-                  <Ionicons name="calculator-outline" size={15} color={C.info} style={{ marginRight: Spacing.xs }} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={[s.infoText, { color: C.text.primary, fontWeight: Typography.fontWeight.semiBold, marginBottom: 2 }]}>
-                      Exemplo de cálculo
-                    </Text>
-                    <Text style={s.infoText}>
-                      Base: R$ {parseFloat(hourValues.weekday.day || 0).toFixed(2)}/h → com bônus: R$ {(parseFloat(hourValues.weekday.day || 0) * (1 + parseFloat(bonus.percentage || 0) / 100)).toFixed(2)}/h
-                    </Text>
-                    <Text style={s.infoText}>
-                      Vigência: {getMonthName(parseInt(bonus.startMonth) || 1)} a {getMonthName(parseInt(bonus.endMonth) || 1)}
-                    </Text>
-                  </View>
-                </View>
-              </View>
-            )}
+// ── helpers ───────────────────────────────────────────────────────────────────
 
-            <View style={s.divider} />
+const card = (C) => ({
+  backgroundColor: C.background.elevated,
+  borderRadius: 14,
+  borderWidth: 0.5,
+  borderColor: C.border.light,
+  overflow: 'hidden',
+  ...Shadows.small,
+});
 
-            {/* Sexta noturna */}
-            <View style={s.toggleRow}>
-              <View style={s.toggleInfo}>
-                <Text style={s.toggleTitle}>Sexta-feira noturna como FDS</Text>
-                <Text style={s.toggleDesc}>Plantões noturnos de sexta usam valor de fim de semana</Text>
-              </View>
-              <Switch
-                value={fridayNightAsWeekend}
-                onValueChange={setFridayNightAsWeekend}
-                trackColor={{ false: C.interactive.disabled, true: C.warning + '50' }}
-                thumbColor={fridayNightAsWeekend ? C.warning : C.interactive.inactive}
-              />
-            </View>
-            {fridayNightAsWeekend && (
-              <View style={s.infoCard}>
-                <Ionicons name="moon-outline" size={15} color={C.info} style={{ marginRight: Spacing.xs }} />
-                <View style={{ flex: 1 }}>
-                  <Text style={s.infoText}>
-                    Noite sexta: R$ {parseFloat(hourValues.weekend.night || 0).toFixed(2)}/h · 12h = R$ {(parseFloat(hourValues.weekend.night || 0) * 12).toFixed(2)}
-                  </Text>
-                </View>
-              </View>
-            )}
+function SL({ C, children, top }) {
+  return (
+    <Text style={[t.sectionLabel, { color: C.text.tertiary, marginTop: top ? Spacing.lg : 0 }]}>
+      {children}
+    </Text>
+  );
+}
 
-            <View style={s.divider} />
-
-            {/* Hora extra fracionada */}
-            <View style={[s.toggleRow, { marginBottom: 0 }]}>
-              <View style={s.toggleInfo}>
-                <Text style={s.toggleTitle}>Hora extra fracionada</Text>
-                <Text style={s.toggleDesc}>Desativado: só horas inteiras de extra são contadas</Text>
-              </View>
-              <Switch
-                value={fractionalExtraHours}
-                onValueChange={setFractionalExtraHours}
-                trackColor={{ false: C.interactive.disabled, true: C.primary + '50' }}
-                thumbColor={fractionalExtraHours ? C.primary : C.interactive.inactive}
-              />
-            </View>
-            {!fractionalExtraHours && (
-              <View style={s.infoCard}>
-                <Ionicons name="time-outline" size={15} color={C.info} style={{ marginRight: Spacing.xs }} />
-                <Text style={s.infoText}>Exemplo: 6h33 → conta como 6h (minutos ignorados)</Text>
-              </View>
-            )}
-
-          </View>
-        </View>
-
-        {/* ── Botões ── */}
-        <View style={s.buttonRow}>
-          <Pressable style={[s.btn, s.btnGhost]} onPress={resetToDefaults}>
-            <Ionicons name="refresh-outline" size={16} color={C.error} />
-            <Text style={[s.btnText, { color: C.error }]}>Restaurar</Text>
-          </Pressable>
-          <Pressable style={[s.btn, s.btnPrimary]} onPress={saveConfigurations}>
-            <Ionicons name="checkmark-outline" size={16} color="#fff" />
-            <Text style={[s.btnText, { color: '#fff' }]}>Salvar</Text>
-          </Pressable>
-        </View>
-
-      </ScrollView>
+function RateBlock({ C, title, subtitle, accent, children }) {
+  return (
+    <View style={[card(C)]}>
+      <View style={[t.rateBlockHeader, { backgroundColor: accent + '14', borderBottomColor: C.border.light }]}>
+        <Text style={[t.rateBlockTitle, { color: accent }]}>{title}</Text>
+        <Text style={[t.rateBlockSubtitle, { color: C.text.tertiary }]}>{subtitle}</Text>
+      </View>
+      {children}
     </View>
   );
 }
 
-const makeStyles = (C) => ({
-  container:     { flex: 1, backgroundColor: C.background.secondary },
-  scrollView:    { flex: 1 },
-  scrollContent: { paddingHorizontal: Spacing.lg, paddingTop: Spacing.md, paddingBottom: Spacing.xxl },
+function RateInputRow({ C, icon, label, sub, value, onChange, last }) {
+  return (
+    <View>
+      <View style={t.rateRow}>
+        <View style={[t.rateRowIcon, { backgroundColor: C.background.secondary }]}>
+          <Ionicons name={icon} size={15} color={C.text.secondary} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={[t.rateRowLabel, { color: C.text.primary }]}>{label}</Text>
+          <Text style={[t.rateRowSub, { color: C.text.tertiary, fontFamily: Typography.fontFamily.regular }]}>{sub}</Text>
+        </View>
+        <View style={[t.ratePill, { backgroundColor: C.background.secondary, borderColor: C.border.light }]}>
+          <Text style={[t.ratePillPrefix, { color: C.text.tertiary }]}>R$</Text>
+          <TextInput
+            style={[t.ratePillInput, { color: C.text.primary, fontFamily: Typography.fontFamily.semiBold }]}
+            value={String(value || '')}
+            onChangeText={onChange}
+            keyboardType="numeric"
+            selectTextOnFocus
+          />
+          <Text style={[t.ratePillSuffix, { color: C.text.tertiary }]}>/h</Text>
+        </View>
+      </View>
+      {!last && <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: C.border.light, marginLeft: 14 }} />}
+    </View>
+  );
+}
 
-  // ── Section label ────────────────────────────────────────────────────────
+function ToggleRow({ C, iconName, iconColor, iconBg, label, hint, value, onValueChange }) {
+  return (
+    <View style={t.toggleRow}>
+      <View style={[t.toggleIcon, { backgroundColor: iconBg }]}>
+        <Ionicons name={iconName} size={16} color={iconColor} />
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text style={[t.toggleLabel, { color: C.text.primary }]}>{label}</Text>
+        {hint ? <Text style={[t.toggleHint, { color: C.text.tertiary }]}>{hint}</Text> : null}
+      </View>
+      <Switch
+        value={value}
+        onValueChange={onValueChange}
+        trackColor={{ false: C.border.medium, true: C.primary }}
+        thumbColor="#fff"
+      />
+    </View>
+  );
+}
+
+function FidelityScale({ C, tiers, current, onToggle }) {
+  return (
+    <View style={{ flexDirection: 'row', gap: 4 }}>
+      {tiers.map((tier, i) => {
+        const active = tier.hours === current;
+        return (
+          <Pressable
+            key={i}
+            style={[
+              t.tierCell,
+              {
+                backgroundColor: active ? C.accentSoft : 'transparent',
+                borderColor: active ? C.primary + '40' : 'transparent',
+                flex: 1,
+              },
+            ]}
+            onPress={() => onToggle(tier.hours)}
+          >
+            <Text style={[t.tierPct, { color: active ? C.primary : C.text.tertiary, fontFamily: Typography.fontFamily.display }]}>
+              +{tier.pct}%
+            </Text>
+            <Text style={[t.tierHours, { color: C.text.tertiary, fontFamily: Typography.fontFamily.regular }]}>
+              {tier.hours}h
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
+function BonusDetail({ C, bonus, onChange }) {
+  const [editing, setEditing] = useState(null); // 'from' | 'to' | null
+  const from = bonus.startMonth - 1;
+  const to   = bonus.endMonth   - 1;
+
+  const pickMonth = (i) => {
+    if (editing === 'from') {
+      if (i <= to) onChange('startMonth', i + 1);
+      else { onChange('startMonth', to + 1); onChange('endMonth', i + 1); }
+    } else {
+      if (i >= from) onChange('endMonth', i + 1);
+      else { onChange('endMonth', from + 1); onChange('startMonth', i + 1); }
+    }
+    setEditing(null);
+  };
+
+  return (
+    <View style={{ padding: 14, gap: 14 }}>
+      {/* Percentual */}
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Text style={[t.subLabel, { color: C.text.tertiary }]}>Percentual do bônus</Text>
+        <View style={[t.ratePill, { backgroundColor: C.background.secondary, borderColor: C.border.light }]}>
+          <Text style={[t.ratePillPrefix, { color: C.text.tertiary }]}>+</Text>
+          <TextInput
+            style={[t.ratePillInput, { color: C.text.primary, fontFamily: Typography.fontFamily.semiBold }]}
+            value={String(bonus.percentage || '')}
+            onChangeText={v => onChange('percentage', v)}
+            keyboardType="numeric"
+            selectTextOnFocus
+          />
+          <Text style={[t.ratePillSuffix, { color: C.text.tertiary }]}>%</Text>
+        </View>
+      </View>
+
+      {/* Vigência pickers */}
+      <View>
+        <Text style={[t.subLabel, { color: C.text.tertiary, marginBottom: 10 }]}>Vigência</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          {(['from', 'to']).map((end, idx) => {
+            const isActive = editing === end;
+            const monthIdx = end === 'from' ? from : to;
+            return (
+              <React.Fragment key={end}>
+                <Pressable
+                  style={[t.monthPickerBtn, {
+                    flex: 1,
+                    flexDirection: 'column',
+                    alignItems: 'flex-start',
+                    backgroundColor: isActive ? C.accentSoft : C.background.secondary,
+                    borderColor: isActive ? C.primary : C.border.light,
+                    borderWidth: isActive ? 1.5 : 0.5,
+                  }]}
+                  onPress={() => setEditing(isActive ? null : end)}
+                >
+                  <Text style={[t.monthPickerLabel, { color: isActive ? C.primary : C.text.tertiary, marginBottom: 2 }]}>
+                    {end === 'from' ? 'Início' : 'Fim'}
+                  </Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                    <Text style={[t.monthPickerValue, { color: isActive ? C.primary : C.text.primary, fontFamily: Typography.fontFamily.semiBold, flex: 1 }]}>
+                      {MONTHS_FULL_PT[monthIdx]}
+                    </Text>
+                    <Ionicons name={isActive ? 'chevron-up' : 'chevron-down'} size={13} color={isActive ? C.primary : C.text.tertiary} />
+                  </View>
+                </Pressable>
+                {idx === 0 && (
+                  <Ionicons name="arrow-forward" size={14} color={C.text.tertiary} />
+                )}
+              </React.Fragment>
+            );
+          })}
+        </View>
+
+        {editing !== null && (
+          <View style={[t.monthGrid, { backgroundColor: C.background.secondary, borderColor: C.border.light }]}>
+            {Array.from({ length: 4 }).map((_, row) => (
+              <View key={row} style={{ flexDirection: 'row' }}>
+                {[0, 1, 2].map((col) => {
+                  const i = row * 3 + col;
+                  const inRange  = i >= from && i <= to;
+                  const isFrom   = i === from;
+                  const isTo     = i === to;
+                  const isTarget = editing === 'from' ? i === from : i === to;
+                  return (
+                    <Pressable
+                      key={i}
+                      style={[t.monthGridCell, {
+                        backgroundColor: inRange ? C.accentSoft : 'transparent',
+                        borderTopLeftRadius:     isFrom ? 8 : 0,
+                        borderBottomLeftRadius:  isFrom ? 8 : 0,
+                        borderTopRightRadius:    isTo   ? 8 : 0,
+                        borderBottomRightRadius: isTo   ? 8 : 0,
+                      }]}
+                      onPress={() => pickMonth(i)}
+                    >
+                      <Text style={[t.monthGridText, {
+                        color: isTarget ? C.primary : inRange ? C.primary : C.text.secondary,
+                        fontWeight: isTarget ? '800' : inRange ? '700' : '500',
+                      }]}>
+                        {MONTHS_FULL_PT[i]}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            ))}
+          </View>
+        )}
+      </View>
+    </View>
+  );
+}
+
+// ── static styles (no C dependency) ──────────────────────────────────────────
+const t = StyleSheet.create({
+  eyebrow:     { fontSize: 11, fontWeight: '700', letterSpacing: 1, textTransform: 'uppercase' },
+  heroValue:   { fontSize: 36, fontWeight: '800', letterSpacing: -0.8, lineHeight: 42 },
+  heroUnit:    { fontSize: 13 },
+  heroHint:    { fontSize: 12, marginTop: 4 },
+
   sectionLabel: {
-    fontSize: Typography.fontSize.footnote,
-    fontWeight: Typography.fontWeight.semiBold,
-    color: C.text.tertiary,
-    textTransform: 'uppercase',
-    letterSpacing: 0.7,
-    marginBottom: Spacing.sm,
-    marginTop: Spacing.lg,
-    paddingHorizontal: Spacing.xs,
+    fontSize: 11.5, fontWeight: '600', textTransform: 'uppercase',
+    letterSpacing: 1, marginBottom: Spacing.sm, marginTop: 0,
+    paddingHorizontal: Spacing.screen,
   },
 
-  // ── Card shell ───────────────────────────────────────────────────────────
-  card: {
-    backgroundColor: C.background.primary,
-    borderRadius: BorderRadius.lg,
-    marginBottom: Spacing.xs,
-    flexDirection: 'row',
-    overflow: 'hidden',
-    ...Shadows.small,
+  rateBlockHeader: {
+    paddingHorizontal: 14, paddingVertical: 11,
+    flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between',
+    borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  cardAccent: {
-    width: 4,
-    backgroundColor: C.primary,
-  },
-  cardBody: {
-    flex: 1,
-    padding: Spacing.lg,
-  },
-  cardTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: Spacing.lg,
-    gap: Spacing.sm,
-  },
-  cardIconWrap: {
-    width: 36,
-    height: 36,
-    borderRadius: BorderRadius.sm,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  cardTitle: {
-    fontSize: Typography.fontSize.subhead,
-    fontWeight: Typography.fontWeight.semiBold,
-    color: C.text.primary,
-    marginBottom: 1,
-  },
-  cardSubtitle: {
-    fontSize: Typography.fontSize.footnote,
-    color: C.text.tertiary,
-  },
+  rateBlockTitle:    { fontSize: 12.5, fontWeight: '800', letterSpacing: 0.2 },
+  rateBlockSubtitle: { fontSize: 10, fontWeight: '600', letterSpacing: 0.4, textTransform: 'uppercase' },
 
-  // ── Input grid ───────────────────────────────────────────────────────────
-  inputGrid: {
-    flexDirection: 'row',
-    gap: Spacing.md,
+  rateRow: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 12 },
+  rateRowIcon: { width: 32, height: 32, borderRadius: 9, alignItems: 'center', justifyContent: 'center' },
+  rateRowLabel: { fontSize: 13, fontWeight: '700' },
+  rateRowSub:   { fontSize: 11, marginTop: 1 },
+  ratePill: {
+    flexDirection: 'row', alignItems: 'baseline', gap: 2,
+    paddingHorizontal: 10, paddingVertical: 4,
+    borderRadius: 8, borderWidth: 0.5,
   },
-  inputBlock: {
-    flex: 1,
-  },
-  inputLabel: {
-    fontSize: Typography.fontSize.caption1,
-    fontWeight: Typography.fontWeight.medium,
-    color: C.text.secondary,
-    marginBottom: 6,
-    textTransform: 'uppercase',
-    letterSpacing: 0.4,
-  },
-  inputRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'transparent',
-    borderRadius: BorderRadius.sm,
-    borderWidth: 1,
-    borderColor: C.border.light,
-    paddingHorizontal: Spacing.sm,
-    height: 44,
-  },
-  inputRowFilled: {
-    borderColor: C.primary,
-  },
-  inputPrefix: {
-    fontSize: Typography.fontSize.footnote,
-    fontWeight: Typography.fontWeight.semiBold,
-    color: C.primary,
-    marginRight: 4,
-  },
-  inputSuffix: {
-    fontSize: Typography.fontSize.footnote,
-    fontWeight: Typography.fontWeight.semiBold,
-    color: C.primary,
-    marginLeft: 4,
-  },
-  textInput: {
-    flex: 1,
-    fontSize: Typography.fontSize.callout,
-    fontWeight: Typography.fontWeight.semiBold,
-    color: C.text.primary,
-    textAlign: 'center',
-  },
+  ratePillPrefix: { fontSize: 10, fontWeight: '600' },
+  ratePillInput:  { fontSize: 17, fontWeight: '600', minWidth: 44, textAlign: 'center' },
+  ratePillSuffix: { fontSize: 10 },
 
-  // ── Toggle rows ──────────────────────────────────────────────────────────
-  toggleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: Spacing.md,
-  },
-  toggleInfo: { flex: 1, paddingRight: Spacing.md },
-  toggleTitle: {
-    fontSize: Typography.fontSize.subhead,
-    fontWeight: Typography.fontWeight.semiBold,
-    color: C.text.primary,
-    marginBottom: 2,
-  },
-  toggleDesc: {
-    fontSize: Typography.fontSize.footnote,
-    color: C.text.secondary,
-  },
+  toggleRow: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 12, minHeight: 52 },
+  toggleIcon: { width: 32, height: 32, borderRadius: 9, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
+  toggleLabel: { fontSize: 14, fontWeight: '700' },
+  toggleHint:  { fontSize: 11, marginTop: 1 },
 
-  divider: {
-    height: 1,
-    backgroundColor: C.border.light,
-    marginVertical: Spacing.md,
-  },
+  tierCell: { padding: 8, borderRadius: 8, borderWidth: 1, alignItems: 'center' },
+  tierPct:   { fontSize: 15, fontWeight: '800', letterSpacing: -0.3 },
+  tierHours: { fontSize: 10, marginTop: 1 },
 
-  // ── Loyalty options ──────────────────────────────────────────────────────
-  optionsContainer: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
-    marginBottom: Spacing.md,
-  },
-  optionItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.sm,
-    flexBasis: '47%',
-    flexGrow: 1,
-    backgroundColor: C.background.secondary,
-    borderRadius: BorderRadius.sm,
-    paddingVertical: Spacing.sm,
-    paddingHorizontal: Spacing.md,
-    borderWidth: 1,
-    borderColor: C.border.light,
-  },
-  optionItemActive: {
-    backgroundColor: C.primary + '12',
-    borderColor: C.primary,
-  },
-  optionContent: {},
-  optionTitle: {
-    fontSize: Typography.fontSize.subhead,
-    fontWeight: Typography.fontWeight.bold,
-    color: C.text.primary,
-  },
-  optionSubtitle: {
-    fontSize: Typography.fontSize.caption1,
-    color: C.text.secondary,
-  },
-  radio: {
-    width: 20,
-    height: 20,
-    borderRadius: BorderRadius.pill,
-    borderWidth: 2,
-    borderColor: C.border.medium,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+  monthPickerBtn: { paddingHorizontal: 12, paddingVertical: 10, borderRadius: 10 },
+  monthPickerLabel: { fontSize: 10, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.6 },
+  monthPickerValue: { fontSize: 15, fontWeight: '600' },
+  monthGrid: { marginTop: 8, borderRadius: 10, borderWidth: 0.5, overflow: 'hidden' },
+  monthGridCell: { flex: 1, paddingVertical: 11, alignItems: 'center' },
+  monthGridText: { fontSize: 12 },
 
-  // ── Bonus container ──────────────────────────────────────────────────────
-  bonusContainer: { marginBottom: Spacing.md },
-  bonusGrid: {
-    flexDirection: 'row',
-    gap: Spacing.md,
-    marginBottom: Spacing.md,
-  },
-  periodLabel: {
-    fontSize: Typography.fontSize.caption1,
-    fontWeight: Typography.fontWeight.semiBold,
-    color: C.text.secondary,
-    textTransform: 'uppercase',
-    letterSpacing: 0.4,
-    marginBottom: Spacing.sm,
-    marginTop: Spacing.xs,
-  },
-
-  // ── Info callout ─────────────────────────────────────────────────────────
-  infoCard: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    backgroundColor: C.info + '12',
-    borderRadius: BorderRadius.sm,
-    padding: Spacing.md,
-    marginBottom: Spacing.md,
-  },
-  infoText: {
-    fontSize: Typography.fontSize.footnote,
-    color: C.text.secondary,
-    lineHeight: Typography.fontSize.footnote * 1.5,
-  },
-
-  // ── Bottom buttons ───────────────────────────────────────────────────────
-  buttonRow: {
-    flexDirection: 'row',
-    gap: Spacing.md,
-    marginTop: Spacing.lg,
-  },
-  btn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: Spacing.xs,
-    height: 50,
-    borderRadius: BorderRadius.pill,
-  },
-  btnPrimary: {
-    backgroundColor: C.primary,
-    ...Shadows.small,
-  },
-  btnGhost: {
-    backgroundColor: C.background.primary,
-    borderWidth: 1,
-    borderColor: C.error,
-  },
-  btnText: {
-    fontSize: Typography.fontSize.subhead,
-    fontWeight: Typography.fontWeight.semiBold,
-  },
-
-  // ── Legacy keys kept so nothing breaks if referenced elsewhere ───────────
-  sectionCard:     { display: 'none' },
-  cardHeader:      { display: 'none' },
-  cardIconContainer: { display: 'none' },
-  featureContainer:  { display: 'none' },
-  featureHeader:     { display: 'none' },
-  featureInfo:       { display: 'none' },
-  featureTitle:      { display: 'none' },
-  featureDescription:{ display: 'none' },
-  buttonContainer:   { display: 'none' },
-  button:            { display: 'none' },
-  resetButton:       { display: 'none' },
-  saveButton:        { display: 'none' },
-  resetButtonText:   { display: 'none' },
-  saveButtonText:    { display: 'none' },
+  subLabel: { fontSize: 10.5, fontWeight: '700', letterSpacing: 0.8, textTransform: 'uppercase', marginBottom: 8 },
+  fidelityHint: { fontSize: 11.5, lineHeight: 17 },
+  disclaimer: { fontSize: 11, lineHeight: 16, paddingHorizontal: Spacing.screen, paddingTop: 20, paddingBottom: 24 },
 });

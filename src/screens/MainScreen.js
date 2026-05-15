@@ -18,13 +18,14 @@
  *   Sub-screen→sub-screen (rare): simple 120ms crossfade (no slide).
  */
 
-import React, { useState, useContext, useRef, useMemo } from 'react';
+import React, { useState, useContext, useRef, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   Animated,
   Easing,
+  PanResponder,
   Platform,
   Dimensions,
 } from 'react-native';
@@ -41,6 +42,7 @@ import GroupsScreen from './GroupsScreen';
 import ReportsScreen from './ReportsScreen';
 import GroupVisibilityScreen from './GroupVisibilityScreen';
 import DayViewScreen from './DayViewScreen';
+import HospitalsScreen from './HospitalsScreen';
 import ChartsScreen from './ChartsScreen';
 import TabBar from '../components/TabBar';
 import { useColors, Spacing } from '../constants/DesignSystem';
@@ -73,6 +75,7 @@ const SCREEN_MAP = {
   GroupVisibilityScreen: 'groupVisibility',
   DayView:               'dayView',
   ChartsScreen:          'charts',
+  HospitalsScreen:       'hospitals',
 };
 
 export default function MainScreen() {
@@ -101,7 +104,54 @@ export default function MainScreen() {
   // Overlay opacity (Android: full opacity anim; iOS: edge shadow only)
   const overlayOpacity = useRef(new Animated.Value(0)).current;
 
-  const isAnimating = useRef(false);
+  const isAnimating        = useRef(false);
+  const disableSwipeBack   = useRef(false);
+
+  // Keep disableSwipeBack in sync with currentScreen
+  useEffect(() => {
+    disableSwipeBack.current = currentScreen === 'dayView';
+  }, [currentScreen]);
+
+  // ── Swipe-back gesture (iOS only) ─────────────────────────────────────────
+  const swipeBackPan = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, g) =>
+        Platform.OS === 'ios' && g.dx > 8 && Math.abs(g.dy) < Math.abs(g.dx) * 1.5 && !isAnimating.current && !disableSwipeBack.current,
+      onPanResponderMove: (_, g) => {
+        const x = Math.max(0, g.dx);
+        slideX.setValue(x);
+        baseParallaxX.setValue(-W * 0.1 * (1 - x / W));
+      },
+      onPanResponderRelease: (_, g) => {
+        if (g.dx > W * 0.35 || g.vx > 0.6) {
+          // commit — finish pop from current position
+          isAnimating.current = true;
+          const finish = () => {
+            setOverlayScreen(null); setCurrentScreen(null);
+            setScreenParams(null); setGroupsRefreshFn(null);
+            setReportsExportFn(null); isAnimating.current = false;
+          };
+          Animated.parallel([
+            Animated.timing(slideX, { toValue: W, duration: 220, easing: EASING_ACCELERATE, useNativeDriver: true }),
+            Animated.timing(baseParallaxX, { toValue: 0, duration: 220, easing: EASING_OUT, useNativeDriver: true }),
+            Animated.timing(overlayOpacity, { toValue: 0, duration: 110, easing: EASING_ACCELERATE, useNativeDriver: true }),
+          ]).start(finish);
+        } else {
+          // cancel — snap back
+          Animated.parallel([
+            Animated.spring(slideX, { toValue: 0, damping: 22, stiffness: 300, mass: 0.8, useNativeDriver: true }),
+            Animated.spring(baseParallaxX, { toValue: -W * 0.1, damping: 22, stiffness: 300, mass: 0.8, useNativeDriver: true }),
+          ]).start();
+        }
+      },
+      onPanResponderTerminate: (_, g) => {
+        Animated.parallel([
+          Animated.spring(slideX, { toValue: 0, damping: 22, stiffness: 300, mass: 0.8, useNativeDriver: true }),
+          Animated.spring(baseParallaxX, { toValue: -W * 0.1, damping: 22, stiffness: 300, mass: 0.8, useNativeDriver: true }),
+        ]).start();
+      },
+    })
+  ).current;
 
   // ── Push: navigate into a sub-screen ─────────────────────────────────────────
   const pushSubScreen = (screenName, params = null) => {
@@ -345,6 +395,8 @@ export default function MainScreen() {
         return <ConfigScreen navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }} />;
       case 'charts':
         return <ChartsScreen />;
+      case 'hospitals':
+        return <HospitalsScreen navigation={{ goBack: handleBackNavigation }} />;
       default:
         return null;
     }
@@ -378,7 +430,10 @@ export default function MainScreen() {
 
       {/* ── OVERLAY LAYER: sub-screens ── */}
       {overlayScreen && (
-        <Animated.View style={[styles.overlayLayer, overlayAnimStyle, { backgroundColor: C.background.secondary }]}>
+        <Animated.View
+          style={[styles.overlayLayer, overlayAnimStyle, { backgroundColor: C.background.secondary }]}
+          {...(Platform.OS === 'ios' ? swipeBackPan.panHandlers : {})}
+        >
           {/* Left-edge shadow strip [iOS only] — fades in as overlay arrives */}
           {Platform.OS === 'ios' && (
             <Animated.View

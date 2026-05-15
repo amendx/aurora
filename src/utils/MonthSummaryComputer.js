@@ -60,6 +60,9 @@ const _scheduledMinutesForShift = (shift) => {
   if (shift.splitHours?.minutesThisMonth != null) {
     return shift.splitHours.minutesThisMonth;
   }
+  if (shift.isManual && shift.durationMinutes != null) {
+    return shift.durationMinutes;
+  }
   return TimeUtils.getShiftStandardMinutes(shift.label);
 };
 

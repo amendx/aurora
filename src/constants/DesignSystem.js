@@ -2,13 +2,12 @@
  * Premium Design System
  * Modern, native-inspired design tokens for consistent UI
  *
- * Dark Palette (v2):
- *   Charcoal Blue  #3d4d5c  — deep backgrounds
- *   Blue Slate     #49627a  — surface / card
- *   Blue Grey      #7096bb  — inactive / mid-tone
- *   Baby Blue Ice  #97cafc  — accent / highlight
- *   Tropical Teal  #6cc1c0  — primary action
- *   Mint Leaf      #41b883  — success / positive
+ * Dark Palette (v3 — neutral dark, Claude-style):
+ *   Abyss     #141414  — deepest canvas
+ *   Surface   #1f1f1f  — standard page surface
+ *   Card      #282828  — card / sheet
+ *   Elevated  #323232  — elevated surface / modal
+ *   Muted     #8a8a8a  — mid-tone / inactive
  */
 import { Dimensions, Platform } from 'react-native';
 import { useTheme as _useTheme } from '../contexts/ThemeContext';
@@ -23,96 +22,116 @@ const Palette = {
   babyBlueIce:   '#97cafc',
   tropicalTeal:  '#6cc1c0',
   mintLeaf:      '#41b883',
-  // Deeper surface derived by darkening charcoal-blue ~15%
   abyss:         '#263340',
+  // Neutral dark (v3)
+  darkAbyss:     '#141414',
+  darkSurface:   '#1f1f1f',
+  darkCard:      '#282828',
+  darkElevated:  '#323232',
+  darkMuted:     '#8a8a8a',
 };
 
 export const Colors = {
   // Primary System Colors
-  primary: '#6cc1c0',      // Tropical Teal
+  primary: '#3FA9A7',      // Tropical Teal — refined Direction A
   primaryLight: '#97cafc', // Baby Blue Ice
   primaryDark: '#41b883',  // Mint Leaf
   
+  // Semantic financial color — distinct from teal primary
+  // Teal = navigation/interaction. Money = earnings, positive financial.
+  money: '#2F9266',
+  moneySoft: '#E3F3EB',
+
+  // Soft teal background for active states, icon badges
+  accentSoft: '#E5F4F3',
+
+  // Soft warning background — A2 hero card "restam" stat, vacancy indicators
+  warningSoft: '#FBEED4',
+
   // Background System (light)
   background: {
     primary: '#FFFFFF',
-    secondary: '#F2F2F7',
-    tertiary: '#F9F9FB',
+    secondary: '#F4F6F8',
+    tertiary: '#F9FAFB',
     card: '#FFFFFF',
     elevated: '#FFFFFF',
   },
   
-  // Dark Mode — harmonized with the new cool-toned palette
+  // Dark Mode — neutral dark, Claude-style (v3)
   dark: {
-    primary:      Palette.tropicalTeal,   // #6cc1c0
-    primaryLight: Palette.babyBlueIce,    // #97cafc
-    primaryDark:  Palette.mintLeaf,       // #41b883
+    primary:      '#3FA9A7',              // teal — same as light, pops on dark bg
+    primaryLight: '#6cc1c0',
+    primaryDark:  '#41b883',
 
     background: {
-      primary:   Palette.abyss,           // #263340  — deepest canvas
-      secondary: Palette.charcoalBlue,    // #3d4d5c  — standard surface
-      tertiary:  Palette.blueSlate,       // #49627a  — elevated surface
-      card:      Palette.charcoalBlue,    // #3d4d5c
-      elevated:  Palette.blueSlate,       // #49627a
+      primary:   Palette.darkAbyss,       // #141414 — deepest canvas
+      secondary: Palette.darkSurface,     // #1f1f1f — standard page surface
+      tertiary:  Palette.darkCard,        // #282828 — slightly raised
+      card:      Palette.darkCard,        // #282828 — card
+      elevated:  Palette.darkElevated,    // #323232 — modal / sheet
     },
     text: {
-      primary:     '#E8F4FD',                        // near-white, blue tinted
-      secondary:   Palette.babyBlueIce,              // #97cafc
-      tertiary:    'rgba(151, 202, 252, 0.65)',
-      quaternary:  'rgba(151, 202, 252, 0.40)',
-      placeholder: 'rgba(112, 150, 187, 0.55)',      // blue-grey
+      primary:     '#ececec',
+      secondary:   '#a0a0a0',
+      tertiary:    '#6b6b6b',
+      quaternary:  '#4a4a4a',
+      placeholder: '#555555',
     },
     interactive: {
-      active:   Palette.tropicalTeal,                // #6cc1c0
-      inactive: Palette.blueGrey,                    // #7096bb
-      pressed:  Palette.mintLeaf,                    // #41b883
-      disabled: 'rgba(112, 150, 187, 0.30)',
+      active:   '#3FA9A7',
+      inactive: Palette.darkMuted,        // #8a8a8a
+      pressed:  '#41b883',
+      disabled: 'rgba(138,138,138,0.25)',
     },
-    success: Palette.mintLeaf,                       // #41b883
-    warning: '#FFBB55',                              // warm amber — still visible on blue bg
-    error:   '#FF6B6B',                              // soft red that won't clash with the cool tones
-    info:    Palette.babyBlueIce,                    // #97cafc
+    money:      '#4aba8a',
+    moneySoft:  'rgba(74,186,138,0.15)',
+    accentSoft: 'rgba(63,169,167,0.15)',
+    success:    '#41b883',
+    warning:    '#f0a843',
+    warningSoft:'rgba(240,168,67,0.15)',
+    error:      '#e05c5c',
+    info:       '#5a8dd1',
     border: {
-      light:  'rgba(73, 98, 122, 0.55)',             // blue-slate semi
-      medium: Palette.blueSlate,                     // #49627a
-      strong: Palette.blueGrey,                      // #7096bb
+      light:  'rgba(255,255,255,0.08)',
+      medium: 'rgba(255,255,255,0.13)',
+      strong: 'rgba(255,255,255,0.22)',
     },
     shadow: {
-      light:   'rgba(38, 51, 64, 0.40)',
-      medium:  'rgba(38, 51, 64, 0.60)',
-      strong:  'rgba(38, 51, 64, 0.80)',
-      overlay: 'rgba(38, 51, 64, 0.70)',
+      light:   'rgba(0,0,0,0.30)',
+      medium:  'rgba(0,0,0,0.50)',
+      strong:  'rgba(0,0,0,0.70)',
+      overlay: 'rgba(0,0,0,0.60)',
     },
   },
   
   // Text System
   text: {
-    primary: '#000000',
-    secondary: '#3C3C43',    // iOS Secondary Label
-    tertiary: '#3C3C4399',   // iOS Tertiary Label
-    quaternary: '#3C3C434D', // iOS Quaternary Label
-    placeholder: '#3C3C434D',
+    primary: '#0E141A',
+    secondary: '#4B5560',
+    tertiary: '#8A95A0',
+    quaternary: '#B0BCC6',
+    placeholder: '#B0BCC6',
   },
   
   // Interactive States
   interactive: {
-    active:   Palette.tropicalTeal,              // #6cc1c0
-    inactive: '#8E8E93',
+    active:   '#3FA9A7',                         // refined teal
+    inactive: '#8A95A0',
     pressed:  Palette.mintLeaf,                  // #41b883
     disabled: '#3C3C4399',
   },
-  
+
   // Semantic Colors
   success: '#34C759',        // iOS Green
-  warning: '#FF9500',        // iOS Orange
-  error: '#FF3B30',          // iOS Red
-  info: '#97cafc',           // Baby Blue Ice
+  warning: '#E08A00',        // Muted amber — Direction A
+  error: '#E0524C',          // Muted red — Direction A
+  info: '#5A8DD1',           // Steel blue — Direction A
   
   // Border & Separator
   border: {
-    light: '#C6C6C8',        // iOS Separator
-    medium: '#8E8E93',
-    strong: '#3C3C43',
+    light: '#E6E9EC',        // Direction A — much lighter than iOS default
+    medium: '#CFD4D8',
+    strong: '#4B5560',
   },
   
   // Shadows & Overlays

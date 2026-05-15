@@ -8,15 +8,18 @@ import {
   Animated,
   Share,
   Alert,
+  Dimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
 import { useShifts } from '../contexts/ShiftsContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
-import { calculateShiftValueWithBreakdown, getShiftHours, getFullShiftConfig, computeShiftValue } from '../utils/ShiftValueCalculator';
+import { calculateShiftValueWithBreakdown, getFullShiftConfig, computeShiftValue } from '../utils/ShiftValueCalculator';
 import { formatMoney, formatMoneyCompact } from '../utils/MoneyFormatter';
 import TimeUtils from '../utils/TimeUtils';
+import { AuthContext } from '../context/AuthContext';
+import LocalCache from '../services/LocalCache';
 
 // ── Skeleton ──────────────────────────────────────────────────────────────────
 const SkeletonBox = ({ width = '100%', height = 20, style }) => {
@@ -68,15 +71,19 @@ const formatHoursWithExtras = (plannedMinutes, extraMinutes) => {
   return TimeUtils.minutesToDisplay(totalMinutes);
 };
 
+const SCREEN_W = Dimensions.get('window').width;
+
 export default function ReportsScreen({ onExportReady } = {}) {
   const { daysWithShifts, loading, loadMonthlyShifts } = useShifts();
   const C = useColors();
   const insets = useSafeAreaInsets();
   const s = makeStyles(C);
+  const { user } = useContext(AuthContext);
   const [viewDate, setViewDate] = useState(new Date());
   const [rows, setRows] = useState([]);
   const [totals, setTotals] = useState({ hours: 0, value: 0 });
   const [computing, setComputing] = useState(false);
+  const [chartData, setChartData] = useState([]);
 
   // Refs for debouncing month navigation
   const navigationTimeoutRef = useRef(null);
@@ -105,7 +112,6 @@ export default function ReportsScreen({ onExportReady } = {}) {
       const month = pendingDateRef.current.getMonth() + 1;
       const year = pendingDateRef.current.getFullYear();
 
-      console.log(`📊 ReportsScreen: Loading data for ${month}/${year} (after navigation settled)`);
       loadMonthlyShifts(month, year);
 
       isNavigatingRef.current = false;
@@ -117,7 +123,6 @@ export default function ReportsScreen({ onExportReady } = {}) {
   useEffect(() => {
     // Only load on initial mount
     if (!isNavigatingRef.current) {
-      console.log(`📊 ReportsScreen: Initial load for ${month}/${year}`);
       loadMonthlyShifts(month, year);
     }
 
@@ -264,18 +269,6 @@ export default function ReportsScreen({ onExportReady } = {}) {
 
   const isLoading = loading || computing;
 
-  // Helper function to convert minutes to readable format
-  const formatMinutesToTime = (totalMinutes) => {
-    return TimeUtils.minutesToDisplay(totalMinutes);
-  };
-
-  // Label colors computed from current theme
-  const LABEL_COLORS = {
-    M: C.success,
-    T: C.primary,
-    N: C.warning,
-  };
-
   const exportCSV = async () => {
     if (rows.length === 0) {
       Alert.alert('Sem dados', 'Não há plantões para exportar neste mês.');
@@ -307,123 +300,192 @@ export default function ReportsScreen({ onExportReady } = {}) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows.length]);
 
-  return (
-    <ScrollView style={s.container} contentContainerStyle={{ paddingBottom: insets.bottom + Spacing.lg }} showsVerticalScrollIndicator={false}>
-      {/* Month switcher */}
-      <View style={s.monthHeader}>
-        <Pressable style={s.navButton} onPress={goToPrev}>
-          <Ionicons name="chevron-back" size={20} color={C.interactive.active} />
-        </Pressable>
-        <Text style={s.monthTitle}>
-          {MONTH_NAMES[viewDate.getMonth()]} {viewDate.getFullYear()}
-        </Text>
-        <Pressable style={s.navButton} onPress={goToNext}>
-          <Ionicons name="chevron-forward" size={20} color={C.interactive.active} />
-        </Pressable>
-      </View>
+  // Load last 6 months of summaries for bar chart
+  useEffect(() => {
+    if (!user?.id) return;
+    const load = async () => {
+      const months = [];
+      for (let i = 5; i >= 0; i--) {
+        const d = new Date(viewDate.getFullYear(), viewDate.getMonth() - i, 1);
+        const mk = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        const summary = await LocalCache.getSummary(user.id, mk);
+        const val = summary
+          ? (summary.totalGrossValue || 0) + (summary.totalLoyaltyValue || 0) + (summary.totalBonusValue || 0)
+          : 0;
+        months.push({
+          month: d.toLocaleDateString('pt-BR', { month: 'short' }).replace('.', '').toUpperCase(),
+          value: val,
+          isCurrent: i === 0,
+        });
+      }
+      setChartData(months);
+    };
+    load();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, viewDate.getMonth(), viewDate.getFullYear()]);
 
-      {/* Totals summary — structure always visible, values skeletonized while loading */}
-      <View style={s.summaryCard}>
-        <View style={s.summaryGrid}>
-          <View style={s.summaryItem}>
-            {isLoading
-              ? <SkeletonBox width={60} height={28} style={{ marginBottom: 6 }} />
-              : <Text style={s.summaryValue}>{formatHours(totals.hours)}</Text>}
-            <Text style={s.summaryLabel}>Horas no mês</Text>
+  const extraMinutesTotal = rows.reduce((a, r) => a + (r.extraMinutes > 0 ? r.extraMinutes : 0), 0);
+  const extraValue = rows.reduce((a, r) => {
+    if (r.extraMinutes > 0) {
+      const rate = r.value / (r.totalMinutes || 1);
+      return a + rate * r.extraMinutes;
+    }
+    return a;
+  }, 0);
+
+  const fmtBRLk = (v) => {
+    if (!v || isNaN(v)) return 'R$ —';
+    if (v >= 1000) return 'R$' + (v / 1000).toFixed(1).replace('.', ',') + 'k';
+    return 'R$ ' + v.toFixed(0);
+  };
+
+  const LABEL_COLORS = {
+    M: C.success,
+    T: C.primary,
+    N: C.warning,
+  };
+
+  return (
+    <ScrollView style={s.container} contentContainerStyle={{ paddingBottom: insets.bottom + 32 }} showsVerticalScrollIndicator={false}>
+
+      {/* Hero */}
+      <View style={s.heroSection}>
+        <View style={s.heroNav}>
+          <View>
+            <Text style={s.heroYearLabel}>{MONTH_NAMES[viewDate.getMonth()].toUpperCase()} · {viewDate.getFullYear()}</Text>
+            <View style={s.heroValueRow}>
+              <Text style={s.heroValue}>
+                {isLoading ? '—' : formatMoney(totals.value).split(',')[0]}
+              </Text>
+              {!isLoading && (
+                <Text style={s.heroValueCents}>,{formatMoney(totals.value).split(',')[1]}</Text>
+              )}
+            </View>
           </View>
-          <View style={s.summaryDivider} />
-          <View style={s.summaryItem}>
-            {isLoading
-              ? <SkeletonBox width={80} height={28} style={{ marginBottom: 6 }} />
-              : <Text style={[s.summaryValue, { color: C.success }]}>{formatMoney(totals.value)}</Text>}
-            <Text style={s.summaryLabel}>Estimado no mês</Text>
+          <View style={s.heroNavBtns}>
+            <Pressable style={s.navButton} onPress={goToPrev}>
+              <Ionicons name="chevron-back" size={16} color={C.text.primary} />
+            </Pressable>
+            <Pressable style={s.navButton} onPress={goToNext}>
+              <Ionicons name="chevron-forward" size={16} color={C.text.primary} />
+            </Pressable>
           </View>
         </View>
       </View>
 
+      {/* Bar chart */}
+      {chartData.length > 0 && (
+        <View style={s.chartCard}>
+          <View style={s.chartCardHeader}>
+            <Text style={s.chartCardLabel}>6 meses</Text>
+          </View>
+          <View style={s.chartBars}>
+            {(() => {
+              const max = Math.max(...chartData.map(d => d.value), 1);
+              return chartData.map((b, i) => {
+                const h = Math.max((b.value / max) * 80, b.value > 0 ? 6 : 2);
+                return (
+                  <View key={i} style={s.chartBarCol}>
+                    {b.isCurrent && b.value > 0 ? (
+                      <Text style={s.chartBarLabel}>{fmtBRLk(b.value)}</Text>
+                    ) : null}
+                    <View style={[
+                      s.chartBar,
+                      { height: h, backgroundColor: b.isCurrent ? C.money : C.accentSoft,
+                        borderWidth: b.isCurrent ? 0 : StyleSheet.hairlineWidth,
+                        borderColor: C.border.light },
+                    ]} />
+                    <Text style={[s.chartMonthLabel, b.isCurrent && { color: C.text.primary, fontWeight: '800' }]}>
+                      {b.month}
+                    </Text>
+                  </View>
+                );
+              });
+            })()}
+          </View>
+        </View>
+      )}
+
+      {/* Mini stats */}
+      <View style={s.miniStatsRow}>
+        <View style={s.miniStat}>
+          {isLoading
+            ? <SkeletonBox width={40} height={22} style={{ marginBottom: 4 }} />
+            : <Text style={s.miniStatValue}>{rows.length}</Text>}
+          <Text style={s.miniStatLabel}>plantões</Text>
+        </View>
+        <View style={[s.miniStat, s.miniStatBorder]}>
+          {isLoading
+            ? <SkeletonBox width={50} height={22} style={{ marginBottom: 4 }} />
+            : <Text style={s.miniStatValue}>{formatHours(totals.hours)}</Text>}
+          <Text style={s.miniStatLabel}>horas</Text>
+        </View>
+        <View style={[s.miniStat, s.miniStatBorder]}>
+          {isLoading
+            ? <SkeletonBox width={50} height={22} style={{ marginBottom: 4 }} />
+            : <Text style={[s.miniStatValue, extraMinutesTotal > 0 && { color: C.warning }]}>
+                {extraMinutesTotal > 0 ? fmtBRLk(extraValue) : '—'}
+              </Text>}
+          <Text style={s.miniStatLabel}>extras</Text>
+        </View>
+      </View>
+
       {/* Shift list */}
-      <View style={s.listSection}>
+      <Text style={s.sectionLabel}>Plantões do mês</Text>
+      <View style={s.listCard}>
         {isLoading && rows.length === 0 ? (
-          /* No rows yet (initial load): show placeholder rows to hold structure */
           [0, 1, 2].map(i => (
-            <View key={i} style={s.shiftRow}>
-              <View style={s.dateCol}>
-                <SkeletonBox width={28} height={22} style={{ marginBottom: 4 }} />
-                <SkeletonBox width={24} height={11} />
+            <View key={i} style={[s.reportRow, i === 0 && { borderTopWidth: 0 }]}>
+              <View style={s.reportDateCol}>
+                <SkeletonBox width={28} height={20} style={{ marginBottom: 3 }} />
+                <SkeletonBox width={22} height={10} />
               </View>
-              <View style={s.infoCol}>
-                <SkeletonBox width="55%" height={13} style={{ marginBottom: 5 }} />
-                <SkeletonBox width="40%" height={11} style={{ marginBottom: 4 }} />
-                <SkeletonBox width="50%" height={11} />
+              <View style={[s.reportColorBar, { backgroundColor: C.border.light }]} />
+              <View style={s.reportInfoCol}>
+                <SkeletonBox width="55%" height={13} style={{ marginBottom: 4 }} />
+                <SkeletonBox width="40%" height={11} />
               </View>
-              <View style={s.valueCol}>
-                <SkeletonBox width={52} height={18} style={{ borderRadius: 6, marginBottom: 4 }} />
-                <SkeletonBox width={40} height={10} style={{ borderRadius: 4 }} />
+              <View style={s.reportValueCol}>
+                <SkeletonBox width={52} height={14} style={{ borderRadius: 4 }} />
               </View>
             </View>
           ))
         ) : rows.length === 0 ? (
-          <View style={[s.empty, { borderWidth: 1, borderStyle: 'dashed', borderColor: C.border.light, borderRadius: BorderRadius.lg }]}>
-            <Ionicons name="document-text-outline" size={48} color={C.text.tertiary} />
+          <View style={s.empty}>
+            <Ionicons name="document-text-outline" size={40} color={C.text.tertiary} />
             <Text style={s.emptyText}>Nenhum plantão neste mês</Text>
-            <Text style={s.emptySubtext}>Os plantões do mês aparecerão aqui</Text>
           </View>
         ) : (
           rows.map((row, idx) => {
             const labelColor = LABEL_COLORS[row.label] || C.primary;
             const shiftDate = new Date(row.dateStr + 'T12:00:00');
             const dayNum = shiftDate.getDate();
-            const monthShort = shiftDate.toLocaleDateString('pt-BR', { month: 'short' });
+            const weekday = shiftDate.toLocaleDateString('pt-BR', { weekday: 'short' }).replace('.', '').toUpperCase();
+            const delta = row.extraMinutes !== 0 ? ` (${row.extraMinutes > 0 ? '+' : ''}${TimeUtils.minutesToDisplay(row.extraMinutes)})` : '';
 
             return (
-              <View key={`${row.dateStr}-${idx}`} style={s.shiftRow}>
-                {/* Date column */}
-                <View style={s.dateCol}>
-                  <Text style={s.dateDay}>{dayNum}</Text>
-                  <Text style={s.dateMonth}>{monthShort}</Text>
+              <View key={`${row.dateStr}-${idx}`} style={[s.reportRow, idx === 0 && { borderTopWidth: 0 }]}>
+                <View style={s.reportDateCol}>
+                  <Text style={s.reportDateDay}>{dayNum}</Text>
+                  <Text style={s.reportDateWeekday}>{weekday}</Text>
                 </View>
-
-                {/* Info column */}
-                <View style={s.infoCol}>
-                  <View style={s.infoTitleRow}>
-                    <View style={[s.labelBadge, { backgroundColor: labelColor + '18', borderColor: labelColor + '40' }]}>
-                      <Text style={[s.labelBadgeText, { color: labelColor }]}>
-                        {LABEL_MAP[row.label] || row.label}
-                      </Text>
-                    </View>
-                    {row.isSplit && (
-                      <View style={[s.labelBadge, { backgroundColor: C.warning + '15', borderColor: C.warning + '30', marginLeft: 4 }]}>
-                        <Ionicons name="git-branch-outline" size={10} color={C.warning} />
-                        <Text style={[s.labelBadgeText, { color: C.warning, marginLeft: 2 }]}>Virada</Text>
-                      </View>
-                    )}
-                  </View>
-
-                  {row.shift.group?.name ? (
-                    <Text style={s.infoGroup} numberOfLines={1}>{row.shift.group.name}</Text>
-                  ) : null}
-
-                  <View style={s.infoHoursRow}>
-                    <Text style={s.infoHours}>
-                      {formatHoursWithExtras(row.plannedMinutes, row.extraMinutes)}
-                    </Text>
-                    {row.extraMinutes !== 0 && (
-                      <Text style={[
-                        s.infoExtraLabel,
-                        { color: row.extraMinutes > 0 ? C.success : C.error }
-                      ]}>
-                        {row.extraMinutes > 0 ? 'c/ extras' : 'c/ faltas'}
-                      </Text>
-                    )}
-                  </View>
+                <View style={[s.reportColorBar, { backgroundColor: labelColor }]} />
+                <View style={s.reportInfoCol}>
+                  <Text style={s.reportInstitution} numberOfLines={1}>
+                    {row.shift.group?.institution?.name || row.shift.group?.name || '—'}
+                  </Text>
+                  <Text style={s.reportMeta}>
+                    {TimeUtils.minutesToDisplay(row.totalMinutes)} · {LABEL_MAP[row.label] || row.label}
+                    {delta ? <Text style={{ color: row.extraMinutes > 0 ? C.money : C.error }}>{delta}</Text> : null}
+                  </Text>
                 </View>
-
-                {/* Value column — skeleton while recomputing financials */}
-                <View style={s.valueCol}>
+                <View style={s.reportValueCol}>
                   {computing
-                    ? <SkeletonBox width={52} height={18} style={{ borderRadius: 6, marginBottom: 4 }} />
-                    : <Text style={s.valueText}>{formatMoney(row.value)}</Text>}
-                  <Text style={s.valueLabel}>estimado</Text>
+                    ? <SkeletonBox width={48} height={14} style={{ borderRadius: 4 }} />
+                    : <Text style={s.reportValue}>{formatMoneyCompact(row.value)}</Text>}
+                  {row.extraMinutes > 0 ? (
+                    <Text style={s.reportExtraValue}>+ extras</Text>
+                  ) : null}
                 </View>
               </View>
             );
@@ -431,199 +493,276 @@ export default function ReportsScreen({ onExportReady } = {}) {
         )}
       </View>
 
-      <View style={{ height: 40 }} />
+      {/* Export */}
+      <Pressable style={s.exportButton} onPress={exportCSV}>
+        <Ionicons name="share-outline" size={14} color={C.interactive.active} />
+        <Text style={s.exportButtonText}>Exportar relatório (CSV)</Text>
+      </Pressable>
+
+      <View style={{ height: 20 }} />
     </ScrollView>
   );
 }
 
-const makeStyles = (C) => ({
+const makeStyles = (C) => StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: C.background.secondary,
   },
 
-  monthHeader: {
+  // Hero
+  heroSection: {
+    backgroundColor: C.background.primary,
+    paddingHorizontal: 20,
+    paddingTop: 14,
+    paddingBottom: 14,
+  },
+  heroNav: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: Spacing.lg,
-    paddingVertical: Spacing.lg,
-    backgroundColor: C.background.primary,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: C.border.light,
+    alignItems: 'flex-start',
+  },
+  heroYearLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1,
+    color: C.text.tertiary,
+  },
+  heroValueRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 2,
+    marginTop: 4,
+  },
+  heroValue: {
+    fontFamily: Typography.fontFamily.display,
+    fontSize: 42,
+    fontWeight: '800',
+    color: C.money,
+    letterSpacing: -1,
+  },
+  heroValueCents: {
+    fontSize: 14,
+    color: C.text.secondary,
+  },
+  heroNavBtns: {
+    flexDirection: 'row',
+    gap: 6,
+    marginTop: 4,
   },
   navButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     backgroundColor: C.background.secondary,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: C.border.light,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  monthTitle: {
-    fontSize: Typography.fontSize.title2,
-    fontFamily: Typography.fontFamily.display,
-    color: C.text.primary,
-    textTransform: 'capitalize',
+
+  // Chart
+  chartCard: {
+    backgroundColor: C.background.primary,
+    borderRadius: BorderRadius.lg,
+    marginHorizontal: Spacing.md,
+    marginTop: Spacing.md,
+    padding: 16,
+    paddingBottom: 8,
+    ...Shadows.small,
+  },
+  chartCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'baseline',
+    marginBottom: 14,
+  },
+  chartCardLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: C.text.tertiary,
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+  },
+  chartBars: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 8,
+    height: 110,
+    paddingBottom: 20,
+  },
+  chartBarCol: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+  },
+  chartBarLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: C.money,
+    marginBottom: 4,
+  },
+  chartBar: {
+    width: '100%',
+    borderRadius: 6,
+  },
+  chartMonthLabel: {
+    marginTop: 6,
+    fontSize: 10,
+    color: C.text.tertiary,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
   },
 
-  exportButton: {
-    alignSelf: 'flex-end',
+  // Mini stats
+  miniStatsRow: {
+    flexDirection: 'row',
+    marginHorizontal: Spacing.md,
     marginTop: Spacing.sm,
-    marginRight: Spacing.lg,
-    paddingVertical: Spacing.xs,
+    gap: 8,
+  },
+  miniStat: {
+    flex: 1,
+    backgroundColor: C.background.primary,
+    borderRadius: BorderRadius.md,
+    padding: 12,
+    alignItems: 'center',
+    ...Shadows.small,
+  },
+  miniStatBorder: {},
+  miniStatValue: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: C.text.primary,
+    fontFamily: Typography.fontFamily.display,
+    marginBottom: 2,
+  },
+  miniStatLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: C.text.tertiary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+  },
+
+  // Section label
+  sectionLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: C.text.tertiary,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+    marginHorizontal: 20,
+    marginTop: 20,
+    marginBottom: 8,
+  },
+
+  // List card
+  listCard: {
+    marginHorizontal: Spacing.md,
+    backgroundColor: C.background.primary,
+    borderRadius: BorderRadius.lg,
+    overflow: 'hidden',
+    ...Shadows.small,
+  },
+  reportRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 0,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: C.border.light,
+    paddingLeft: 0,
+  },
+  reportDateCol: {
+    width: 42,
+    alignItems: 'center',
+    paddingLeft: 12,
+  },
+  reportDateDay: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: C.text.primary,
+  },
+  reportDateWeekday: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: C.text.tertiary,
+    textTransform: 'uppercase',
+  },
+  reportColorBar: {
+    width: 6,
+    height: 36,
+    borderRadius: 3,
+    opacity: 0.7,
+  },
+  reportInfoCol: {
+    flex: 1,
+    minWidth: 0,
+  },
+  reportInstitution: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: C.text.primary,
+  },
+  reportMeta: {
+    fontSize: 11,
+    color: C.text.tertiary,
+    marginTop: 1,
+  },
+  reportValueCol: {
+    alignItems: 'flex-end',
+    paddingRight: 12,
+  },
+  reportValue: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: C.money,
+  },
+  reportExtraValue: {
+    fontSize: 10,
+    color: C.warning,
+    fontWeight: '600',
+  },
+
+  // Export
+  exportButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginHorizontal: Spacing.md,
+    marginTop: 18,
+    paddingVertical: 13,
+    borderRadius: BorderRadius.md,
+    backgroundColor: C.background.primary,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: C.border.light,
+    ...Shadows.small,
   },
   exportButtonText: {
-    fontSize: Typography.fontSize.footnote,
-    fontWeight: Typography.fontWeight.medium,
+    fontSize: 14,
+    fontWeight: '700',
     color: C.interactive.active,
   },
 
-  summaryCard: {
-    backgroundColor: C.background.primary,
-    marginHorizontal: Spacing.lg,
-    marginTop: Spacing.lg,
-    borderRadius: BorderRadius.lg,
-    padding: Spacing.lg,
-    ...Shadows.small,
-  },
-  summaryGrid: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  summaryItem: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  summaryDivider: {
-    width: StyleSheet.hairlineWidth,
-    height: 40,
-    backgroundColor: C.border.light,
-    marginHorizontal: Spacing.md,
-  },
-  summaryValue: {
-    fontSize: 18, // Reduzido para caber valores maiores
-    fontWeight: Typography.fontWeight.bold,
-    color: C.primary,
-    marginBottom: 4,
-  },
-  summaryLabel: {
-    fontSize: Typography.fontSize.footnote,
-    fontWeight: Typography.fontWeight.medium,
-    color: C.text.secondary,
-    textTransform: 'uppercase',
-    letterSpacing: 0.4,
-  },
-
-  listSection: {
-    marginTop: Spacing.lg,
-    marginHorizontal: Spacing.lg,
-    gap: Spacing.sm,
-  },
-  shiftRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: C.background.primary,
-    borderRadius: BorderRadius.md,
-    padding: Spacing.md,
-    ...Shadows.small,
-  },
-
-  dateCol: {
-    alignItems: 'center',
-    minWidth: 44,
-    marginRight: Spacing.md,
-  },
-  dateDay: {
-    fontSize: Typography.fontSize.title2,
-    fontWeight: Typography.fontWeight.bold,
-    color: C.primary,
-    lineHeight: Typography.fontSize.title2 * 1.1,
-  },
-  dateMonth: {
-    fontSize: Typography.fontSize.caption1,
-    fontWeight: Typography.fontWeight.medium,
-    color: C.text.secondary,
-    textTransform: 'uppercase',
-  },
-
-  infoCol: {
-    flex: 1,
-    gap: 3,
-  },
-  infoTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    marginBottom: 2,
-  },
-  labelBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderRadius: 6,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-  },
-  labelBadgeText: {
-    fontSize: Typography.fontSize.caption1,
-    fontWeight: Typography.fontWeight.semiBold,
-  },
-  infoGroup: {
-    fontSize: Typography.fontSize.subhead,
-    color: C.text.secondary,
-  },
-  infoHoursRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.sm,
-  },
-  infoHours: {
-    fontSize: Typography.fontSize.footnote,
-    fontWeight: Typography.fontWeight.medium,
-    color: C.text.secondary,
-  },
-  infoExtra: {
-    fontSize: Typography.fontSize.footnote,
-    fontWeight: Typography.fontWeight.semiBold,
-  },
-  infoExtraLabel: {
-    fontSize: Typography.fontSize.caption1,
-    fontWeight: Typography.fontWeight.medium,
-    fontStyle: 'italic',
-    marginLeft: Spacing.xs,
-  },
-
-  valueCol: {
-    alignItems: 'flex-end',
-    minWidth: 72,
-    marginLeft: Spacing.sm,
-  },
-  valueText: {
-    fontSize: 14, // Reduzido para caber valores maiores
-    fontWeight: Typography.fontWeight.bold,
-    color: C.text.primary,
-  },
-  valueLabel: {
-    fontSize: Typography.fontSize.caption1,
-    color: C.text.tertiary,
-    marginTop: 2,
-  },
-
+  // Empty
   empty: {
     alignItems: 'center',
-    paddingVertical: 48,
-    paddingHorizontal: Spacing.lg,
-    gap: Spacing.sm,
+    paddingVertical: 32,
+    gap: 8,
   },
   emptyText: {
-    fontSize: Typography.fontSize.body,
-    fontWeight: Typography.fontWeight.semiBold,
-    color: C.text.primary,
+    fontSize: 13,
+    fontWeight: '600',
+    color: C.text.secondary,
   },
   emptySubtext: {
     fontSize: Typography.fontSize.subhead,
-    color: C.text.secondary,
+    color: C.text.tertiary,
     textAlign: 'center',
   },
 });
+

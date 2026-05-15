@@ -8,22 +8,39 @@ import {
   Pressable,
   Animated,
   Easing,
+  Keyboard,
+  Platform,
 } from 'react-native';
-import { IconX, IconClock, IconArrowRight, IconCheck } from '@tabler/icons-react-native';
-import { useColors, Typography, Spacing, BorderRadius } from '../constants/DesignSystem';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
+import { useColors, Typography } from '../constants/DesignSystem';
 
 const SPRING = { damping: 22, stiffness: 320, mass: 0.8, useNativeDriver: true };
 
 const HoursEditModal = ({ visible, onClose, onSave, shift, currentHours = {} }) => {
   const C = useColors();
+  const insets = useSafeAreaInsets();
   const [startTime, setStartTime] = useState('');
   const [endTime, setEndTime] = useState('');
   const [startErr, setStartErr] = useState(null);
   const [endErr, setEndErr] = useState(null);
+  const [focusedField, setFocusedField] = useState(null);
   const endRef = useRef(null);
+  const startRef = useRef(null);
 
-  const slideY = useRef(new Animated.Value(400)).current;
+  const slideY = useRef(new Animated.Value(500)).current;
   const backdropOpacity = useRef(new Animated.Value(0)).current;
+  const keyboardOffset = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const onShow = (e) => Animated.spring(keyboardOffset, { toValue: -e.endCoordinates.height, ...SPRING }).start();
+    const onHide = () => Animated.spring(keyboardOffset, { toValue: 0, ...SPRING }).start();
+    const sub1 = Keyboard.addListener(showEvent, onShow);
+    const sub2 = Keyboard.addListener(hideEvent, onHide);
+    return () => { sub1.remove(); sub2.remove(); };
+  }, []);
 
   useEffect(() => {
     if (visible) {
@@ -31,7 +48,9 @@ const HoursEditModal = ({ visible, onClose, onSave, shift, currentHours = {} }) 
       setEndTime(currentHours.endTime || '');
       setStartErr(null);
       setEndErr(null);
-      slideY.setValue(400);
+      setFocusedField(null);
+      keyboardOffset.setValue(0);
+      slideY.setValue(500);
       backdropOpacity.setValue(0);
       Animated.parallel([
         Animated.spring(slideY, { toValue: 0, ...SPRING }),
@@ -41,8 +60,9 @@ const HoursEditModal = ({ visible, onClose, onSave, shift, currentHours = {} }) 
   }, [visible]);
 
   const close = () => {
+    Keyboard.dismiss();
     Animated.parallel([
-      Animated.timing(slideY, { toValue: 400, duration: 240, easing: Easing.in(Easing.quad), useNativeDriver: true }),
+      Animated.timing(slideY, { toValue: 500, duration: 240, easing: Easing.in(Easing.quad), useNativeDriver: true }),
       Animated.timing(backdropOpacity, { toValue: 0, duration: 200, easing: Easing.in(Easing.quad), useNativeDriver: true }),
     ]).start(() => onClose());
   };
@@ -75,7 +95,15 @@ const HoursEditModal = ({ visible, onClose, onSave, shift, currentHours = {} }) 
   const fmtMin = (min) => {
     if (min == null) return '—';
     const h = Math.floor(min / 60), m = min % 60;
-    return m === 0 ? `${h}h` : `${h}h${String(m).padStart(2, '0')}`;
+    return m === 0 ? `${h}h` : `${h}h ${String(m).padStart(2, '0')}min`;
+  };
+
+  const fmtDate = (dateStr) => {
+    if (!dateStr) return '';
+    const d = new Date(dateStr + 'T00:00:00');
+    const days = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+    const months = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+    return `${days[d.getDay()]}, ${d.getDate()} ${months[d.getMonth()]}`;
   };
 
   const getPredicted = () => {
@@ -99,132 +127,185 @@ const HoursEditModal = ({ visible, onClose, onSave, shift, currentHours = {} }) 
     }
   };
 
+  const handleClear = () => {
+    setStartTime('');
+    setEndTime('');
+    setStartErr(null);
+    setEndErr(null);
+    startRef.current?.focus();
+  };
+
   const predicted = getPredicted();
   const predMin = calcDuration(predicted.start, predicted.end);
   const realMin = calcDuration(startTime, endTime);
   const diffMin = predMin != null && realMin != null ? realMin - predMin : null;
   const canSave = startTime.length === 5 && endTime.length === 5 && !startErr && !endErr;
 
-  const shiftLabel = { M: 'Manhã', T: 'Tarde', N: 'Noite' }[shift?.label?.charAt(0)] || 'Plantão';
+  const institution = shift?.group?.institution?.name || 'Plantão';
+  const groupName = shift?.group?.name || '';
+  const groupColor = shift?.group?.color || C.primary;
+  const dateLabel = fmtDate(shift?.date);
 
   if (!visible) return null;
 
   return (
     <Modal visible={visible} transparent animationType="none" onRequestClose={close}>
-      {/* Backdrop */}
       <Animated.View style={[s.backdrop, { opacity: backdropOpacity }]} />
       <Pressable style={StyleSheet.absoluteFill} onPress={close} />
 
-      {/* Sheet */}
-      <Animated.View style={[s.sheet, { backgroundColor: C.background.primary, transform: [{ translateY: slideY }] }]}>
+      <Animated.View
+        style={[
+          s.sheet,
+          { backgroundColor: C.background.primary, paddingBottom: insets.bottom || 16 },
+          { transform: [{ translateY: Animated.add(slideY, keyboardOffset) }] },
+        ]}
+      >
         {/* Handle */}
         <View style={[s.handle, { backgroundColor: C.border.medium }]} />
 
         {/* Header */}
         <View style={s.header}>
-          <View style={[s.iconBadge, { backgroundColor: C.primary + '18' }]}>
-            <IconClock size={20} color={C.primary} strokeWidth={2} />
-          </View>
           <View style={{ flex: 1 }}>
-            <Text style={[s.title, { color: C.text.primary }]}>Ajustar horas</Text>
-            <Text style={[s.subtitle, { color: C.text.secondary }]}>
-              {shiftLabel}{shift?.group?.name ? ` · ${shift.group.name}` : ''}
-            </Text>
+            <Text style={[s.eyebrow, { color: C.text.tertiary }]}>Registrar horas</Text>
+            <Text style={[s.institution, { color: C.text.primary }]}>{institution}</Text>
+            <View style={s.metaRow}>
+              <View style={[s.groupDot, { backgroundColor: groupColor }]} />
+              <Text style={[s.metaText, { color: C.text.secondary }]}>{groupName}</Text>
+              {dateLabel ? (
+                <>
+                  <Text style={[s.metaDot, { color: C.text.tertiary }]}>·</Text>
+                  <Text style={[s.metaDate, { color: C.text.tertiary }]}>{dateLabel}</Text>
+                </>
+              ) : null}
+            </View>
           </View>
           <Pressable onPress={close} style={[s.closeBtn, { backgroundColor: C.background.secondary }]} hitSlop={8}>
-            <IconX size={18} color={C.text.tertiary} strokeWidth={2} />
+            <Ionicons name="close" size={16} color={C.text.secondary} />
           </Pressable>
         </View>
 
-        {/* Predicted time pill */}
-        <View style={[s.predictedPill, { backgroundColor: C.background.secondary }]}>
-          <Text style={[s.predictedLabel, { color: C.text.tertiary }]}>Previsto</Text>
-          <Text style={[s.predictedValue, { color: C.text.secondary }]}>
+        {/* Hairline */}
+        <View style={[s.hairline, { backgroundColor: C.border.light }]} />
+
+        {/* Reference row */}
+        <View style={[s.refRow, { backgroundColor: C.background.secondary }]}>
+          <View style={s.refLeft}>
+            <Ionicons name="time-outline" size={14} color={C.text.tertiary} />
+            <Text style={[s.refLabel, { color: C.text.secondary }]}>
+              Escalado · {predMin != null ? fmtMin(predMin) : '—'}
+            </Text>
+          </View>
+          <Text style={[s.refTime, { color: C.text.secondary }]}>
             {predicted.start} → {predicted.end}
-            {predMin != null ? `  ·  ${fmtMin(predMin)}` : ''}
           </Text>
         </View>
 
-        {/* Time inputs */}
-        <View style={s.inputRow}>
+        {/* Inputs */}
+        <View style={s.inputGrid}>
           <View style={{ flex: 1 }}>
-            <Text style={[s.inputLabel, { color: C.text.tertiary }]}>Entrada real</Text>
-            <TextInput
-              style={[s.input, { color: C.text.primary, borderColor: startErr ? C.error : startTime.length === 5 ? C.primary : C.border.light, backgroundColor: C.background.secondary }]}
-              value={startTime}
-              onChangeText={(t) => { setStartTime(fmt(t)); setStartErr(null); if (fmt(t).length === 5) endRef.current?.focus(); }}
-              keyboardType="numeric"
-              placeholder={predicted.start}
-              placeholderTextColor={C.text.quaternary}
-              maxLength={5}
-            />
+            <Text style={[s.inputLabel, { color: C.text.tertiary }]}>Início real</Text>
+            <View style={[
+              s.inputBox,
+              { backgroundColor: focusedField === 'start' ? C.accentSoft : C.background.secondary },
+              { borderColor: startErr ? C.error : focusedField === 'start' ? C.primary : C.border.light },
+            ]}>
+              <TextInput
+                ref={startRef}
+                style={[s.inputText, { color: C.text.primary }]}
+                value={startTime}
+                onChangeText={(t) => {
+                  const v = fmt(t);
+                  setStartTime(v);
+                  setStartErr(null);
+                  if (v.length === 5) endRef.current?.focus();
+                }}
+                onFocus={() => setFocusedField('start')}
+                onBlur={() => { setFocusedField(null); if (startTime.length > 0) setStartErr(validateTime(startTime)); }}
+                keyboardType="numeric"
+                placeholder={predicted.start}
+                placeholderTextColor={C.text.quaternary}
+                maxLength={5}
+              />
+            </View>
             {startErr ? <Text style={[s.errText, { color: C.error }]}>{startErr}</Text> : null}
           </View>
 
-          <View style={[s.arrowWrap]}>
-            <IconArrowRight size={18} color={C.text.quaternary} strokeWidth={2} />
-          </View>
-
           <View style={{ flex: 1 }}>
-            <Text style={[s.inputLabel, { color: C.text.tertiary }]}>Saída real</Text>
-            <TextInput
-              ref={endRef}
-              style={[s.input, { color: C.text.primary, borderColor: endErr ? C.error : endTime.length === 5 ? C.primary : C.border.light, backgroundColor: C.background.secondary }]}
-              value={endTime}
-              onChangeText={(t) => { setEndTime(fmt(t)); setEndErr(null); }}
-              keyboardType="numeric"
-              placeholder={predicted.end}
-              placeholderTextColor={C.text.quaternary}
-              maxLength={5}
-            />
+            <Text style={[s.inputLabel, { color: C.text.tertiary }]}>Fim real</Text>
+            <View style={[
+              s.inputBox,
+              { backgroundColor: focusedField === 'end' ? C.accentSoft : C.background.secondary },
+              { borderColor: endErr ? C.error : focusedField === 'end' ? C.primary : C.border.light },
+            ]}>
+              <TextInput
+                ref={endRef}
+                style={[s.inputText, { color: C.text.primary }]}
+                value={endTime}
+                onChangeText={(t) => { setEndTime(fmt(t)); setEndErr(null); }}
+                onFocus={() => setFocusedField('end')}
+                onBlur={() => { setFocusedField(null); if (endTime.length > 0) setEndErr(validateTime(endTime)); }}
+                keyboardType="numeric"
+                placeholder={predicted.end}
+                placeholderTextColor={C.text.quaternary}
+                maxLength={5}
+              />
+            </View>
             {endErr ? <Text style={[s.errText, { color: C.error }]}>{endErr}</Text> : null}
           </View>
         </View>
 
-        {/* Summary — only when both times valid */}
-        {canSave && realMin != null && (
-          <View style={[s.summary, { backgroundColor: C.background.secondary }]}>
-            <SummaryItem label="Previsto" value={fmtMin(predMin)} color={C.text.primary} />
-            <View style={[s.summaryDivider, { backgroundColor: C.border.light }]} />
-            <SummaryItem label="Real" value={fmtMin(realMin)} color={C.text.primary} />
-            <View style={[s.summaryDivider, { backgroundColor: C.border.light }]} />
-            <SummaryItem
-              label="Diferença"
-              value={(diffMin >= 0 ? '+' : '') + fmtMin(Math.abs(diffMin))}
-              color={diffMin > 0 ? C.success : diffMin < 0 ? C.warning : C.text.tertiary}
-            />
+        {/* Summary card */}
+        {realMin != null && (
+          <View style={[s.summaryCard, { backgroundColor: C.background.primary, borderColor: C.border.light }]}>
+            <View style={s.summaryRow}>
+              <Text style={[s.summaryLabel, { color: C.text.secondary }]}>Total trabalhado</Text>
+              <Text style={[s.summaryTotal, { color: C.text.primary }]}>{fmtMin(realMin)}</Text>
+            </View>
+            <View style={[s.summaryHairline, { backgroundColor: C.border.light }]} />
+            <View style={s.summaryRow}>
+              <Text style={[s.summaryLabel, { color: C.text.secondary }]}>Diferença</Text>
+              <View style={[s.diffPill, { backgroundColor: diffMin >= 0 ? C.moneySoft : C.error + '18' }]}>
+                <Text style={[s.diffPillText, { color: diffMin >= 0 ? C.money : C.error }]}>
+                  {diffMin >= 0 ? '+' : ''}{fmtMin(Math.abs(diffMin ?? 0))}
+                </Text>
+              </View>
+            </View>
+            {shift?.hourlyRate != null && diffMin != null && (
+              <View style={s.summaryRow}>
+                <Text style={[s.summaryLabel, { color: C.text.secondary }]}>Impacto no valor</Text>
+                <Text style={[s.summaryImpact, { color: C.money }]}>
+                  {diffMin >= 0 ? '+ ' : '– '}R$ {Math.abs(diffMin / 60 * shift.hourlyRate).toFixed(2).replace('.', ',')}
+                </Text>
+              </View>
+            )}
           </View>
         )}
 
-        {/* Buttons */}
-        <View style={s.buttons}>
+        {/* Notes row — shown when keyboard not up */}
+        <Pressable style={[s.notesRow, { borderColor: C.border.light }]}>
+          <Ionicons name="add" size={13} color={C.text.tertiary} />
+          <Text style={[s.notesText, { color: C.text.tertiary }]}>Adicionar observação · ocorrência</Text>
+        </Pressable>
+
+        {/* CTAs */}
+        <View style={s.ctaRow}>
           <Pressable
-            style={({ pressed }) => [s.btn, s.btnSecondary, { borderColor: C.border.light, backgroundColor: pressed ? C.background.secondary : 'transparent' }]}
-            onPress={close}
+            style={({ pressed }) => [s.ctaBtn, s.ctaBtnSecondary, { backgroundColor: pressed ? C.background.secondary : C.background.secondary, borderColor: C.border.light }]}
+            onPress={handleClear}
           >
-            <Text style={[s.btnText, { color: C.text.secondary }]}>Cancelar</Text>
+            <Text style={[s.ctaBtnText, { color: C.text.secondary }]}>Limpar</Text>
           </Pressable>
           <Pressable
-            style={({ pressed }) => [s.btn, s.btnPrimary, { backgroundColor: canSave ? (pressed ? C.primaryDark : C.primary) : C.border.light }]}
+            style={({ pressed }) => [s.ctaBtn, s.ctaBtnPrimary, { backgroundColor: canSave ? C.money : C.border.light, flex: 2, opacity: pressed ? 0.88 : 1 }]}
             onPress={handleSave}
             disabled={!canSave}
           >
-            <IconCheck size={16} color={canSave ? '#fff' : C.text.tertiary} strokeWidth={2.5} />
-            <Text style={[s.btnText, { color: canSave ? '#fff' : C.text.tertiary, marginLeft: 6 }]}>Salvar</Text>
+            <Ionicons name="checkmark" size={15} color={canSave ? '#fff' : C.text.tertiary} strokeWidth={2.6} />
+            <Text style={[s.ctaBtnText, { color: canSave ? '#fff' : C.text.tertiary }]}>Salvar horas</Text>
           </Pressable>
         </View>
       </Animated.View>
     </Modal>
-  );
-};
-
-const SummaryItem = ({ label, value, color }) => {
-  const C = useColors();
-  return (
-    <View style={s.summaryItem}>
-      <Text style={[s.summaryLabel, { color: C.text.tertiary }]}>{label}</Text>
-      <Text style={[s.summaryValue, { color }]}>{value}</Text>
-    </View>
   );
 };
 
@@ -235,148 +316,151 @@ const s = StyleSheet.create({
   },
   sheet: {
     position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
+    bottom: 0, left: 0, right: 0,
     borderTopLeftRadius: 28,
     borderTopRightRadius: 28,
-    paddingBottom: 36,
   },
   handle: {
-    width: 36,
-    height: 4,
-    borderRadius: 2,
+    width: 36, height: 4, borderRadius: 2,
     alignSelf: 'center',
-    marginTop: 10,
-    marginBottom: 4,
+    marginTop: 10, marginBottom: 4,
   },
+
   header: {
     flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: Spacing.lg,
-    paddingTop: Spacing.md,
-    paddingBottom: Spacing.sm,
-    gap: Spacing.sm,
-  },
-  iconBadge: {
-    width: 40,
-    height: 40,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  title: {
-    fontSize: Typography.fontSize.headline,
-    fontWeight: Typography.fontWeight.semiBold,
-    fontFamily: Typography.fontFamily.semiBold,
-  },
-  subtitle: {
-    fontSize: Typography.fontSize.caption1,
-    marginTop: 1,
-  },
-  closeBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  predictedPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginHorizontal: Spacing.lg,
-    marginBottom: Spacing.lg,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: 8,
-    borderRadius: BorderRadius.md,
-  },
-  predictedLabel: {
-    fontSize: Typography.fontSize.caption1,
-    fontWeight: Typography.fontWeight.semiBold,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  predictedValue: {
-    fontSize: Typography.fontSize.footnote,
-  },
-  inputRow: {
-    flexDirection: 'row',
     alignItems: 'flex-start',
-    paddingHorizontal: Spacing.lg,
-    gap: 0,
-    marginBottom: Spacing.md,
+    paddingHorizontal: 18,
+    paddingTop: 6,
+    paddingBottom: 14,
   },
-  arrowWrap: {
-    paddingTop: 34,
-    paddingHorizontal: 8,
+  eyebrow: {
+    fontSize: 11, fontWeight: '700',
+    letterSpacing: 0.8, textTransform: 'uppercase',
+  },
+  institution: {
+    fontSize: 22, fontWeight: '800',
+    fontFamily: Typography.fontFamily.display,
+    letterSpacing: -0.4, marginTop: 2,
+  },
+  metaRow: {
+    flexDirection: 'row', alignItems: 'center',
+    gap: 6, marginTop: 3,
+  },
+  groupDot: {
+    width: 7, height: 7, borderRadius: 4,
+  },
+  metaText: { fontSize: 12, fontWeight: '500' },
+  metaDot: { fontSize: 12 },
+  metaDate: { fontSize: 12 },
+  closeBtn: {
+    width: 30, height: 30, borderRadius: 15,
+    alignItems: 'center', justifyContent: 'center',
+    marginTop: 2,
+  },
+
+  hairline: { height: StyleSheet.hairlineWidth },
+
+  refRow: {
+    flexDirection: 'row', alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 18, paddingVertical: 12,
+  },
+  refLeft: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  refLabel: { fontSize: 12, fontWeight: '600' },
+  refTime: { fontSize: 12, fontFamily: Typography.fontFamily.semiBold },
+
+  inputGrid: {
+    flexDirection: 'row',
+    gap: 12,
+    paddingHorizontal: 18,
+    paddingTop: 14,
+    paddingBottom: 6,
   },
   inputLabel: {
-    fontSize: Typography.fontSize.caption1,
-    fontWeight: Typography.fontWeight.medium,
-    textTransform: 'uppercase',
-    letterSpacing: 0.4,
-    marginBottom: 8,
+    fontSize: 10.5, fontWeight: '700',
+    letterSpacing: 0.8, textTransform: 'uppercase',
+    marginBottom: 6,
   },
-  input: {
+  inputBox: {
+    borderRadius: 12,
     borderWidth: 1.5,
-    borderRadius: BorderRadius.md,
-    paddingVertical: 14,
-    paddingHorizontal: 12,
-    fontSize: 22,
-    fontWeight: Typography.fontWeight.semiBold,
-    textAlign: 'center',
-    letterSpacing: 1,
-  },
-  errText: {
-    fontSize: Typography.fontSize.caption2,
-    marginTop: 4,
-  },
-  summary: {
-    flexDirection: 'row',
-    marginHorizontal: Spacing.lg,
-    borderRadius: BorderRadius.lg,
-    marginBottom: Spacing.lg,
-    overflow: 'hidden',
-  },
-  summaryItem: {
-    flex: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
     alignItems: 'center',
-    paddingVertical: Spacing.md,
   },
-  summaryDivider: {
-    width: StyleSheet.hairlineWidth,
+  inputText: {
+    fontSize: 26, fontWeight: '600',
+    fontFamily: Typography.fontFamily.semiBold,
+    letterSpacing: 0.4,
+    textAlign: 'center',
+    width: '100%',
   },
-  summaryLabel: {
-    fontSize: Typography.fontSize.caption2,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-    marginBottom: 4,
+  errText: { fontSize: 10, marginTop: 4 },
+
+  summaryCard: {
+    marginHorizontal: 18,
+    marginTop: 8,
+    marginBottom: 0,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingVertical: 4,
+    paddingHorizontal: 14,
   },
-  summaryValue: {
-    fontSize: Typography.fontSize.callout,
-    fontWeight: Typography.fontWeight.semiBold,
-  },
-  buttons: {
+  summaryRow: {
     flexDirection: 'row',
-    gap: Spacing.sm,
-    paddingHorizontal: Spacing.lg,
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 10,
   },
-  btn: {
+  summaryHairline: { height: StyleSheet.hairlineWidth },
+  summaryLabel: { fontSize: 12, fontWeight: '600' },
+  summaryTotal: {
+    fontSize: 16, fontWeight: '700',
+    fontFamily: Typography.fontFamily.semiBold,
+  },
+  diffPill: {
+    paddingHorizontal: 8, paddingVertical: 2,
+    borderRadius: 8,
+  },
+  diffPillText: { fontSize: 11, fontWeight: '700' },
+  summaryImpact: {
+    fontSize: 14, fontWeight: '700',
+    fontFamily: Typography.fontFamily.semiBold,
+  },
+
+  notesRow: {
+    flexDirection: 'row', alignItems: 'center',
+    gap: 8,
+    marginHorizontal: 18,
+    marginTop: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderStyle: 'dashed',
+    borderRadius: 10,
+    paddingHorizontal: 12, paddingVertical: 10,
+  },
+  notesText: { fontSize: 12 },
+
+  ctaRow: {
+    flexDirection: 'row',
+    gap: 10,
+    paddingHorizontal: 18,
+    marginTop: 14,
+  },
+  ctaBtn: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 14,
-    borderRadius: BorderRadius.lg,
+    gap: 8,
+    paddingVertical: 13,
+    borderRadius: 14,
   },
-  btnSecondary: {
-    borderWidth: 1.5,
+  ctaBtnSecondary: {
+    borderWidth: StyleSheet.hairlineWidth,
   },
-  btnPrimary: {},
-  btnText: {
-    fontSize: Typography.fontSize.callout,
-    fontWeight: Typography.fontWeight.semiBold,
+  ctaBtnPrimary: {},
+  ctaBtnText: {
+    fontSize: 14, fontWeight: '700',
     fontFamily: Typography.fontFamily.semiBold,
   },
 });

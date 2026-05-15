@@ -369,6 +369,13 @@ export const AuthProvider = ({ children }) => {
     } catch {}
   };
 
+  const updateUser = async (patch) => {
+    if (!user) return;
+    const updated = { ...user, ...patch };
+    await StorageService.saveUserData(updated).catch(() => {});
+    setUser(updated);
+  };
+
   const value = {
     isAuthenticated,
     user,
@@ -380,6 +387,7 @@ export const AuthProvider = ({ children }) => {
     logout,
     updatePhoto,
     completeOnboarding,
+    updateUser,
   };
 
   return (

@@ -1,5 +1,5 @@
 import 'react-native-gesture-handler';
-import React, { useContext, useState, useEffect } from 'react';
+import React, { useContext } from 'react';
 import { View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 // import * as Font from 'expo-font'; // uncomment when adding custom fonts
@@ -7,8 +7,7 @@ import { AuthProvider } from './src/context/AuthContext';
 import { ShiftsProvider } from './src/contexts/ShiftsContext';
 import { GroupsProvider } from './src/contexts/GroupsContext';
 import { ThemeProvider } from './src/contexts/ThemeContext';
-import LoginScreen from './src/screens/LoginScreen';
-import SignupScreen from './src/screens/SignupScreen';
+import AuthScreen from './src/screens/AuthScreen';
 import MainScreen from './src/screens/MainScreen';
 import { AuthContext } from './src/context/AuthContext';
 import OnboardingScreen from './src/screens/OnboardingScreen';
@@ -32,21 +31,16 @@ function useCachedFonts() {
   // return loaded;
 }
 
+
 function RootNavigator() {
   const { isAuthenticated, user, completeOnboarding } = useContext(AuthContext);
-  const [showSignup, setShowSignup] = useState(false);
-
-  useEffect(() => {
-    if (!isAuthenticated) setShowSignup(false);
-  }, [isAuthenticated]);
 
   if (isAuthenticated && user?.showOnboarding) {
     return <OnboardingScreen onDone={completeOnboarding} />;
   }
-
   if (isAuthenticated) return <MainScreen />;
-  if (showSignup) return <SignupScreen onBack={() => setShowSignup(false)} />;
-  return <LoginScreen onShowSignup={() => setShowSignup(true)} />;
+
+  return <AuthScreen />;
 }
 
 export default function App() {

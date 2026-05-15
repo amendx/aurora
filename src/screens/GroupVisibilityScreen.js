@@ -76,7 +76,9 @@ const GroupVisibilityScreen = ({ navigation }) => {
     await saveGroupVisibility(userId, enabledIds);
     // Invalidate coworkers cache so "Quem está também" reflects new group selection
     TodayCoworkersService.clear();
-    TodayCoworkersService.compute(userId, token, userId).catch(() => {});
+    if (user?.source !== 'aurora') {
+      TodayCoworkersService.compute(userId, token, userId).catch(() => {});
+    }
     setSaving(false);
     navigation?.goBack();
   };

@@ -87,21 +87,21 @@ const TabBar = ({ currentTab, onTabPress }) => {
               hitSlop={Spacing.sm}
             >
               <Animated.View style={[s.tabContent, { transform: [{ scale: scaleAnim }] }]}>
-                {/* Active background fade */}
+                {/* Soft teal circle behind active icon */}
                 <Animated.View
                   style={[
                     StyleSheet.absoluteFill,
                     s.tabBg,
-                    { backgroundColor: C.background.secondary, opacity: bgOpacity },
+                    { backgroundColor: C.accentSoft, opacity: bgOpacity },
                   ]}
                 />
                 <Ionicons
                   name={isActive ? tab.iconActive : tab.icon}
-                  size={24}
+                  size={22}
                   color={isActive ? C.interactive.active : C.interactive.inactive}
                   style={s.tabIcon}
                 />
-                {/* Active pill indicator — fade in/out */}
+                {/* Small dot below active icon */}
                 <Animated.View
                   style={[s.pillIndicator, { backgroundColor: C.interactive.active, opacity: pillOpacity }]}
                 />
@@ -120,8 +120,8 @@ const s = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
-    paddingHorizontal: Spacing.md,
-    paddingBottom: Spacing.md,
+    paddingHorizontal: 22,
+    paddingBottom: Spacing.sm,
     backgroundColor: 'transparent',
   },
   tabBar: {
@@ -129,33 +129,33 @@ const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-around',
     borderRadius: BorderRadius.xxl,
-    height: 68,
-    paddingHorizontal: Spacing.lg,
+    height: 56,
+    paddingHorizontal: Spacing.sm,
     borderWidth: StyleSheet.hairlineWidth,
   },
   tab: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: Spacing.sm,
+    height: '100%',
   },
   tabContent: {
     alignItems: 'center',
     justifyContent: 'center',
-    width: 50,
-    height: 50,
-    borderRadius: 25,
+    width: 44,
+    height: 44,
+    borderRadius: 14,
     overflow: 'hidden',
   },
   tabBg: {
-    borderRadius: 25,
+    borderRadius: 14,
   },
   tabIcon: { zIndex: 1 },
   pillIndicator: {
     position: 'absolute',
-    bottom: 4,
-    width: 20,
-    height: 3,
+    bottom: 6,
+    width: 4,
+    height: 4,
     borderRadius: BorderRadius.pill,
     zIndex: 1,
   },

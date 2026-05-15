@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { useColorScheme, Appearance } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import Logger from '../utils/Logger';
 
 const THEME_KEY = '@aurora_theme';
 
@@ -32,16 +33,23 @@ const _loadFromFirestore = async (userId) => {
 
 export const ThemeProvider = ({ children }) => {
   const systemScheme = useColorScheme();
+  const [systemOverride, setSystemOverride] = useState(() => Appearance.getColorScheme());
   const [preference, setPreference] = useState('system');
   const [userId, setUserId] = useState(null);
 
-  // Load from AsyncStorage on mount
+  // Appearance.addChangeListener is the reliable cross-env listener (Expo Go + standalone)
+  useEffect(() => {
+    const sub = Appearance.addChangeListener(({ colorScheme }) => {
+      Logger.info(`[Theme] Appearance changed → ${colorScheme}`);
+      setSystemOverride(colorScheme);
+    });
+    return () => sub.remove();
+  }, []);
+
+  // Load saved preference from AsyncStorage on mount
   useEffect(() => {
     AsyncStorage.getItem(THEME_KEY).then(v => {
-      if (v === 'light' || v === 'dark' || v === 'system') {
-        setPreference(v);
-        Appearance.setColorScheme(v === 'system' ? null : v);
-      }
+      if (v === 'light' || v === 'dark' || v === 'system') setPreference(v);
     });
   }, []);
 
@@ -52,8 +60,7 @@ export const ThemeProvider = ({ children }) => {
       if (v) {
         setPreference(v);
         AsyncStorage.setItem(THEME_KEY, v);
-        Appearance.setColorScheme(v === 'system' ? null : v);
-        console.log(`[Theme] loaded from Firestore → ${v}`);
+        Logger.info(`[Theme] loaded from Firestore → ${v}`);
       }
     });
   }, [userId]);
@@ -61,16 +68,16 @@ export const ThemeProvider = ({ children }) => {
   const setTheme = async (value) => {
     setPreference(value);
     await AsyncStorage.setItem(THEME_KEY, value);
-    Appearance.setColorScheme(value === 'system' ? null : value);
     _saveToFirestore(userId, value);
-    console.log(`[Theme] set → ${value} | system: ${systemScheme} | isDark: ${value === 'dark' || (value === 'system' && systemScheme === 'dark')}`);
   };
 
-  const isDark = preference === 'dark' || (preference === 'system' && systemScheme === 'dark');
+  // systemOverride from the listener is authoritative; systemScheme is fallback for initial value
+  const resolvedSystem = systemOverride ?? systemScheme;
+  const isDark = preference === 'dark' || (preference === 'system' && resolvedSystem === 'dark');
 
   useEffect(() => {
-    console.log(`[Theme] active → preference: ${preference} | system: ${systemScheme} | isDark: ${isDark}`);
-  }, [isDark, preference]);
+    Logger.info(`[Theme] preference: ${preference} | system: ${resolvedSystem} | isDark: ${isDark}`);
+  }, [isDark, preference, resolvedSystem]);
 
   return (
     <ThemeContext.Provider value={{ isDark, preference, setTheme, setUserId }}>
