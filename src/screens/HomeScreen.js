@@ -12,10 +12,12 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AuthContext } from '../context/AuthContext';
 import { useShifts } from '../contexts/ShiftsContext';
-import { useColors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
+import { useColors, Typography, Spacing, Shadows } from '../constants/DesignSystem';
 import ShiftBottomSheet from '../components/ShiftBottomSheet';
 import TodayCoworkersService from '../services/TodayCoworkersService';
 import { getGroupColors } from '../utils/GroupColorConfig';
+import LocalCache from '../services/LocalCache';
+import { getShiftValues, getFullShiftConfig, calculateShiftValueSync } from '../utils/ShiftValueCalculator';
 
 // ── Skeleton ──────────────────────────────────────────────────────────────────
 const SkeletonBox = ({ width = '100%', height = 20, style }) => {
@@ -39,22 +41,63 @@ const SkeletonBox = ({ width = '100%', height = 20, style }) => {
 };
 // ─────────────────────────────────────────────────────────────────────────────
 
-const LABEL_MAP = { M: 'Manhã', T: 'Tarde', N: 'Noite' };
+const LABEL_MAP = { M: 'Manhã', T: 'Tarde', N: 'Noite', D: 'Noite', FN: 'Sex. Noite' };
+
+// Shift type → accent color
+const SHIFT_TYPE_COLOR = {
+  M:  '#3FA9A7',
+  T:  '#97CAFC',
+  N:  '#5B6FBF',
+  D:  '#5B6FBF',
+  FN: '#E08A00',
+};
+
+const fmtBRLk = (v) => {
+  if (!v || isNaN(v)) return 'R$ —';
+  if (v >= 1000) return 'R$ ' + (v / 1000).toFixed(1).replace('.', ',') + 'k';
+  return 'R$ ' + v.toFixed(2).replace('.', ',');
+};
+
+// Parse "07h00 – 13h00 (M)" or "07:00 - 13:00" → "07:00–13:00"
+const parseShiftTime = (timeStr) => {
+  if (!timeStr) return null;
+  const norm = s => s.replace(/h/i, ':').replace(/\s*\([^)]*\)/, '').trim();
+  let parts = timeStr.split(' – ');
+  if (parts.length !== 2) parts = timeStr.split(' - ');
+  if (parts.length !== 2) return null;
+  return `${norm(parts[0])}–${norm(parts[1])}`;
+};
 
 const HomeScreen = ({ navigation }) => {
   const { user } = useContext(AuthContext);
-  const { daysWithShifts, loading, loadMonthlyShifts } = useShifts();
+  const { daysWithShifts, totalShifts, hoursReport, loading, loadedFor, loadMonthlyShifts, monthSummary: contextSummary } = useShifts();
   const [refreshing, setRefreshing] = useState(false);
   const [groupColors, setGroupColors] = useState({});
+  const [cachedSummary, setCachedSummary] = useState(null);
+  const monthSummary = contextSummary || cachedSummary;
+  const [prevSummary, setPrevSummary] = useState(null);
+  const [savedValues, setSavedValues] = useState(null);
+  const [loyaltyConfig, setLoyaltyConfig] = useState(null);
   const C = useColors();
   const insets = useSafeAreaInsets();
   const s = makeStyles(C);
 
+  const userId = user?.id || user?.data?.id || 0;
+
   useEffect(() => {
-    const userId = user?.id;
     if (!userId) return;
     getGroupColors(userId).then(setGroupColors);
-  }, [user?.id]);
+    getShiftValues().then(v => setSavedValues(v)).catch(() => {});
+    getFullShiftConfig().then(cfg => setLoyaltyConfig(cfg)).catch(() => {});
+
+    const now = new Date();
+    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    LocalCache.getSummary(userId, monthKey).then(s => s && setCachedSummary(s)).catch(() => {});
+
+    const prevDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const prevKey = `${prevDate.getFullYear()}-${String(prevDate.getMonth() + 1).padStart(2, '0')}`;
+    LocalCache.getSummary(userId, prevKey).then(s => s && setPrevSummary(s)).catch(() => {});
+  }, [userId]);
 
   const [bsVisible, setBsVisible] = useState(false);
   const [bsShifts, setBsShifts] = useState([]);
@@ -67,22 +110,22 @@ const HomeScreen = ({ navigation }) => {
     setRefreshing(false);
   };
 
+  const loadedForRef = useRef(loadedFor);
+  useEffect(() => { loadedForRef.current = loadedFor; }, [loadedFor]);
+
   useEffect(() => {
-    const reload = () => {
+    const reload = (force = false) => {
       const now = new Date();
-      loadMonthlyShifts(now.getMonth() + 1, now.getFullYear());
+      const m = now.getMonth() + 1;
+      const y = now.getFullYear();
+      const key = `${y}-${m}`;
+      if (!force && loadedForRef.current === key && !loading) return;
+      loadMonthlyShifts(m, y);
     };
     reload();
-    const unsubscribe = navigation?.addListener?.('focus', reload);
+    const unsubscribe = navigation?.addListener?.('focus', () => reload(true));
     return unsubscribe;
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const getGreeting = () => {
-    const h = new Date().getHours();
-    if (h < 12) return 'Bom dia';
-    if (h < 18) return 'Boa tarde';
-    return 'Boa noite';
-  };
 
   const allShifts = (daysWithShifts || []).flatMap(d => d.shifts || []);
 
@@ -92,14 +135,6 @@ const HomeScreen = ({ navigation }) => {
   const upcomingShifts = allShifts
     .filter(s => new Date(s.date + 'T00:00:00') >= today)
     .slice(0, 5);
-
-  const heroShift = upcomingShifts[0] || null;
-  const listShifts = upcomingShifts.slice(1);
-
-  const stats = {
-    total: (daysWithShifts || []).reduce((sum, d) => sum + (d.shiftsCount || 0), 0),
-    upcoming: upcomingShifts.length,
-  };
 
   const openShiftBottomSheet = (shift) => {
     const dayData = (daysWithShifts || []).find(d => d.date === shift.date);
@@ -113,157 +148,146 @@ const HomeScreen = ({ navigation }) => {
     return raw ? (raw.startsWith('#') ? raw : `#${raw}`) : C.primary;
   };
 
-  const shiftColor = (shift) => {
-    const key = shift.label?.charAt(0);
-    return key === 'M' ? C.success : key === 'N' ? C.warning : C.primary;
+  const shiftTypeKey = (shift) => {
+    if (shift.carryover) return 'D';
+    const k = shift.label?.charAt(0);
+    // Detect FN: friday night
+    if (shift.label === 'FN') return 'FN';
+    return k || 'M';
   };
 
-  const shiftLabel = (shift) => LABEL_MAP[shift.label] || shift.label || 'Plantão';
+  const shiftLabel = (shift) => LABEL_MAP[shift.label] || LABEL_MAP[shiftTypeKey(shift)] || shift.label || 'Plantão';
 
-  const formatShiftDate = (shift) => {
-    const d = new Date(shift.date + 'T00:00:00');
-    const diff = Math.round((d - today) / 86400000);
-    if (diff === 0) return 'Hoje';
-    if (diff === 1) return 'Amanhã';
-    return d.toLocaleDateString('pt-BR', { weekday: 'short', day: 'numeric', month: 'short' });
-  };
-
-  const formatTime = (time) => {
-    if (!time) return '';
-    const [h, m] = time.split(':');
-    return `${h}h${m && m !== '00' ? m : ''}`;
-  };
-
-  // ── Hero Header ──────────────────────────────────────────────────────────────
+  // ── Header ───────────────────────────────────────────────────────────────────
   const renderHeader = () => {
     const firstName = user?.name?.split(' ')[0] || 'Usuário';
     const now = new Date();
-    const dateStr = now.toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' });
+    const dateStr = now.toLocaleDateString('pt-BR', { weekday: 'short', day: 'numeric', month: 'short' });
 
     return (
-      <View style={[s.header, { paddingTop: Spacing.xl }]}>
+      <View style={[s.header, { paddingTop: Spacing.lg }]}>
         <View style={s.headerTop}>
           <View style={s.headerLeft}>
             <Text style={s.headerDate}>{dateStr}</Text>
-            <Text style={s.headerGreeting}>{getGreeting()},</Text>
-            <Text style={s.headerName}>{firstName}</Text>
+            <Text style={s.headerGreeting}>Olá, {firstName}</Text>
           </View>
-          <Pressable style={s.avatarRing} onPress={() => navigation?.navigate?.('profile')}>
+          <Pressable style={s.avatarWrap} onPress={() => navigation?.navigate?.('profile')}>
             {user?.photo ? (
               <Image source={{ uri: user.photo }} style={s.avatarImg} />
             ) : (
-              <View style={[s.avatarPlaceholder, { backgroundColor: C.primary + '20' }]}>
+              <View style={[s.avatarFallback, { backgroundColor: C.accentSoft }]}>
                 <Text style={s.avatarInitial}>{firstName.charAt(0).toUpperCase()}</Text>
               </View>
             )}
+            <View style={s.avatarStatusDot} />
           </Pressable>
         </View>
+      </View>
+    );
+  };
 
-        {/* Stats pills */}
-        <View style={s.statsRow}>
-          <View style={s.statPill}>
-            <Text style={s.statPillNumber}>{loading ? '—' : stats.total}</Text>
-            <Text style={s.statPillLabel}>este mês</Text>
+  // ── Hero card ─────────────────────────────────────────────────────────────────
+  const renderHeroCard = () => {
+    const now = new Date();
+    const monthName = now.toLocaleDateString('pt-BR', { month: 'long' });
+
+    const projected = monthSummary
+      ? (monthSummary.totalGrossValue || 0) + (monthSummary.totalLoyaltyValue || 0) + (monthSummary.totalBonusValue || 0)
+      : null;
+
+    const prevProjected = prevSummary
+      ? (prevSummary.totalGrossValue || 0) + (prevSummary.totalLoyaltyValue || 0) + (prevSummary.totalBonusValue || 0)
+      : null;
+
+    const deltaPct = projected != null && prevProjected && prevProjected > 0
+      ? Math.round(((projected - prevProjected) / prevProjected) * 100)
+      : null;
+
+    const totalHours = hoursReport?.standardHours != null
+      ? Math.round(hoursReport.standardHours)
+      : monthSummary
+        ? Math.round((monthSummary.totalScheduledMinutes || 0) / 60)
+        : null;
+
+    const remaining = upcomingShifts.length;
+
+    // Fidelização — show the % tier the user has already unlocked based on hours done
+    const loyaltyTiers = loyaltyConfig?.loyaltyOptions;
+    const earnedTier = loyaltyTiers?.length > 0 && totalHours != null
+      ? [...loyaltyTiers]
+          .sort((a, b) => b.minHours - a.minHours)
+          .find(o => totalHours >= o.minHours)
+      : null;
+    const loyaltyPct = earnedTier ? earnedTier.percentage : null;
+
+    return (
+      <View style={s.heroWrap}>
+        <View style={s.heroCard}>
+          <Text style={s.heroLabel}>Ganhos previstos · {monthName}</Text>
+          <Text style={s.heroValue}>
+            {loading ? '—' : projected != null ? fmtBRLk(projected) : '—'}
+          </Text>
+          <View style={s.heroSubRow}>
+            {deltaPct != null && (
+              <View style={[s.deltaBadge, { backgroundColor: deltaPct >= 0 ? C.moneySoft : C.warningSoft }]}>
+                <Ionicons
+                  name={deltaPct >= 0 ? 'arrow-up' : 'arrow-down'}
+                  size={10}
+                  color={deltaPct >= 0 ? C.money : C.warning}
+                />
+                <Text style={[s.deltaBadgeText, { color: deltaPct >= 0 ? C.money : C.warning }]}>
+                  {Math.abs(deltaPct)}%
+                </Text>
+              </View>
+            )}
+            {prevProjected != null && (
+              <Text style={s.heroDeltaRef}>vs. mês ant. · {fmtBRLk(prevProjected)}</Text>
+            )}
           </View>
-          <View style={s.statDivider} />
-          <View style={s.statPill}>
-            <Text style={s.statPillNumber}>{loading ? '—' : stats.upcoming}</Text>
-            <Text style={s.statPillLabel}>próximos</Text>
-          </View>
-          <View style={s.statDivider} />
-          <View style={s.statPill}>
-            <Text style={s.statPillNumber}>{loading ? '—' : Math.max(0, stats.total - stats.upcoming)}</Text>
-            <Text style={s.statPillLabel}>realizados</Text>
+
+          <View style={s.heroDivider} />
+
+          <View style={s.heroStatsRow}>
+            <View style={s.heroStat}>
+              <Text style={s.heroStatValue}>{loading ? '—' : totalShifts ?? '—'}</Text>
+              <Text style={s.heroStatLabel}>plantões</Text>
+            </View>
+            <View style={s.heroStatDivider} />
+            <View style={s.heroStat}>
+              <Text style={s.heroStatValue}>{loading ? '—' : totalHours != null ? totalHours : '—'}</Text>
+              <Text style={s.heroStatLabel}>horas</Text>
+            </View>
+            <View style={s.heroStatDivider} />
+            <View style={s.heroStat}>
+              {loyaltyPct != null ? (
+                <>
+                  <Text style={[s.heroStatValue, { color: C.money }]}>
+                    {loading ? '—' : `${loyaltyPct}%`}
+                  </Text>
+                  <Text style={s.heroStatLabel}>fideliz.</Text>
+                </>
+              ) : (
+                <>
+                  <Text style={[s.heroStatValue, { color: C.warning }]}>{loading ? '—' : remaining}</Text>
+                  <Text style={s.heroStatLabel}>restam</Text>
+                </>
+              )}
+            </View>
           </View>
         </View>
       </View>
     );
   };
 
-  // ── Hero Shift Card ──────────────────────────────────────────────────────────
-  const renderHeroShift = () => {
-    if (loading) {
-      return (
-        <View style={s.heroCard}>
-          <SkeletonBox height={14} width="40%" style={{ marginBottom: 10 }} />
-          <SkeletonBox height={22} width="60%" style={{ marginBottom: 8 }} />
-          <SkeletonBox height={14} width="50%" />
-        </View>
-      );
-    }
-
-    if (!heroShift) {
-      return (
-        <View style={s.heroCardEmpty}>
-          <Ionicons name="moon-outline" size={28} color={C.text.tertiary} />
-          <Text style={s.heroEmptyTitle}>Sem plantões próximos</Text>
-          <Text style={s.heroEmptyText}>Você está em paz por enquanto</Text>
-        </View>
-      );
-    }
-
-    const color = shiftColor(heroShift);
-    const when = formatShiftDate(heroShift);
-    const time = formatTime(heroShift.time);
-    const groupColor = resolveGroupColor(heroShift);
-
-    let coworkers = TodayCoworkersService.getCoworkers(heroShift.id);
-    if (coworkers.length === 0 && heroShift?.originalData?.coworkers?.length > 0) {
-      coworkers = heroShift.originalData.coworkers;
-    }
-
-    return (
-      <Pressable style={[s.heroCard, { overflow: 'hidden' }]} onPress={() => openShiftBottomSheet(heroShift)}>
-        <View style={[s.heroAccentBar, { backgroundColor: color }]} />
-        <View style={s.heroCardInner}>
-          <View style={s.heroTop}>
-            <View style={[s.heroBadge, { backgroundColor: color + '18', borderColor: color + '35' }]}>
-              <Text style={[s.heroBadgeText, { color }]}>{shiftLabel(heroShift)}</Text>
-            </View>
-            <Text style={s.heroWhen}>{when}</Text>
-          </View>
-
-          <Text style={[s.heroValue, { color }]}>
-            {time ? `às ${time}` : 'Horário não definido'}
-          </Text>
-
-          <View style={s.heroMeta}>
-            {heroShift.group?.name && (
-              <View style={s.heroMetaRow}>
-                <View style={[s.heroGroupDot, { backgroundColor: groupColor }]} />
-                <Text style={[s.heroMetaText, { color: groupColor }]} numberOfLines={1}>
-                  {heroShift.group.name}
-                </Text>
-              </View>
-            )}
-            {heroShift.group?.institution?.name && (
-              <View style={s.heroMetaRow}>
-                <Ionicons name="location-outline" size={13} color={C.text.tertiary} />
-                <Text style={s.heroMetaText} numberOfLines={1}>
-                  {heroShift.group.institution.name}
-                </Text>
-              </View>
-            )}
-            {coworkers.length > 0 && (
-              <View style={s.heroMetaRow}>
-                <Ionicons name="people-outline" size={13} color={C.text.tertiary} />
-                <Text style={s.heroMetaText}>
-                  {coworkers.length} colega{coworkers.length !== 1 ? 's' : ''} também
-                </Text>
-              </View>
-            )}
-          </View>
-        </View>
-        <Ionicons name="chevron-forward" size={18} color={C.text.tertiary} style={s.heroChevron} />
-      </Pressable>
-    );
-  };
-
-  // ── Shift List Row ────────────────────────────────────────────────────────────
-  const renderShiftRow = (shift, index) => {
+  // ── Compact Shift Card — unified pattern for all shifts ───────────────────────
+  const renderShiftCard = (shift, index) => {
     const d = new Date(shift.date + 'T00:00:00');
-    const color = shiftColor(shift);
     const groupColor = resolveGroupColor(shift);
+    const timeStr = parseShiftTime(shift.time);
+    const typeKey = shiftTypeKey(shift);
+    const badgeColor = SHIFT_TYPE_COLOR[typeKey] || C.primary;
+
+    const value = calculateShiftValueSync(shift, shift.date, savedValues);
 
     let coworkers = TodayCoworkersService.getCoworkers(shift.id);
     if (coworkers.length === 0 && shift?.originalData?.coworkers?.length > 0) {
@@ -273,69 +297,127 @@ const HomeScreen = ({ navigation }) => {
     const totalVacancies = vacancies.reduce((acc, v) => acc + (v.available ?? 0), 0);
 
     return (
-      <Pressable key={index} style={s.shiftRow} onPress={() => openShiftBottomSheet(shift)}>
-        <View style={[s.shiftRowAccent, { backgroundColor: color }]} />
+      <Pressable
+        key={index}
+        style={({ pressed }) => [s.shiftCard, pressed && { opacity: 0.85 }]}
+        onPress={() => openShiftBottomSheet(shift)}
+      >
+        {/* Left accent bar — group color */}
+        <View style={[s.shiftAccentBar, { backgroundColor: groupColor }]} />
 
-        <View style={s.shiftRowDate}>
-          <Text style={[s.shiftRowDay, { color }]}>{d.getDate()}</Text>
-          <Text style={s.shiftRowWday}>
-            {d.toLocaleDateString('pt-BR', { weekday: 'short' })}
+        {/* Date column */}
+        <View style={s.shiftDateCol}>
+          <Text style={s.shiftDay}>{d.getDate()}</Text>
+          <Text style={s.shiftWday}>
+            {d.toLocaleDateString('pt-BR', { weekday: 'short' }).replace('.', '')}
           </Text>
         </View>
 
-        <View style={s.shiftRowInfo}>
-          <Text style={s.shiftRowTitle}>Plantão {shiftLabel(shift)}</Text>
-          <View style={s.shiftRowMeta}>
+        {/* Info column */}
+        <View style={s.shiftInfoCol}>
+          {/* Type badge + time */}
+          <View style={s.shiftTopRow}>
+            <View style={[s.shiftTypeBadge, { backgroundColor: badgeColor + '1f' }]}>
+              <Text style={[s.shiftTypeBadgeText, { color: badgeColor }]}>{shiftLabel(shift)}</Text>
+            </View>
+            {timeStr ? (
+              <Text style={s.shiftTime}>{timeStr}</Text>
+            ) : null}
+          </View>
+          {/* Institution */}
+          {shift.group?.institution?.name && (
+            <Text style={s.shiftInstitution} numberOfLines={1}>
+              {shift.group.institution.name}
+            </Text>
+          )}
+          {/* Group + coworkers */}
+          <View style={s.shiftMeta}>
             {shift.group?.name && (
-              <View style={[s.shiftRowGroupDot, { backgroundColor: groupColor }]} />
+              <>
+                <View style={[s.shiftGroupDot, { backgroundColor: groupColor }]} />
+                <Text style={s.shiftGroupName} numberOfLines={1}>{shift.group.name}</Text>
+              </>
             )}
-            {shift.group?.name && (
-              <Text style={[s.shiftRowGroup, { color: groupColor }]} numberOfLines={1}>
-                {shift.group.name}
-              </Text>
-            )}
-            {(coworkers.length > 0 || totalVacancies > 0) && (
-              <View style={s.coworkerDots}>
+            {coworkers.length > 0 && (
+              <View style={s.coworkerStack}>
                 {coworkers.slice(0, 3).map((p, i) => (
-                  <View key={p.id} style={[s.coworkerDot, { marginLeft: i === 0 ? (shift.group?.name ? 6 : 0) : -5 }]}>
+                  <View key={p.id || i} style={[s.coworkerAvatar, { marginLeft: i === 0 ? 6 : -5 }]}>
                     {p.photo
-                      ? <Image source={{ uri: p.photo }} style={s.coworkerDotImg} />
-                      : <View style={s.coworkerDotFallback}><Text style={s.coworkerDotInitial}>{(p.name || '?').charAt(0).toUpperCase()}</Text></View>
+                      ? <Image source={{ uri: p.photo }} style={s.coworkerAvatarImg} />
+                      : <View style={[s.coworkerAvatarFallback, { backgroundColor: C.accentSoft }]}>
+                          <Text style={s.coworkerAvatarInitial}>{(p.name || '?').charAt(0).toUpperCase()}</Text>
+                        </View>
                     }
                   </View>
                 ))}
                 {coworkers.length > 3 && (
-                  <View style={[s.coworkerDot, s.coworkerDotOverflow, { marginLeft: -5 }]}>
-                    <Text style={s.coworkerDotOverflowText}>+{coworkers.length - 3}</Text>
+                  <View style={[s.coworkerAvatar, s.coworkerAvatarOverflow, { marginLeft: -5 }]}>
+                    <Text style={s.coworkerAvatarOverflowText}>+{coworkers.length - 3}</Text>
                   </View>
                 )}
+                {totalVacancies > 0 && Array.from({ length: Math.min(totalVacancies, 2) }).map((_, i) => (
+                  <View key={'v' + i} style={[s.coworkerAvatar, s.coworkerAvatarVacancy, { marginLeft: -5 }]}>
+                    <Text style={[s.coworkerAvatarInitial, { color: C.warning }]}>+</Text>
+                  </View>
+                ))}
               </View>
             )}
           </View>
         </View>
 
-        <Text style={s.shiftRowTime}>{formatTime(shift.time) || ''}</Text>
-        <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
+        {/* Value column */}
+        <View style={s.shiftValueCol}>
+          {value > 0 && <Text style={s.shiftValue}>{fmtBRLk(value)}</Text>}
+          <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
+        </View>
       </Pressable>
     );
   };
 
+  const renderEmptyShifts = () => (
+    <View style={s.emptyState}>
+      <Ionicons name="moon-outline" size={28} color={C.text.tertiary} />
+      <Text style={s.emptyTitle}>Sem plantões próximos</Text>
+      <Text style={s.emptyText}>Você está em paz por enquanto</Text>
+    </View>
+  );
+
   // ── Quick Actions ─────────────────────────────────────────────────────────────
   const renderActions = () => (
-    <View style={s.actionsRow}>
-      <Pressable style={s.actionBtn} onPress={() => navigation?.navigate?.('ChartsScreen')}>
-        <View style={[s.actionIcon, { backgroundColor: C.primary + '15' }]}>
-          <Ionicons name="bar-chart" size={22} color={C.primary} />
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      contentContainerStyle={s.actionsRow}
+    >
+      <Pressable style={({ pressed }) => [s.actionBtn, pressed && { opacity: 0.8 }]} onPress={() => navigation?.navigate?.('ChartsScreen')}>
+        <View style={s.actionIcon}>
+          <Ionicons name="bar-chart" size={18} color={C.primary} />
         </View>
         <Text style={s.actionLabel}>Gráficos</Text>
+        <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
       </Pressable>
-      <Pressable style={s.actionBtn} onPress={() => navigation?.navigate?.('Reports')}>
-        <View style={[s.actionIcon, { backgroundColor: C.warning + '15' }]}>
-          <Ionicons name="document-text" size={22} color={C.warning} />
+      <Pressable style={({ pressed }) => [s.actionBtn, pressed && { opacity: 0.8 }]} onPress={() => navigation?.navigate?.('Reports')}>
+        <View style={[s.actionIcon, { backgroundColor: C.moneySoft }]}>
+          <Ionicons name="document-text" size={18} color={C.money} />
         </View>
         <Text style={s.actionLabel}>Relatórios</Text>
+        <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
       </Pressable>
-    </View>
+      <Pressable style={[s.actionBtn, s.actionBtnDisabled]} disabled>
+        <View style={[s.actionIcon, { backgroundColor: C.background.secondary }]}>
+          <Ionicons name="medkit" size={18} color={C.text.tertiary} />
+        </View>
+        <Text style={[s.actionLabel, s.actionLabelDisabled]}>Plantões</Text>
+        <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
+      </Pressable>
+      <Pressable style={[s.actionBtn, s.actionBtnDisabled]} disabled>
+        <View style={[s.actionIcon, { backgroundColor: C.background.secondary }]}>
+          <Ionicons name="people" size={18} color={C.text.tertiary} />
+        </View>
+        <Text style={[s.actionLabel, s.actionLabelDisabled]}>Grupos</Text>
+        <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
+      </Pressable>
+    </ScrollView>
   );
 
   return (
@@ -349,46 +431,44 @@ const HomeScreen = ({ navigation }) => {
         {renderHeader()}
 
         <View style={s.body}>
-          {/* Next shift */}
-          <View style={s.section}>
-            <Text style={s.sectionLabel}>PRÓXIMO PLANTÃO</Text>
-            {renderHeroShift()}
-          </View>
-
-          {/* More upcoming */}
-          {(loading || listShifts.length > 0) && (
-            <View style={s.section}>
-              <View style={s.sectionHeaderRow}>
-                <Text style={s.sectionLabel}>EM BREVE</Text>
-                <Pressable onPress={() => navigation?.navigate?.('calendar')} style={s.seeAllBtn}>
-                  <Text style={s.seeAllText}>Ver todos</Text>
-                  <Ionicons name="chevron-forward" size={13} color={C.interactive.active} />
-                </Pressable>
-              </View>
-              <View style={s.shiftList}>
-                {loading
-                  ? [0, 1].map(i => (
-                      <View key={i} style={s.shiftRow}>
-                        <View style={[s.shiftRowDate, { gap: 4 }]}>
-                          <SkeletonBox width={24} height={22} />
-                          <SkeletonBox width={20} height={10} />
-                        </View>
-                        <View style={s.shiftRowInfo}>
-                          <SkeletonBox width="55%" height={13} style={{ marginBottom: 6 }} />
-                          <SkeletonBox width="40%" height={11} />
-                        </View>
-                      </View>
-                    ))
-                  : listShifts.map((shift, i) => renderShiftRow(shift, i))
-                }
-              </View>
-            </View>
-          )}
+          {/* Hero card — projected earnings + stats */}
+          {renderHeroCard()}
 
           {/* Quick actions */}
           <View style={s.section}>
-            <Text style={s.sectionLabel}>FERRAMENTAS</Text>
+            <Text style={s.sectionLabel}>AÇÕES</Text>
             {renderActions()}
+          </View>
+
+          {/* Upcoming shifts */}
+          <View style={s.section}>
+            <View style={s.sectionHeaderRow}>
+              <Text style={s.sectionLabel}>PRÓXIMOS PLANTÕES</Text>
+              <Pressable onPress={() => navigation?.navigate?.('calendar')} style={s.seeAllBtn}>
+                <Text style={s.seeAllText}>Ver todos</Text>
+                <Ionicons name="chevron-forward" size={13} color={C.interactive.active} />
+              </Pressable>
+            </View>
+            <View style={s.shiftListStack}>
+              {loading
+                ? [0, 1, 2].map(i => (
+                    <View key={i} style={s.shiftCard}>
+                      <View style={[s.shiftDateCol, { gap: 4 }]}>
+                        <SkeletonBox width={28} height={22} />
+                        <SkeletonBox width={22} height={10} />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <SkeletonBox width="50%" height={12} style={{ marginBottom: 6 }} />
+                        <SkeletonBox width="70%" height={14} style={{ marginBottom: 6 }} />
+                        <SkeletonBox width="35%" height={11} />
+                      </View>
+                    </View>
+                  ))
+                : upcomingShifts.length === 0
+                  ? renderEmptyShifts()
+                  : upcomingShifts.map((shift, i) => renderShiftCard(shift, i))
+              }
+            </View>
           </View>
         </View>
       </ScrollView>
@@ -413,93 +493,148 @@ const makeStyles = (C) => ({
   header: {
     backgroundColor: C.background.primary,
     paddingHorizontal: Spacing.screen,
-    paddingBottom: Spacing.lg,
-    borderBottomWidth: 1,
-    borderBottomColor: C.border.light,
+    paddingBottom: Spacing.md,
+    borderBottomWidth: 0,
   },
   headerTop: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: Spacing.lg,
   },
   headerLeft: { flex: 1 },
   headerDate: {
-    fontSize: Typography.fontSize.caption1,
-    fontFamily: Typography.fontFamily.regular,
+    fontSize: 11,
+    fontFamily: Typography.fontFamily.semiBold,
     color: C.text.tertiary,
     textTransform: 'uppercase',
-    letterSpacing: 0.6,
-    marginBottom: 6,
+    letterSpacing: 0.8,
+    marginBottom: 4,
   },
   headerGreeting: {
-    fontSize: Typography.fontSize.subhead,
-    fontFamily: Typography.fontFamily.regular,
-    color: C.text.secondary,
-    marginBottom: 2,
-  },
-  headerName: {
-    fontSize: 30,
+    fontSize: 28,
     fontFamily: Typography.fontFamily.display,
+    fontWeight: 'bold',
     color: C.text.primary,
-    letterSpacing: -0.5,
-    lineHeight: 34,
+    letterSpacing: -0.6,
+    lineHeight: 32,
   },
-  avatarRing: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    borderWidth: 2,
-    borderColor: C.primary + '60',
-    overflow: 'hidden',
+  avatarWrap: {
+    width: 42,
+    height: 42,
     marginLeft: Spacing.md,
-    marginTop: 4,
+    position: 'relative',
   },
-  avatarImg: { width: 48, height: 48 },
-  avatarPlaceholder: {
-    width: 48,
-    height: 48,
+  avatarImg: { width: 42, height: 42, borderRadius: 21 },
+  avatarFallback: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
     alignItems: 'center',
     justifyContent: 'center',
   },
   avatarInitial: {
-    fontSize: 18,
+    fontSize: 16,
     fontFamily: Typography.fontFamily.bold,
     color: C.primary,
   },
+  avatarStatusDot: {
+    position: 'absolute',
+    bottom: -2,
+    right: -2,
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: C.money,
+    borderWidth: 2,
+    borderColor: C.background.primary,
+  },
 
-  // ── Stats Pills ──────────────────────────────────────────────────────────────
-  statsRow: {
-    flexDirection: 'row',
-    backgroundColor: C.background.secondary,
-    borderRadius: BorderRadius.lg,
-    paddingVertical: 12,
-    paddingHorizontal: Spacing.md,
-    alignItems: 'center',
+  // ── Hero card ────────────────────────────────────────────────────────────────
+  heroWrap: {
+    paddingBottom: Spacing.lg,
   },
-  statPill: {
-    flex: 1,
-    alignItems: 'center',
+  heroCard: {
+    backgroundColor: C.background.elevated,
+    borderRadius: 18,
+    paddingVertical: 16,
+    paddingHorizontal: 18,
+    borderWidth: 0.5,
+    borderColor: C.border.light,
+    ...Shadows.small,
   },
-  statPillNumber: {
-    fontSize: 22,
+  heroLabel: {
+    fontSize: 10.5,
+    fontFamily: Typography.fontFamily.semiBold,
+    color: C.text.tertiary,
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+  },
+  heroValue: {
+    fontSize: 38,
     fontFamily: Typography.fontFamily.display,
-    color: C.primary,
-    letterSpacing: -0.5,
-    lineHeight: 26,
+    fontWeight: 'bold',
+    color: C.text.primary,
+    letterSpacing: -1,
+    lineHeight: 46,
+    marginTop: 4,
   },
-  statPillLabel: {
-    fontSize: Typography.fontSize.caption3,
+  heroSubRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 4,
+  },
+  deltaBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 10,
+  },
+  deltaBadgeText: {
+    fontSize: 11,
+    fontFamily: Typography.fontFamily.bold,
+  },
+  heroDeltaRef: {
+    fontSize: 11,
     fontFamily: Typography.fontFamily.regular,
     color: C.text.tertiary,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-    marginTop: 2,
   },
-  statDivider: {
-    width: 1,
-    height: 32,
+  heroDivider: {
+    height: 0.5,
     backgroundColor: C.border.light,
+    marginVertical: 14,
+  },
+  heroStatsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  heroStat: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 2,
+  },
+  heroStatDivider: {
+    width: 0.5,
+    backgroundColor: C.border.light,
+  },
+  heroStatValue: {
+    fontSize: 20,
+    fontFamily: Typography.fontFamily.display,
+    fontWeight: 'bold',
+    color: C.text.primary,
+    letterSpacing: -0.3,
+    lineHeight: 24,
+  },
+  heroStatLabel: {
+    fontSize: 10,
+    fontFamily: Typography.fontFamily.semiBold,
+    fontWeight: 'bold',
+    color: C.text.tertiary,
+    letterSpacing: 0.3,
+    textTransform: 'uppercase',
+    marginTop: 2,
   },
 
   // ── Body ─────────────────────────────────────────────────────────────────────
@@ -508,14 +643,15 @@ const makeStyles = (C) => ({
     paddingTop: Spacing.lg,
   },
   section: {
-    marginBottom: Spacing.xl,
+    marginBottom: Spacing.lg,
   },
   sectionLabel: {
-    fontSize: Typography.fontSize.caption1,
-    fontFamily: Typography.fontFamily.regular,
+    fontSize: 11.5,
+    fontFamily: Typography.fontFamily.semiBold,
+    fontWeight: 'bold',
     color: C.text.tertiary,
     textTransform: 'uppercase',
-    letterSpacing: 0.8,
+    letterSpacing: 1,
     marginBottom: Spacing.sm,
   },
   sectionHeaderRow: {
@@ -535,238 +671,225 @@ const makeStyles = (C) => ({
     color: C.interactive.active,
   },
 
-  // ── Hero Shift Card ──────────────────────────────────────────────────────────
-  heroCard: {
-    backgroundColor: C.background.primary,
-    borderRadius: BorderRadius.xl,
+  // ── Compact Shift Cards ──────────────────────────────────────────────────────
+  shiftListStack: {
+    flexDirection: 'column',
+    gap: 10,
+  },
+  shiftCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    ...Shadows.small,
-  },
-  heroAccentBar: {
-    width: 4,
-    position: 'absolute',
-    left: 0,
-    top: 0,
-    bottom: 0,
-    borderTopLeftRadius: BorderRadius.xl,
-    borderBottomLeftRadius: BorderRadius.xl,
-  },
-  heroCardInner: {
-    flex: 1,
-    padding: Spacing.lg,
-    paddingLeft: Spacing.lg + 4,
-  },
-  heroTop: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.sm,
-    marginBottom: 8,
-  },
-  heroBadge: {
-    paddingHorizontal: Spacing.sm,
-    paddingVertical: 3,
-    borderRadius: BorderRadius.full,
-    borderWidth: 1,
-  },
-  heroBadgeText: {
-    fontSize: Typography.fontSize.caption1,
-    fontFamily: Typography.fontFamily.bold,
-    letterSpacing: 0.2,
-  },
-  heroWhen: {
-    fontSize: Typography.fontSize.footnote,
-    fontFamily: Typography.fontFamily.regular,
-    color: C.text.tertiary,
-  },
-  heroValue: {
-    fontSize: 22,
-    fontFamily: Typography.fontFamily.display,
-    letterSpacing: -0.3,
-    marginBottom: 10,
-  },
-  heroMeta: {
-    gap: 4,
-  },
-  heroMetaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-  },
-  heroGroupDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 4,
-    flexShrink: 0,
-  },
-  heroMetaText: {
-    fontSize: Typography.fontSize.footnote,
-    fontFamily: Typography.fontFamily.regular,
-    color: C.text.secondary,
-    flex: 1,
-  },
-  heroChevron: {
-    marginRight: Spacing.md,
-  },
-  heroCardEmpty: {
-    backgroundColor: C.background.primary,
-    borderRadius: BorderRadius.xl,
-    padding: Spacing.xl,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: C.border.light,
-    borderStyle: 'dashed',
-    gap: Spacing.sm,
-  },
-  heroEmptyTitle: {
-    fontSize: Typography.fontSize.callout,
-    fontFamily: Typography.fontFamily.semiBold,
-    color: C.text.primary,
-    marginTop: 4,
-  },
-  heroEmptyText: {
-    fontSize: Typography.fontSize.subhead,
-    fontFamily: Typography.fontFamily.regular,
-    color: C.text.secondary,
-    textAlign: 'center',
-  },
-
-  // ── Shift List ───────────────────────────────────────────────────────────────
-  shiftList: {
-    backgroundColor: C.background.primary,
-    borderRadius: BorderRadius.xl,
-    overflow: 'hidden',
-    ...Shadows.small,
-  },
-  shiftRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 14,
-    paddingRight: Spacing.md,
-    paddingLeft: Spacing.md + 4,
-    borderBottomWidth: 1,
-    borderBottomColor: C.border.light,
+    paddingVertical: 12,
+    paddingRight: 14,
+    paddingLeft: 0,
     overflow: 'hidden',
     position: 'relative',
+    backgroundColor: C.background.elevated,
+    borderRadius: 14,
+    borderWidth: 0.5,
+    borderColor: C.border.light,
+    ...Shadows.small,
   },
-  shiftRowAccent: {
+  shiftAccentBar: {
     position: 'absolute',
     left: 0,
     top: 0,
     bottom: 0,
     width: 4,
   },
-  shiftRowDate: {
+  shiftDateCol: {
     alignItems: 'center',
-    minWidth: 38,
-    marginRight: 14,
-    paddingRight: 14,
-    borderRightWidth: 1,
-    borderRightColor: C.border.light,
+    width: 54,
+    paddingLeft: 16,
+    paddingRight: 12,
   },
-  shiftRowDay: {
-    fontSize: Typography.fontSize.title3,
+  shiftDay: {
+    fontSize: 22,
     fontFamily: Typography.fontFamily.display,
-    lineHeight: Typography.fontSize.title3 * 1.1,
-    letterSpacing: -0.3,
+    fontWeight: 'bold',
+    color: C.text.primary,
+    letterSpacing: -0.6,
+    lineHeight: 24,
   },
-  shiftRowWday: {
+  shiftWday: {
     fontSize: 10,
-    fontFamily: Typography.fontFamily.regular,
+    fontFamily: Typography.fontFamily.semiBold,
     color: C.text.tertiary,
     textTransform: 'uppercase',
     letterSpacing: 0.4,
+    marginTop: 2,
   },
-  shiftRowInfo: {
+  shiftInfoCol: {
     flex: 1,
+    paddingLeft: 2,
+    paddingRight: 4,
   },
-  shiftRowTitle: {
-    fontSize: Typography.fontSize.callout,
+  shiftTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 2,
+  },
+  shiftTypeBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 5,
+  },
+  shiftTypeBadgeText: {
+    fontSize: 9.5,
+    fontFamily: Typography.fontFamily.bold,
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+  },
+  shiftTime: {
+    fontSize: 12,
+    fontFamily: Typography.fontFamily.regular,
+    color: C.text.secondary,
+  },
+  shiftInstitution: {
+    fontSize: 14,
     fontFamily: Typography.fontFamily.semiBold,
     color: C.text.primary,
-    marginBottom: 3,
+    marginBottom: 4,
   },
-  shiftRowMeta: {
+  shiftMeta: {
     flexDirection: 'row',
     alignItems: 'center',
   },
-  shiftRowGroupDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 4,
+  shiftGroupDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
     marginRight: 5,
     flexShrink: 0,
   },
-  shiftRowGroup: {
-    fontSize: Typography.fontSize.footnote,
+  shiftGroupName: {
+    fontSize: 11,
     fontFamily: Typography.fontFamily.regular,
-    maxWidth: 120,
-  },
-  shiftRowTime: {
-    fontSize: Typography.fontSize.footnote,
-    fontFamily: Typography.fontFamily.regular,
+    fontWeight: 'bold',
     color: C.text.tertiary,
-    marginRight: Spacing.sm,
+    maxWidth: 100,
   },
-  coworkerDots: {
+  coworkerStack: {
     flexDirection: 'row',
     alignItems: 'center',
+    marginLeft: 8,
   },
-  coworkerDot: {
+  coworkerAvatar: {
     width: 18,
     height: 18,
     borderRadius: 9,
-    borderWidth: 1,
-    borderColor: C.background.primary,
+    borderWidth: 1.5,
+    borderColor: C.background.elevated,
     overflow: 'hidden',
   },
-  coworkerDotImg: { width: 18, height: 18, borderRadius: 9 },
-  coworkerDotFallback: {
+  coworkerAvatarImg: { width: 18, height: 18 },
+  coworkerAvatarFallback: {
     width: 18,
     height: 18,
-    borderRadius: 9,
-    backgroundColor: C.primary + '22',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  coworkerDotInitial: { fontSize: 8, fontFamily: Typography.fontFamily.bold, color: C.primary },
-  coworkerDotOverflow: {
+  coworkerAvatarInitial: {
+    fontSize: 7,
+    fontFamily: Typography.fontFamily.bold,
+    color: C.primary,
+  },
+  coworkerAvatarOverflow: {
     backgroundColor: C.background.secondary,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  coworkerDotOverflowText: {
+  coworkerAvatarOverflowText: {
     fontSize: 7,
     fontFamily: Typography.fontFamily.bold,
     color: C.text.secondary,
-    textAlign: 'center',
+  },
+  coworkerAvatarVacancy: {
+    backgroundColor: C.warningSoft,
+    borderColor: C.warning,
+    borderStyle: 'dashed',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  // ── Value column ─────────────────────────────────────────────────────────────
+  shiftValueCol: {
+    alignItems: 'flex-end',
+    flexShrink: 0,
+    paddingRight: 2,
+    gap: 2,
+  },
+  shiftValue: {
+    fontSize: 14,
+    fontFamily: Typography.fontFamily.display,
+    color: C.money,
+    fontWeight: '800',
+    letterSpacing: -0.2,
+  },
+
+  // ── Empty state ───────────────────────────────────────────────────────────────
+  emptyState: {
+    backgroundColor: C.background.elevated,
+    borderRadius: 18,
+    paddingVertical: Spacing.xl,
+    paddingHorizontal: Spacing.md,
+    alignItems: 'center',
+    borderWidth: 0.5,
+    borderColor: C.border.light,
+    ...Shadows.small,
+    gap: Spacing.xs,
+  },
+  emptyTitle: {
+    fontSize: 15,
+    fontFamily: Typography.fontFamily.semiBold,
+    color: C.text.primary,
+    marginTop: 4,
+  },
+  emptyText: {
+    fontSize: Typography.fontSize.footnote,
+    fontFamily: Typography.fontFamily.regular,
+    color: C.text.secondary,
   },
 
   // ── Quick Actions ─────────────────────────────────────────────────────────────
   actionsRow: {
     flexDirection: 'row',
-    gap: 12,
+    gap: 10,
+    paddingRight: 4,
   },
   actionBtn: {
-    flex: 1,
-    backgroundColor: C.background.primary,
-    borderRadius: BorderRadius.xl,
-    paddingVertical: Spacing.lg,
+    width: 170,
+    backgroundColor: C.background.elevated,
+    borderRadius: 14,
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+    flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 12,
+    borderWidth: 0.5,
+    borderColor: C.border.light,
     ...Shadows.small,
   },
+  actionBtnDisabled: {
+    opacity: 0.45,
+  },
   actionIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
+    width: 36,
+    height: 36,
+    borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: C.accentSoft,
   },
   actionLabel: {
-    fontSize: Typography.fontSize.footnote,
+    fontSize: 14,
     fontFamily: Typography.fontFamily.semiBold,
     color: C.text.primary,
+    flex: 1,
+  },
+  actionLabelDisabled: {
+    color: C.text.tertiary,
   },
 });
 

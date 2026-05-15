@@ -28,3 +28,4 @@ dump data/
 
 # Firebase Cloud Functions (deployed separately, may contain secrets/node_modules)
 functions/
+design/*

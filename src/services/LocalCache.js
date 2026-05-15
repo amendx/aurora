@@ -45,6 +45,7 @@ const K = {
   persons:         (uid)      => `${P}_persons_${uid}`,
   financialConfig: (uid)      => `${P}_finconfig_${uid}`,
   migrationVersion:(uid)      => `${P}_migration_v_${uid}`,
+  manualShifts:    (uid, mk)  => `${P}_manual_${uid}_${mk}`,
 };
 
 // ── Staleness helpers ─────────────────────────────────────────────────────────
@@ -406,6 +407,27 @@ const clearUser = async (userId) => {
   }
 };
 
+// ── Manual Shifts ─────────────────────────────────────────────────────────────
+// Shifts created by the user manually (aurora-source, no WebClient API).
+// Shape mirrors the internal Shift model; missing API fields set to null.
+
+const getManualShifts = async (userId, monthKey) => {
+  const raw = await _get(K.manualShifts(userId, monthKey));
+  return Array.isArray(raw) ? raw : [];
+};
+
+const saveManualShift = async (userId, shift) => {
+  const existing = await getManualShifts(userId, shift.monthKey);
+  const updated = existing.filter(s => s.id !== shift.id);
+  updated.push(shift);
+  return _set(K.manualShifts(userId, shift.monthKey), updated);
+};
+
+const deleteManualShift = async (userId, shiftId, monthKey) => {
+  const existing = await getManualShifts(userId, monthKey);
+  return _set(K.manualShifts(userId, monthKey), existing.filter(s => s.id !== shiftId));
+};
+
 // ── Firebase adapter registration ─────────────────────────────────────────────
 
 /**
@@ -456,6 +478,11 @@ const LocalCache = {
   // Financial config
   getFinancialConfig,
   saveFinancialConfig,
+
+  // Manual shifts (aurora-source users)
+  getManualShifts,
+  saveManualShift,
+  deleteManualShift,
 
   // Migration
   getMigrationVersion,

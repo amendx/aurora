@@ -95,7 +95,7 @@ export const initUserDefaults = async (userId) => {
   ]);
 };
 
-export const createAccount = async ({ name, username, email, password, photoUri, crm, crmState }) => {
+export const createAccount = async ({ name, username, email, password, photoUri, crm, crmState, phone }) => {
   if (!auth) throw new Error('Firebase Auth não inicializado. Verifique a configuração do app.');
 
   if (db) {
@@ -126,7 +126,8 @@ export const createAccount = async ({ name, username, email, password, photoUri,
     photo: photoUrl,
     council,
     role: '',
-    phone: '',
+    phone: phone || '',
+    hospitals: [],
     is_premium: false,
     source: 'aurora',
     createdAt: serverTimestamp(),
@@ -147,7 +148,8 @@ export const createAccount = async ({ name, username, email, password, photoUri,
     role: '',
     photo: photoUrl,
     council,
-    phone: '',
+    phone: phone || '',
+    hospitals: [],
     is_premium: false,
     source: 'aurora',
   };
@@ -180,6 +182,7 @@ export const loginAuroraUser = async (email, password) => {
         photo: d.photo || null,
         council: d.council || { id: '', state: '' },
         phone: d.phone || '',
+        hospitals: Array.isArray(d.hospitals) ? d.hospitals : [],
         is_premium: d.is_premium || false,
         source: 'aurora',
         showOnboarding: d.showOnboarding ?? null,

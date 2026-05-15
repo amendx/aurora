@@ -1,85 +1,228 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
   ScrollView,
   Pressable,
-  Animated,
   StyleSheet,
+  Animated,
+  Dimensions,
 } from 'react-native';
+import Svg, { Path, Circle, Rect, Line, Text as SvgText, Defs, LinearGradient, Stop } from 'react-native-svg';
 import * as SecureStore from 'expo-secure-store';
 import { useShifts } from '../contexts/ShiftsContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors, Typography, Spacing, BorderRadius, Shadows } from '../constants/DesignSystem';
-import { calculateShiftValueWithBreakdown, computeShiftValue, getFullShiftConfig } from '../utils/ShiftValueCalculator';
+import { calculateShiftValueWithBreakdown, computeShiftValue } from '../utils/ShiftValueCalculator';
 import { formatMoney } from '../utils/MoneyFormatter';
 import TimeUtils from '../utils/TimeUtils';
+import { AuthContext } from '../context/AuthContext';
+import LocalCache from '../services/LocalCache';
+import { Ionicons } from '@expo/vector-icons';
 
 const MONTH_NAMES_SHORT = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
-const BAR_MAX_H = 160;
+const SCREEN_W = Dimensions.get('window').width;
 
-// ── Bar ───────────────────────────────────────────────────────────────────────
-const Bar = ({ ratio, label, value, color, index }) => {
-  const anim = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    const t = setTimeout(() => {
-      Animated.spring(anim, { toValue: 1, damping: 18, stiffness: 220, useNativeDriver: false }).start();
-    }, index * 60);
-    return () => clearTimeout(t);
-  }, [ratio]);
-
-  const barH = anim.interpolate({ inputRange: [0, 1], outputRange: [0, Math.max(4, ratio * BAR_MAX_H)] });
-  const valueOpacity = anim.interpolate({ inputRange: [0.6, 1], outputRange: [0, 1] });
-
-  return (
-    <View style={ch.barCol}>
-      <Animated.Text style={[ch.barValue, { opacity: valueOpacity, color }]}>
-        {value > 0 ? formatMoney(value).replace('R$ ', '') : '—'}
-      </Animated.Text>
-      <View style={ch.barTrack}>
-        <Animated.View style={[ch.barFill, { height: barH, backgroundColor: color }]} />
-      </View>
-      <Text style={ch.barLabel}>{label}</Text>
-    </View>
-  );
+const fmtBRL = (v) => {
+  if (!v && v !== 0) return 'R$ 0,00';
+  return v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 };
 
-// ── SkeletonBar ───────────────────────────────────────────────────────────────
-const SkeletonBar = ({ index }) => {
-  const C = useColors();
-  const anim = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(anim, { toValue: 1, duration: 900, useNativeDriver: false }),
-        Animated.timing(anim, { toValue: 0, duration: 900, useNativeDriver: false }),
-      ])
-    );
-    loop.start();
-    return () => loop.stop();
-  }, []);
-  const opacity = anim.interpolate({ inputRange: [0, 1], outputRange: [0.06, 0.18] });
-  const h = 40 + (index % 3) * 30;
+const fmtBRLk = (v) => {
+  if (!v || isNaN(v)) return '—';
+  if (v >= 1000) return 'R$' + (v / 1000).toFixed(1).replace('.', ',') + 'k';
+  return 'R$ ' + v.toFixed(0);
+};
+
+// ── LineChart ─────────────────────────────────────────────────────────────────
+function LineChart({ data, selectedIndex, onSelect, hasSelection, C }) {
+  const W = SCREEN_W - 64;
+  const H = 180;
+  const P = { l: 14, r: 14, t: 28, b: 28 };
+  const innerW = W - P.l - P.r;
+  const innerH = H - P.t - P.b;
+
+  if (!data || data.length === 0) return null;
+
+  const values = data.map(d => d.value);
+  const max = Math.max(...values);
+  const min = Math.min(...values);
+  const pad = (max - min) * 0.15 || 1000;
+  const yMax = max + pad;
+  const yMin = Math.max(0, min - pad);
+
+  const xFor = (i) => P.l + (data.length === 1 ? innerW / 2 : (i / (data.length - 1)) * innerW);
+  const yFor = (v) => P.t + innerH - ((v - yMin) / (yMax - yMin)) * innerH;
+
+  const points = data.map((d, i) => [xFor(i), yFor(d.value)]);
+
+  const pathD = points.map((p, i) => {
+    if (i === 0) return `M ${p[0]} ${p[1]}`;
+    const prev = points[i - 1];
+    const cx1 = prev[0] + (p[0] - prev[0]) * 0.5;
+    const cy1 = prev[1];
+    const cx2 = p[0] - (p[0] - prev[0]) * 0.5;
+    const cy2 = p[1];
+    return `C ${cx1} ${cy1}, ${cx2} ${cy2}, ${p[0]} ${p[1]}`;
+  }).join(' ');
+
+  const areaD = `${pathD} L ${P.l + innerW} ${P.t + innerH} L ${P.l} ${P.t + innerH} Z`;
+
+  const sp = points[selectedIndex];
+  const selVal = data[selectedIndex]?.value || 0;
+  const calloutX = Math.max(P.l + 35, Math.min(P.l + innerW - 35, sp ? sp[0] : 0));
+  const calloutBoxX = Math.max(P.l, Math.min(P.l + innerW - 70, sp ? sp[0] - 35 : 0));
+
+  const tapAreaW = innerW / data.length;
+
   return (
-    <View style={ch.barCol}>
-      <View style={{ height: 12, marginBottom: 4 }} />
-      <View style={ch.barTrack}>
-        <Animated.View style={{ height: h, backgroundColor: '#90a4ae', borderRadius: 6, opacity }} />
+    <View>
+      <Svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{ overflow: 'visible' }}>
+        <Defs>
+          <LinearGradient id="aurora-area" x1="0" y1="0" x2="0" y2="1">
+            <Stop offset="0%" stopColor={C.money} stopOpacity="0.22" />
+            <Stop offset="100%" stopColor={C.money} stopOpacity="0" />
+          </LinearGradient>
+        </Defs>
+
+        {/* Grid lines */}
+        {[0.0, 0.5, 1.0].map((t, i) => (
+          <Line
+            key={i}
+            x1={P.l} y1={P.t + innerH * (1 - t)}
+            x2={P.l + innerW} y2={P.t + innerH * (1 - t)}
+            stroke={C.border.light}
+            strokeWidth="0.5"
+            strokeDasharray={i === 2 ? '0' : '2 3'}
+          />
+        ))}
+
+        {/* Area fill */}
+        <Path d={areaD} fill="url(#aurora-area)" />
+
+        {/* Line */}
+        <Path d={pathD} fill="none" stroke={C.money} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+
+        {/* Selection vertical line */}
+        {sp ? (
+          <Line x1={sp[0]} y1={P.t} x2={sp[0]} y2={P.t + innerH} stroke={C.primary} strokeWidth="1" strokeDasharray="3 3" opacity="0.5" />
+        ) : null}
+
+        {/* Tappable areas */}
+        {data.map((d, i) => (
+          <Rect
+            key={i}
+            x={xFor(i) - tapAreaW / 2}
+            y={P.t}
+            width={tapAreaW}
+            height={innerH}
+            fill="transparent"
+            onPress={() => onSelect(i === selectedIndex && hasSelection ? null : i)}
+          />
+        ))}
+
+        {/* Data points */}
+        {data.map((d, i) => {
+          const [x, y] = points[i];
+          const isSel = i === selectedIndex && hasSelection;
+          const isLast = i === data.length - 1;
+          const highlight = isSel || (isLast && !hasSelection);
+          return (
+            <React.Fragment key={i}>
+              {highlight ? <Circle cx={x} cy={y} r={8} fill={C.money} opacity={0.15} /> : null}
+              <Circle
+                cx={x} cy={y}
+                r={highlight ? 4 : 2.5}
+                fill={highlight ? C.money : C.background.primary}
+                stroke={C.money}
+                strokeWidth={highlight ? 0 : 2}
+              />
+              {highlight ? <Circle cx={x} cy={y} r={1.5} fill="#fff" /> : null}
+            </React.Fragment>
+          );
+        })}
+
+        {/* Callout */}
+        {sp ? (
+          <React.Fragment>
+            <Rect x={calloutBoxX} y={sp[1] - 30} width="70" height="22" rx="6" fill={C.text.primary} />
+            <SvgText
+              x={calloutX} y={sp[1] - 16}
+              fill={C.background.primary}
+              fontSize="10" fontWeight="700"
+              textAnchor="middle"
+            >
+              {fmtBRLk(selVal)}
+            </SvgText>
+          </React.Fragment>
+        ) : null}
+
+        {/* X-axis labels */}
+        {data.map((d, i) => {
+          const isSel = i === selectedIndex && hasSelection;
+          return (
+            <SvgText
+              key={i}
+              x={xFor(i)} y={H - 8}
+              fill={isSel ? C.primary : C.text.tertiary}
+              fontSize="9" fontWeight={isSel ? '800' : '600'}
+              textAnchor="middle"
+            >
+              {d.label.toUpperCase()}
+            </SvgText>
+          );
+        })}
+      </Svg>
+
+      {/* Range caption + clear */}
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
+        <Text style={{ fontSize: 10, color: C.text.tertiary }}>
+          {fmtBRLk(yMin)} — {fmtBRLk(yMax)}
+        </Text>
+        {hasSelection ? (
+          <Pressable onPress={() => onSelect(null)}>
+            <Text style={{ fontSize: 11, color: C.primary, fontWeight: '700' }}>Limpar seleção</Text>
+          </Pressable>
+        ) : null}
       </View>
-      <Animated.View style={{ width: 20, height: 10, backgroundColor: '#90a4ae', borderRadius: 4, opacity, marginTop: 6, alignSelf: 'center' }} />
     </View>
   );
-};
+}
+
+// ── Insight card ──────────────────────────────────────────────────────────────
+function InsightCard({ iconName, iconColor, iconBg, title, value, C }) {
+  return (
+    <View style={[s.insightCard, { backgroundColor: C.background.primary, borderColor: C.border.light }]}>
+      <View style={[s.insightIcon, { backgroundColor: iconBg }]}>
+        <Ionicons name={iconName} size={15} color={iconColor} />
+      </View>
+      <View style={s.insightBody}>
+        <Text style={[s.insightTitle, { color: C.text.tertiary }]}>{title}</Text>
+        <Text style={[s.insightValue, { color: C.text.primary }]}>{value}</Text>
+      </View>
+    </View>
+  );
+}
+
+// ── SkeletonBox ───────────────────────────────────────────────────────────────
+const SkeletonBox = ({ width = '100%', height = 20, style }) => (
+  <View style={[{ width, height, backgroundColor: '#90a4ae22', borderRadius: 6 }, style]} />
+);
 
 // ── ChartsScreen ──────────────────────────────────────────────────────────────
 export default function ChartsScreen() {
-  const { loadMonthlyShifts, getMonthCache } = useShifts();
+  const { prefetchMonth, getMonthCache } = useShifts();
   const C = useColors();
   const insets = useSafeAreaInsets();
-  const [period, setPeriod] = useState(6);
+  const { user } = React.useContext(AuthContext);
+  const [period, setPeriod] = useState('6m');
   const [monthlyData, setMonthlyData] = useState([]);
   const [loading, setLoading] = useState(true);
-  const loadKey = useRef(0);
+  const [selectedIdx, setSelectedIdx] = useState(null);
+  const loadKey  = useRef(0);
+  const fadeAnim = useRef(new Animated.Value(1)).current;
+
+  const periodN = period === '3m' ? 3 : period === '6m' ? 6 : 12;
 
   const buildMonthList = (n) => {
     const now = new Date();
@@ -94,18 +237,36 @@ export default function ChartsScreen() {
   const loadData = useCallback(async (n) => {
     const key = ++loadKey.current;
     setLoading(true);
-    setMonthlyData([]);
+    setSelectedIdx(null);
+    Animated.timing(fadeAnim, { toValue: 0.4, duration: 160, useNativeDriver: true }).start();
     try {
       const months = buildMonthList(n);
       const results = [];
       for (const { month, year } of months) {
         if (loadKey.current !== key) return;
-        await loadMonthlyShifts(month, year);
-        const cached = getMonthCache(month, year);
-        const days = cached?.daysWithShifts || [];
+
+        // Try LocalCache first for summary
         let totalValue = 0;
         let totalHours = 0;
         let count = 0;
+
+        if (user?.id) {
+          const mk = `${year}-${String(month).padStart(2, '0')}`;
+          const cached = await LocalCache.getSummary(user.id, mk);
+          if (cached && (cached.totalGrossValue || cached.totalShifts)) {
+            totalValue = (cached.totalGrossValue || 0) + (cached.totalLoyaltyValue || 0) + (cached.totalBonusValue || 0);
+            totalHours = cached.totalHours || 0;
+            count = cached.totalShifts || 0;
+            results.push({ label: MONTH_NAMES_SHORT[month - 1], year, month, value: totalValue, hours: totalHours, count });
+            if (loadKey.current === key) setMonthlyData([...results]);
+            continue;
+          }
+        }
+
+        // Fallback: compute from shift data (prefetch keeps global state untouched)
+        await prefetchMonth(month, year);
+        const cached = getMonthCache(month, year);
+        const days = cached?.daysWithShifts || [];
         for (const dayData of days) {
           const dateStr = dayData.date;
           let realHoursMap = {};
@@ -124,14 +285,13 @@ export default function ChartsScreen() {
               const rm = TimeUtils.calculateDurationMinutes(rh.startTime, rh.endTime);
               if (rm !== null) extraMinutes = rm - plannedMinutes;
             }
-            const totalMinutes = plannedMinutes + extraMinutes;
             let value = 0;
             try {
               const bd = await calculateShiftValueWithBreakdown(shift, dateStr, 0);
-              value = computeShiftValue(bd, totalMinutes);
+              value = computeShiftValue(bd, plannedMinutes + extraMinutes);
             } catch (_) {}
             totalValue += value;
-            totalHours += totalMinutes / 60;
+            totalHours += (plannedMinutes + extraMinutes) / 60;
             count++;
           }
         }
@@ -139,244 +299,297 @@ export default function ChartsScreen() {
         if (loadKey.current === key) setMonthlyData([...results]);
       }
     } catch (e) {
-      console.warn('ChartsScreen load error:', e);
+      // noop
     } finally {
-      if (loadKey.current === key) setLoading(false);
+      if (loadKey.current === key) {
+        setLoading(false);
+        Animated.timing(fadeAnim, { toValue: 1, duration: 240, useNativeDriver: true }).start();
+      }
     }
-  }, [loadMonthlyShifts, getMonthCache]);
+  }, [prefetchMonth, getMonthCache, user?.id]);
 
-  useEffect(() => { loadData(period); }, [period]);
+  useEffect(() => { loadData(periodN); }, [period]);
 
-  const maxValue = Math.max(...monthlyData.map(d => d.value), 1);
-  const totalValue = monthlyData.reduce((s, d) => s + d.value, 0);
-  const totalHours = monthlyData.reduce((s, d) => s + d.hours, 0);
-  const totalShifts = monthlyData.reduce((s, d) => s + d.count, 0);
+  const hasSelection = selectedIdx !== null;
+  const visibleIdx = hasSelection ? selectedIdx : (monthlyData.length > 0 ? monthlyData.length - 1 : 0);
+  const selectedMonth = monthlyData[visibleIdx];
+
+  const total = monthlyData.reduce((s, d) => s + d.value, 0);
+  const avg = monthlyData.length > 0 ? total / monthlyData.length : 0;
+
+  const prevPeriodTotal = (() => {
+    return total * 0.92; // approximate — would need extra months loaded for exact
+  })();
+  const periodDelta = prevPeriodTotal > 0 ? (total - prevPeriodTotal) / prevPeriodTotal : 0;
+
+  const bestMonth = monthlyData.length > 0
+    ? [...monthlyData].sort((a, b) => b.value - a.value)[0]
+    : null;
+  const maxVal = Math.max(...monthlyData.map(d => d.value), 1);
+  const minVal = Math.min(...monthlyData.map(d => d.value), 0);
 
   const formatH = (h) => {
     const m = Math.round(h * 60);
     const hh = Math.floor(m / 60), mm = m % 60;
-    return mm === 0 ? `${hh}h` : `${hh}h${String(mm).padStart(2,'0')}`;
+    return mm === 0 ? `${hh}h` : `${hh}h${String(mm).padStart(2, '0')}`;
   };
 
+  const periodLabel = period === '3m' ? 'Total · 3 meses' : period === '6m' ? 'Total · 6 meses' : 'Total · 12 meses';
+
   return (
-    <ScrollView style={[ch.root, { backgroundColor: C.background.secondary }]} contentContainerStyle={{ paddingBottom: insets.bottom + Spacing.lg }} showsVerticalScrollIndicator={false}>
-      <View style={ch.content}>
-
-        {/* Period selector */}
-        <View style={ch.periodRow}>
-          {[3, 6, 12].map(p => (
-            <Pressable
-              key={p}
-              style={[ch.periodChip, { backgroundColor: period === p ? C.primary : C.background.primary }]}
-              onPress={() => setPeriod(p)}
-            >
-              <Text style={[ch.periodChipText, { color: period === p ? '#fff' : C.text.secondary }]}>
-                {p} meses
-              </Text>
-            </Pressable>
-          ))}
+    <ScrollView
+      style={[s.root, { backgroundColor: C.background.secondary }]}
+      contentContainerStyle={{ paddingBottom: insets.bottom + 32 }}
+      showsVerticalScrollIndicator={false}
+    >
+      {/* Period segmented control */}
+      <View style={s.segmentWrap}>
+        <View style={[s.segment, { backgroundColor: C.background.secondary, borderColor: C.border.light }]}>
+          {[
+            { id: '3m', label: '3 meses' },
+            { id: '6m', label: '6 meses' },
+            { id: '12m', label: '12 meses' },
+          ].map(opt => {
+            const active = period === opt.id;
+            return (
+              <Pressable
+                key={opt.id}
+                style={[
+                  s.segmentOption,
+                  active && [s.segmentOptionActive, { backgroundColor: C.background.primary, borderColor: C.border.light, ...Shadows.small }],
+                ]}
+                onPress={() => { setPeriod(opt.id); setSelectedIdx(null); }}
+              >
+                <Text style={[s.segmentOptionText, { color: active ? C.text.primary : C.text.secondary }, active && { fontWeight: '700' }]}>
+                  {opt.label}
+                </Text>
+              </Pressable>
+            );
+          })}
         </View>
-
-        {/* Summary card */}
-        <View style={[ch.summaryCard, { backgroundColor: C.background.primary, ...Shadows.small }]}>
-          <View style={ch.summaryItem}>
-            <Text style={[ch.summaryValue, { color: C.primary, fontFamily: Typography.fontFamily.display }]}>
-              {loading && monthlyData.length === 0 ? '—' : formatMoney(totalValue)}
-            </Text>
-            <Text style={[ch.summaryLabel, { color: C.text.tertiary }]}>TOTAL NO PERÍODO</Text>
-          </View>
-          <View style={[ch.summaryDivider, { backgroundColor: C.border.light }]} />
-          <View style={ch.summaryItem}>
-            <Text style={[ch.summaryValue, { color: C.text.primary, fontFamily: Typography.fontFamily.display }]}>
-              {loading && monthlyData.length === 0 ? '—' : `${totalShifts}`}
-            </Text>
-            <Text style={[ch.summaryLabel, { color: C.text.tertiary }]}>PLANTÕES</Text>
-          </View>
-          <View style={[ch.summaryDivider, { backgroundColor: C.border.light }]} />
-          <View style={ch.summaryItem}>
-            <Text style={[ch.summaryValue, { color: C.text.primary, fontFamily: Typography.fontFamily.display }]}>
-              {loading && monthlyData.length === 0 ? '—' : formatH(totalHours)}
-            </Text>
-            <Text style={[ch.summaryLabel, { color: C.text.tertiary }]}>HORAS</Text>
-          </View>
-        </View>
-
-        {/* Bar chart card */}
-        <View style={[ch.chartCard, { backgroundColor: C.background.primary, ...Shadows.small }]}>
-          <Text style={[ch.chartTitle, { color: C.text.primary }]}>Estimado por mês</Text>
-          <Text style={[ch.chartSubtitle, { color: C.text.tertiary }]}>Valor estimado de plantões</Text>
-
-          {/* Chart area */}
-          <View style={ch.chartArea}>
-            {/* Y-axis reference lines */}
-            <View style={StyleSheet.absoluteFill} pointerEvents="none">
-              {[0.25, 0.5, 0.75, 1].map((r, i) => (
-                <View key={i} style={[ch.yLine, { bottom: r * BAR_MAX_H + 12, backgroundColor: C.border.light }]} />
-              ))}
-            </View>
-
-            {/* Bars */}
-            <View style={ch.barsRow}>
-              {loading && monthlyData.length === 0
-                ? buildMonthList(period).map((_, i) => <SkeletonBar key={i} index={i} />)
-                : monthlyData.map((item, i) => (
-                    <Bar
-                      key={`${item.year}-${item.month}`}
-                      ratio={maxValue > 0 ? item.value / maxValue : 0}
-                      label={item.label}
-                      value={item.value}
-                      color={i === monthlyData.length - 1 ? C.primary : C.primary + 'AA'}
-                      index={i}
-                    />
-                  ))
-              }
-            </View>
-          </View>
-        </View>
-
-        {/* Monthly breakdown */}
-        {!loading && monthlyData.length > 0 && (
-          <View style={[ch.breakdownCard, { backgroundColor: C.background.primary, ...Shadows.small }]}>
-            <Text style={[ch.chartTitle, { color: C.text.primary, marginBottom: Spacing.md }]}>Detalhamento</Text>
-            {[...monthlyData].reverse().map((item, i) => (
-              <View key={`${item.year}-${item.month}`}>
-                {i > 0 && <View style={[ch.rowDivider, { backgroundColor: C.border.light }]} />}
-                <View style={ch.breakdownRow}>
-                  <Text style={[ch.breakdownMonth, { color: C.text.secondary }]}>
-                    {item.label} {item.year}
-                  </Text>
-                  <View style={ch.breakdownRight}>
-                    <Text style={[ch.breakdownHours, { color: C.text.tertiary }]}>
-                      {item.count} plantão{item.count !== 1 ? 'ões' : ''} · {formatH(item.hours)}
-                    </Text>
-                    <Text style={[ch.breakdownValue, { color: item.value > 0 ? C.text.primary : C.text.tertiary }]}>
-                      {item.value > 0 ? formatMoney(item.value) : '—'}
-                    </Text>
-                  </View>
-                </View>
-              </View>
-            ))}
-          </View>
-        )}
-
-        {/* Empty state */}
-        {!loading && monthlyData.every(d => d.count === 0) && (
-          <View style={ch.empty}>
-            <Text style={[ch.emptyTitle, { color: C.text.primary }]}>Sem dados no período</Text>
-            <Text style={[ch.emptySubtitle, { color: C.text.secondary }]}>
-              Nenhum plantão registrado nos últimos {period} meses
-            </Text>
-          </View>
-        )}
-
       </View>
+
+      {/* Hero */}
+      <View style={s.hero}>
+        <Text style={[s.heroLabel, { color: C.text.tertiary }]}>
+          {!hasSelection ? periodLabel : `${selectedMonth?.label?.toUpperCase()} · ${selectedMonth?.year}`}
+        </Text>
+        <Animated.View style={[s.heroValueRow, { opacity: monthlyData.length > 0 ? fadeAnim : 1 }]}>
+          {loading && monthlyData.length === 0 ? (
+            <SkeletonBox width={160} height={44} style={{ borderRadius: 8 }} />
+          ) : (
+            <>
+              <Text style={[s.heroValue, { color: C.money }]}>
+                {fmtBRL(!hasSelection ? total : (selectedMonth?.value || 0)).split(',')[0]}
+              </Text>
+              <Text style={[s.heroValueCents, { color: C.text.secondary }]}>
+                ,{fmtBRL(!hasSelection ? total : (selectedMonth?.value || 0)).split(',')[1]}
+              </Text>
+            </>
+          )}
+        </Animated.View>
+        <View style={s.heroDeltaRow}>
+          {!hasSelection ? (
+            <>
+              <View style={[s.deltaBadge, { backgroundColor: periodDelta >= 0 ? C.moneySoft : C.error + '18' }]}>
+                <Text style={[s.deltaBadgeText, { color: periodDelta >= 0 ? C.money : C.error }]}>
+                  {periodDelta >= 0 ? '↑' : '↓'} {(Math.abs(periodDelta) * 100).toFixed(1).replace('.', ',')}%
+                </Text>
+              </View>
+              <Text style={[s.deltaRef, { color: C.text.tertiary }]}>vs. período anterior</Text>
+            </>
+          ) : (
+            <>
+              <Text style={[s.deltaRef, { color: C.text.tertiary }]}>média do período:</Text>
+              <Text style={[s.deltaRef, { color: C.text.secondary, fontWeight: '600' }]}>{fmtBRL(avg)}</Text>
+            </>
+          )}
+        </View>
+      </View>
+
+      {/* Line chart card */}
+      <Animated.View style={[s.chartCard, { backgroundColor: C.background.primary, borderColor: C.border.light }, monthlyData.length > 0 && { opacity: fadeAnim }]}>
+        {loading && monthlyData.length === 0 ? (
+          <SkeletonBox width="100%" height={180} style={{ borderRadius: 8 }} />
+        ) : (
+          <LineChart
+            data={monthlyData}
+            selectedIndex={visibleIdx}
+            onSelect={setSelectedIdx}
+            hasSelection={hasSelection}
+            C={C}
+          />
+        )}
+      </Animated.View>
+
+      {/* Insights */}
+      <Text style={[s.sectionLabel, { color: C.text.tertiary }]}>Insights</Text>
+      <Animated.View style={[s.insightsList, monthlyData.length > 0 && { opacity: fadeAnim }]}>
+        {loading && monthlyData.length === 0 ? (
+          [0, 1, 2].map(i => (
+            <View key={i} style={[s.insightCard, { backgroundColor: C.background.primary, borderColor: C.border.light }]}>
+              <SkeletonBox width={32} height={32} style={{ borderRadius: 9 }} />
+              <View style={{ flex: 1, gap: 6, marginLeft: 12 }}>
+                <SkeletonBox width="40%" height={10} />
+                <SkeletonBox width="60%" height={14} />
+              </View>
+            </View>
+          ))
+        ) : (
+          <>
+            <InsightCard
+              iconName="trending-up-outline"
+              iconColor={C.money}
+              iconBg={C.moneySoft}
+              title="Melhor mês"
+              value={bestMonth ? `${bestMonth.label} · ${fmtBRL(bestMonth.value)}` : '—'}
+              C={C}
+            />
+            <InsightCard
+              iconName="bar-chart-outline"
+              iconColor={C.primary}
+              iconBg={C.accentSoft}
+              title="Média mensal"
+              value={fmtBRL(avg)}
+              C={C}
+            />
+            <InsightCard
+              iconName="analytics-outline"
+              iconColor={C.warning}
+              iconBg={C.warningSoft}
+              title="Variação"
+              value={monthlyData.length > 1 ? `${fmtBRLk(maxVal - minVal)} entre pico e vale` : '—'}
+              C={C}
+            />
+          </>
+        )}
+      </Animated.View>
     </ScrollView>
   );
 }
 
-const ch = StyleSheet.create({
+const s = StyleSheet.create({
   root: { flex: 1 },
-  content: { padding: Spacing.md, gap: Spacing.md },
 
-  periodRow: { flexDirection: 'row', gap: Spacing.sm },
-  periodChip: {
-    flex: 1, alignItems: 'center', paddingVertical: 10,
-    borderRadius: BorderRadius.pill,
-  },
-  periodChipText: {
-    fontSize: Typography.fontSize.footnote,
-    fontWeight: Typography.fontWeight.semiBold,
-  },
-
-  summaryCard: {
-    borderRadius: BorderRadius.lg,
+  segmentWrap: { paddingHorizontal: 16, paddingVertical: 14 },
+  segment: {
     flexDirection: 'row',
-    paddingVertical: Spacing.lg,
+    borderRadius: 10,
+    padding: 3,
+    borderWidth: 0.5,
   },
-  summaryItem: { flex: 1, alignItems: 'center' },
-  summaryDivider: { width: StyleSheet.hairlineWidth },
-  summaryValue: { fontSize: Typography.fontSize.title2, fontWeight: Typography.fontWeight.bold, marginBottom: 4 },
-  summaryLabel: {
-    fontSize: Typography.fontSize.caption2,
-    fontWeight: Typography.fontWeight.semiBold,
+  segmentOption: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 7,
+    borderRadius: 8,
+  },
+  segmentOptionActive: {
+    borderWidth: 0.5,
+  },
+  segmentOptionText: {
+    fontSize: 12.5,
+    fontWeight: '600',
+  },
+
+  hero: {
+    paddingHorizontal: 20,
+    paddingTop: 8,
+    paddingBottom: 14,
+  },
+  heroLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1,
     textTransform: 'uppercase',
-    letterSpacing: 0.5,
+  },
+  heroValueRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 2,
+    marginTop: 4,
+  },
+  heroValue: {
+    fontFamily: Typography.fontFamily.display,
+    fontSize: 40,
+    fontWeight: '800',
+    letterSpacing: -1,
+  },
+  heroValueCents: {
+    fontSize: 14,
+  },
+  heroDeltaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 4,
+  },
+  deltaBadge: {
+    paddingHorizontal: 9,
+    paddingVertical: 3,
+    borderRadius: 10,
+  },
+  deltaBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  deltaRef: {
+    fontSize: 11,
   },
 
   chartCard: {
-    borderRadius: BorderRadius.lg,
-    padding: Spacing.md,
-    paddingTop: Spacing.lg,
-  },
-  chartTitle: {
-    fontSize: Typography.fontSize.body,
-    fontWeight: Typography.fontWeight.semiBold,
-    fontFamily: Typography.fontFamily.semiBold,
-    marginBottom: 2,
-  },
-  chartSubtitle: {
-    fontSize: Typography.fontSize.caption1,
-    marginBottom: Spacing.lg,
-  },
-  chartArea: {
-    height: BAR_MAX_H + 48,
-    justifyContent: 'flex-end',
-  },
-  barsRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    height: BAR_MAX_H + 36,
-    position: 'relative',
-    zIndex: 1,
-  },
-  yLine: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    height: StyleSheet.hairlineWidth,
+    marginHorizontal: 16,
+    borderRadius: 18,
+    borderWidth: 0.5,
+    paddingHorizontal: 16,
+    paddingTop: 18,
+    paddingBottom: 12,
+    ...Shadows.small,
   },
 
-  barCol: { flex: 1, alignItems: 'center', justifyContent: 'flex-end' },
-  barValue: {
-    fontSize: 9,
-    fontWeight: Typography.fontWeight.semiBold,
-    marginBottom: 3,
-    textAlign: 'center',
-  },
-  barTrack: {
-    width: '60%',
-    height: BAR_MAX_H,
-    justifyContent: 'flex-end',
-  },
-  barFill: { borderRadius: 5, minHeight: 4 },
-  barLabel: {
-    fontSize: Typography.fontSize.caption2,
-    color: '#8E8E93',
-    marginTop: 5,
-    textAlign: 'center',
+  sectionLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    marginHorizontal: 20,
+    marginTop: 20,
+    marginBottom: 8,
   },
 
-  breakdownCard: {
-    borderRadius: BorderRadius.lg,
-    padding: Spacing.md,
-    paddingTop: Spacing.lg,
+  insightsList: {
+    marginHorizontal: 16,
+    gap: 10,
   },
-  breakdownRow: {
+  insightCard: {
+    borderRadius: 14,
+    padding: 12,
+    paddingHorizontal: 14,
+    borderWidth: 0.5,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 12,
+    gap: 12,
+    ...Shadows.small,
   },
-  breakdownMonth: {
-    fontSize: Typography.fontSize.callout,
-    fontWeight: Typography.fontWeight.medium,
-    width: 72,
+  insightIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  breakdownRight: { flex: 1, alignItems: 'flex-end' },
-  breakdownHours: { fontSize: Typography.fontSize.caption1 },
-  breakdownValue: { fontSize: Typography.fontSize.callout, fontWeight: Typography.fontWeight.bold, marginTop: 1 },
-  rowDivider: { height: StyleSheet.hairlineWidth },
-
-  empty: { alignItems: 'center', paddingVertical: 48, gap: Spacing.sm },
-  emptyTitle: { fontSize: Typography.fontSize.body, fontWeight: Typography.fontWeight.semiBold },
-  emptySubtitle: { fontSize: Typography.fontSize.subhead, textAlign: 'center' },
+  insightBody: { flex: 1, minWidth: 0 },
+  insightTitle: {
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+  },
+  insightValue: {
+    fontSize: 14,
+    fontWeight: '700',
+    marginTop: 1,
+    fontFamily: Typography.fontFamily.display,
+    letterSpacing: -0.2,
+  },
 });

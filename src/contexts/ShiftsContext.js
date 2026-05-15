@@ -54,6 +54,19 @@ const _patchHoursReport = (storedReport, daysWithShifts) => {
   return { ...(storedReport || {}), standardHours: newStd, realHours: newStd + extras };
 };
 
+const _manualShiftsToDaysWithShifts = (manualShifts) => {
+  const dayMap = {};
+  (manualShifts || []).forEach(shift => {
+    if (!dayMap[shift.date]) {
+      const d = new Date(shift.date + 'T00:00:00');
+      dayMap[shift.date] = { day: d.getDate(), date: shift.date, shiftsCount: 0, shifts: [], originalData: null };
+    }
+    dayMap[shift.date].shifts.push(shift);
+    dayMap[shift.date].shiftsCount++;
+  });
+  return Object.values(dayMap).sort((a, b) => a.date.localeCompare(b.date));
+};
+
 export const ShiftsProvider = ({ children }) => {
   const { token, user } = useContext(AuthContext);
   // userId is needed to scope LocalCache keys per user.
@@ -74,6 +87,7 @@ export const ShiftsProvider = ({ children }) => {
     error: null,
     lastUpdated: null,
     loadedFor: null, // "YYYY-M" — tracks which month was fully loaded (even if 0 shifts)
+    monthSummary: null,
   });
 
   // Helper: parse "19h00 - 07h00 (N)" and return split info for month-boundary night shifts
@@ -107,17 +121,37 @@ export const ShiftsProvider = ({ children }) => {
 
   // Carregar dados dos plantões para um mês específico (APENAS MONTHLY)
   const loadMonthlyShifts = async (month, year, forceReload = false) => {
-    // Aurora users don't have WebClient shifts — return empty data immediately.
+    // Aurora users have no WebClient shifts — load only manual shifts.
     if (user?.source === 'aurora') {
+      const fullMonthKey = `${year}-${String(month).padStart(2, '0')}`;
+      const memKey = `${year}-${month}`;
+      const manualShifts = userId ? await LocalCache.getManualShifts(userId, fullMonthKey) : [];
+      const daysWithShifts = _manualShiftsToDaysWithShifts(manualShifts);
+      const totalMinutes = manualShifts.reduce((acc, s) => acc + (s.durationMinutes || 0), 0);
+      const hoursReport = { standardHours: totalMinutes / 60, realHours: totalMinutes / 60 };
+      // Populate in-memory cache so refreshMonthSummary can find it
+      monthsCache.current[memKey] = { daysWithShifts, hoursReport, totalShifts: manualShifts.length };
+      // Compute and persist summary
+      let auroraMonthSummary = null;
+      try {
+        const [financialConfig, timeEntries] = await Promise.all([
+          getFullShiftConfig(),
+          LocalCache.getTimeEntries(userId, fullMonthKey),
+        ]);
+        auroraMonthSummary = computeMonthSummary(userId, fullMonthKey, daysWithShifts, timeEntries || {}, financialConfig);
+        await LocalCache.saveSummary(userId, fullMonthKey, auroraMonthSummary);
+      } catch (_) {}
       setShiftsData(prev => ({
         ...prev,
         currentMonth: month,
         currentYear: year,
-        daysWithShifts: [],
-        totalShifts: 0,
+        daysWithShifts,
+        hoursReport,
+        totalShifts: manualShifts.length,
+        monthSummary: auroraMonthSummary,
         loading: false,
         error: null,
-        loadedFor: `${year}-${month}`,
+        loadedFor: memKey,
       }));
       return;
     }
@@ -703,6 +737,128 @@ export const ShiftsProvider = ({ children }) => {
     },
 
     getMonthCache: (month, year) => monthsCache.current[`${year}-${month}`],
+
+    // Silent prefetch — warms monthsCache.current without touching setShiftsData.
+    // Use this when loading months for display purposes (e.g. Charts) to avoid
+    // clobbering the active month that Home/Calendar depend on.
+    addManualShift: async (shiftData) => {
+      if (!userId) return;
+      const pad2 = n => String(n).padStart(2, '0');
+      const shift = {
+        id: `manual_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        userId,
+        date: shiftData.date,
+        monthKey: shiftData.monthKey,
+        label: shiftData.label,
+        rawLabel: shiftData.label,
+        startTime: shiftData.startTime,
+        endTime: shiftData.endTime,
+        durationMinutes: shiftData.durationMinutes,
+        crossesMidnight: shiftData.crossesMidnight || false,
+        carryover: false,
+        splitHours: null,
+        group: { id: 'manual', name: shiftData.hospitalName, color: '#3FA9A7', institutionId: null, institutionName: shiftData.hospitalName },
+        coworkerIds: [],
+        syncedAt: new Date().toISOString(),
+        isManual: true,
+        time: `${shiftData.startTime} - ${shiftData.endTime} (${shiftData.label})`,
+        originalData: null,
+      };
+      await LocalCache.saveManualShift(userId, shift);
+
+      // Write to Firestore
+      try {
+        const { db } = await import('../services/firebase/config');
+        const { doc, setDoc, serverTimestamp } = await import('firebase/firestore');
+        if (db) await setDoc(doc(db, 'users', String(userId), 'manualShifts', shift.id), { ...shift, createdAt: serverTimestamp() });
+      } catch (_) {}
+
+      // Update state + cache + summary
+      setShiftsData(prev => {
+        const existing = prev.daysWithShifts || [];
+        const dayIdx = existing.findIndex(d => d.date === shift.date);
+        let updatedDays;
+        if (dayIdx >= 0) {
+          updatedDays = existing.map((d, i) =>
+            i === dayIdx ? { ...d, shifts: [...d.shifts, shift], shiftsCount: d.shiftsCount + 1 } : d
+          );
+        } else {
+          const d = new Date(shift.date + 'T00:00:00');
+          const newDay = { day: d.getDate(), date: shift.date, shiftsCount: 1, shifts: [shift], originalData: null };
+          updatedDays = [...existing, newDay].sort((a, b) => a.date.localeCompare(b.date));
+        }
+        const allShifts = updatedDays.flatMap(d => d.shifts);
+        const totalMinutes = allShifts.reduce((acc, s) => acc + (s.durationMinutes || 0), 0);
+        const hoursReport = { standardHours: totalMinutes / 60, realHours: totalMinutes / 60 };
+        const memKey = `${prev.currentYear}-${prev.currentMonth}`;
+        monthsCache.current[memKey] = { daysWithShifts: updatedDays, hoursReport, totalShifts: allShifts.length };
+        // Recompute summary async then push to state
+        const fullMonthKey = `${prev.currentYear}-${String(prev.currentMonth).padStart(2, '0')}`;
+        Promise.all([getFullShiftConfig(), LocalCache.getTimeEntries(userId, fullMonthKey)])
+          .then(([cfg, te]) => {
+            const s = computeMonthSummary(userId, fullMonthKey, updatedDays, te || {}, cfg);
+            LocalCache.saveSummary(userId, fullMonthKey, s);
+            setShiftsData(p => ({ ...p, monthSummary: s }));
+          })
+          .catch(() => {});
+        return { ...prev, daysWithShifts: updatedDays, hoursReport, totalShifts: allShifts.length };
+      });
+    },
+
+    deleteManualShift: async (shiftId, monthKey) => {
+      if (!userId) return;
+      await LocalCache.deleteManualShift(userId, shiftId, monthKey);
+      try {
+        const { db } = await import('../services/firebase/config');
+        const { doc, deleteDoc } = await import('firebase/firestore');
+        if (db) await deleteDoc(doc(db, 'users', userId, 'manualShifts', shiftId));
+      } catch {}
+      setShiftsData(prev => {
+        const updated = (prev.daysWithShifts || []).map(d => ({
+          ...d,
+          shifts: d.shifts.filter(s => s.id !== shiftId),
+          shiftsCount: d.shifts.filter(s => s.id !== shiftId).length,
+        })).filter(d => d.shiftsCount > 0);
+        return { ...prev, daysWithShifts: updated, totalShifts: Math.max(0, (prev.totalShifts || 0) - 1) };
+      });
+    },
+
+    prefetchMonth: async (month, year) => {
+      const monthKey = `${year}-${month}`;
+      if (monthsCache.current[monthKey]) return; // already warm
+
+      if (!userId || !token) return;
+
+      const fullMonthKey = `${year}-${String(month).padStart(2, '0')}`;
+
+      // Try LocalCache first (no API cost)
+      try {
+        const persisted = await LocalCache.getShifts(userId, fullMonthKey);
+        if (persisted) {
+          const { daysWithShifts, hoursReport: rawReport, totalShifts } = persisted;
+          const hoursReport = _patchHoursReport(rawReport, daysWithShifts);
+          monthsCache.current[monthKey] = { daysWithShifts, hoursReport, totalShifts };
+          return;
+        }
+      } catch (_) {}
+
+      // Fallback: API fetch, store only in in-memory cache
+      try {
+        const monthlyResponse = await WebClientApiService.getMonthlyCalendar(token, month, year);
+        if (!monthlyResponse.success) return;
+        const days = monthlyResponse.data?.data?.current?.days || [];
+        const daysWithShifts = [];
+        for (const dayData of days) {
+          if (!dayData.shifts?.length) continue;
+          const dateObj = new Date(dayData.date + 'T12:00:00.000Z');
+          const daily = await WebClientApiService.getDailyShifts(token, dateObj);
+          if (daily.success && daily.data?.length) {
+            daysWithShifts.push({ date: dayData.date, shifts: daily.data.map(s => ({ id: s.id, label: s.label || s.shift_type || 'M', time: s.time || '', date: dayData.date, group: s.group || { name: s.group_name || '' }, originalData: s })) });
+          }
+        }
+        monthsCache.current[monthKey] = { daysWithShifts, hoursReport: null, totalShifts: daysWithShifts.reduce((n, d) => n + (d.shifts?.length || 0), 0) };
+      } catch (_) {}
+    },
   };
 
   return (

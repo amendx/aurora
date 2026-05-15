@@ -26,6 +26,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
 import { calculateShiftValueWithBreakdown, calculateShiftValue, getFullShiftConfig, computeShiftValue } from '../utils/ShiftValueCalculator';
 import { formatMoney, formatMoneyCompact, formatHourlyRate } from '../utils/MoneyFormatter';
@@ -36,6 +37,7 @@ import { AuthContext } from '../context/AuthContext';
 import { getGroupVisibility } from '../utils/GroupVisibilityConfig';
 import { getGroupColors } from '../utils/GroupColorConfig';
 import TodayCoworkersService from '../services/TodayCoworkersService';
+import { useShifts } from '../contexts/ShiftsContext';
 
 // ── CoworkerAvatar ─────────────────────────────────────────────────────────────
 // Small circular avatar with photo or initials fallback.
@@ -122,8 +124,8 @@ const VacancySlot = () => {
   );
 };
 
-const { height: SCREEN_HEIGHT } = Dimensions.get('window');
-const BOTTOM_SHEET_MAX_HEIGHT = SCREEN_HEIGHT * 0.75;
+const { height: SCREEN_HEIGHT, width: SCREEN_WIDTH } = Dimensions.get('window');
+const BOTTOM_SHEET_MAX_HEIGHT = SCREEN_HEIGHT * 0.82;
 const BOTTOM_SHEET_MIN_HEIGHT = 0;
 
 const ShiftBottomSheet = ({
@@ -131,12 +133,14 @@ const ShiftBottomSheet = ({
   onClose,
   shifts,
   selectedDate,
+  initialShiftIndex = 0,
   calculateShiftValue,
   onHoursChanged,
   onNavigateToGroup,
 }) => {
   const C = useColors();
   const s = makeStyles(C);
+  const insets = useSafeAreaInsets();
 
   const translateY = useRef(new Animated.Value(BOTTOM_SHEET_MAX_HEIGHT)).current;
   const backdropOpacity = useRef(new Animated.Value(0)).current;
@@ -147,10 +151,15 @@ const ShiftBottomSheet = ({
 
   // ── "Quem está também" state ────────────────────────────────────────────────
   const { user } = useContext(AuthContext);
+  const { deleteManualShift } = useShifts();
   const { coworkersById, groupsById } = useGroups();
+  const [deleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
   const [enabledGroupIds, setEnabledGroupIds] = useState(null);
   const [groupColors, setGroupColors] = useState({});
   const [coworkersModal, setCoworkersModal] = useState(null);
+  const [currentShiftIdx, setCurrentShiftIdx] = useState(0);
+  const currentIdxRef = useRef(0);
+  const hScrollRef = useRef(null);
 
   // Carregar horas reais salvas
   useEffect(() => {
@@ -515,6 +524,16 @@ const ShiftBottomSheet = ({
 
   useEffect(() => {
     if (isVisible) {
+      const idx = Math.min(initialShiftIndex, (shifts?.length ?? 1) - 1);
+      setCurrentShiftIdx(idx);
+      currentIdxRef.current = idx;
+      if (idx > 0) {
+        setTimeout(() => hScrollRef.current?.scrollTo({ x: idx * SCREEN_WIDTH, animated: false }), 0);
+      } else {
+        hScrollRef.current?.scrollTo({ x: 0, animated: false });
+      }
+      translateY.setValue(BOTTOM_SHEET_MAX_HEIGHT);
+      backdropOpacity.setValue(0);
       // Open: spring for the sheet (physical feel), timing for backdrop
       Animated.parallel([
         Animated.spring(translateY, {
@@ -769,359 +788,240 @@ const ShiftBottomSheet = ({
       return formatMoneyCompact(computeShiftValue(breakdown, totalMin));
     };
 
+    const groupColor = _resolveGroupColor(shift.group?.id);
+    const accentColor = groupColor || shiftColor;
+    const institution = shift.group?.institution?.name;
+    const groupName = shift.group?.name;
+
     return (
       <View key={index} style={s.shiftCard}>
-        <View style={[s.shiftAccentBar, { backgroundColor: shiftColor }]} />
-        {/* Header do Card com Tipo e Valor */}
-        <View style={s.shiftHeader}>
-          <View style={[s.shiftTypeBadge, { backgroundColor: shiftColor + '15', borderColor: shiftColor + '30' }]}>
-            <Text style={[s.shiftTypeText, { color: shiftColor }]}>
-              {shiftType}
-            </Text>
-          </View>
+        {/* Left accent bar — dimmed when completed */}
+        <View style={[s.shiftAccentBar, { backgroundColor: accentColor, opacity: hasRegisteredHours ? 0.5 : 1 }]} />
 
-          {shift.splitHours && (
-            <View style={[s.shiftTypeBadge, s.splitInlineBadge]}>
-              <Text style={[s.shiftTypeText, { color: C.info }]}>
-                {shift.splitHours.hoursThisMonth}h mês
-              </Text>
-            </View>
-          )}
+        {/* Completed wash behind header */}
+        {hasRegisteredHours ? (
+          <View style={[s.completedWash, { backgroundColor: C.money + '10' }]} pointerEvents="none" />
+        ) : null}
 
-          <View style={s.shiftValueContainer}>
-            <Text style={s.shiftValueText}>
-              R$ {getDisplayValue()}
-            </Text>
-            <Text style={s.shiftValueLabel}>valor estimado</Text>
-          </View>
-        </View>
-
-        {/* Detalhes do Plantão com Botão Integrado */}
-        <View style={s.shiftDetails}>
-          <View style={s.detailsContent}>
-            <View style={s.detailsLeft}>
-              <View style={s.shiftDetailRow}>
-                <Ionicons name="time-outline" size={18} color={C.text.tertiary} />
-                <Text style={s.shiftDetailText}>
-                  {formatTime(shift.time)}
+        {/* Card header: type badge + institution + group vs. value */}
+        <View style={s.cardHeader}>
+          <View style={s.cardHeaderLeft}>
+           
+              <View style={[s.typeBadge, { backgroundColor: shiftColor + '20', borderColor: shiftColor + '40' }]}>
+                <Text style={[s.typeBadgeText, { color: shiftColor }]}>
+                  {shiftType}{shift.splitHours ? ` · ${shift.splitHours.hoursThisMonth}h` : ''}
                 </Text>
               </View>
-
-              {shift.group?.institution?.name && (
-                <View style={s.shiftDetailRow}>
-                  <Ionicons name="location-outline" size={18} color={C.text.tertiary} />
-                  <Text style={s.shiftDetailText}>
-                    {shift.group.institution.name}
-                  </Text>
-                </View>
-              )}
-
-              {shift.group?.name && (
-                <View style={s.shiftDetailRow}>
-                  {(() => {
-                    const groupColor = _resolveGroupColor(shift.group?.id);
-                    return groupColor
-                      ? <View style={[s.groupColorDot, { backgroundColor: groupColor }]} />
-                      : <Ionicons name="people-outline" size={18} color={C.text.tertiary} />;
-                  })()}
-                  <Text style={[s.shiftDetailText, s.groupText, _resolveGroupColor(shift.group?.id) ? {
-                    color: _resolveGroupColor(shift.group?.id),
-                  } : null]}>
-                    {shift.group.name}
-                  </Text>
-                </View>
-              )}
-            </View>
-
-            {/* Botão de Ação Integrado */}
-            <TouchableOpacity
-              style={[
-                s.compactActionButton,
-                hasRegisteredHours && s.compactActionButtonActive
-              ]}
-              onPress={() => openHoursEditor(index)}
-            >
-              <Ionicons
-                name={hasRegisteredHours ? "create-outline" : "time-outline"}
-                size={16}
-                color={hasRegisteredHours ? C.primary : C.text.tertiary}
-              />
-            </TouchableOpacity>
+            
+            {institution ? (
+              <Text style={s.institutionText} numberOfLines={2}>{institution}</Text>
+            ) : null}
+            {groupName ? (
+              <View style={s.groupNameRow}>
+                <View style={[s.groupDot, { backgroundColor: accentColor }]} />
+                <Text style={[s.groupNameText, groupColor ? { color: groupColor } : null]} numberOfLines={1}>{groupName}</Text>
+              </View>
+            ) : null}
+          </View>
+          <View style={s.cardHeaderRight}>
+            <Text style={s.valorLabel}>{hasRegisteredHours ? 'Valor efetivo' : 'Valor previsto'}</Text>
+            <Text style={[s.valorAmount, hasRegisteredHours && { fontSize: 24 }]}>R$ {getDisplayValue()}</Text>
+          
           </View>
         </View>
 
-        {/* Seção de Horas Registradas */}
-        {hasRegisteredHours && (
+        <View style={s.hairlineRow} />
+
+        {/* Time row */}
+        <View style={s.infoRow}>
+          <Ionicons name="time-outline" size={15} color={C.text.secondary} />
+          <Text style={s.infoRowLabel}>Horário</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Text style={s.infoRowValue}>{formatTime(shift.time)}</Text>
+            {breakdown?.hours > 0 ? (
+              <Text style={s.infoRowMeta}>{breakdown.hours}h</Text>
+            ) : null}
+          </View>
+        </View>
+         {/* Horas registradas — A2 design */}
+        {hasRegisteredHours ? (
           <>
-            <View style={s.divider} />
-            <View style={s.registeredHoursSection}>
-              <View style={s.registeredHoursHeader}>
-                <View style={s.registeredHoursHeaderLeft}>
-                  <Ionicons name="checkmark-circle" size={16} color={C.success} />
-                  <Text style={s.registeredHoursTitle}>Horas registradas</Text>
+            <View style={s.hairlineRow} />
+            <View style={s.regHoursSection}>
+              <Text style={s.regHoursSectionTitle}>Horas registradas</Text>
+              <View style={s.regHoursRow}>
+                <View style={s.regHoursCircle}>
+                  <Ionicons name="checkmark" size={20} color={C.money} />
                 </View>
-
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: Spacing.sm }}>
-                  {hoursSummary.differenceMinutes !== 0 && (
-                    <View style={[
-                      s.extrasIndicator,
-                      { marginBottom: 0, marginTop: 0,
-                        backgroundColor: hoursSummary.differenceMinutes > 0 ? C.success + '15' : C.error + '15',
-                        borderColor:     hoursSummary.differenceMinutes > 0 ? C.success + '30' : C.error + '30',
-                      }
-                    ]}>
-                      <Ionicons
-                        name={hoursSummary.differenceMinutes > 0 ? 'trending-up-outline' : 'trending-down-outline'}
-                        size={13}
-                        color={hoursSummary.differenceMinutes > 0 ? C.success : C.error}
-                      />
-                      <Text style={[s.extrasText, { color: hoursSummary.differenceMinutes > 0 ? C.success : C.error }]}>
-                        {hoursSummary.differenceMinutes > 0 ? '+' : '-'}{formatMinutesDifference(Math.abs(hoursSummary.differenceMinutes))}
-                      </Text>
-                    </View>
-                  )}
-
-                  <TouchableOpacity style={s.clearButton} onPress={() => confirmClearHours(index)}>
-                    <Ionicons name="trash-outline" size={14} color={C.error} />
-                    <Text style={s.clearButtonText}>Limpar</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-
-              <View style={s.registeredHoursDetails}>
-                <View style={s.registeredHoursDisplay}>
-                  <Text style={s.registeredHoursTime}>
-                    {hoursSummary.startTime} – {hoursSummary.endTime}
-                  </Text>
-                </View>
-                <View style={s.shiftContextInfo}>
-                  {realHours[index]?.registeredAt && (
-                    <Text style={s.contextInfoText}>
-                      🕐 Registrado em {(() => {
-                        try {
-                          const date = new Date(realHours[index].registeredAt);
-                          return !isNaN(date.getTime()) ? date.toLocaleDateString('pt-BR') : 'Data inválida';
-                        } catch (error) { return 'Data inválida'; }
-                      })()}
-                    </Text>
-                  )}
+                <View style={{ flex: 1 }}>
+                  <Text style={s.regHoursTime}>{hoursSummary.startTime} → {hoursSummary.endTime}</Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 }}>
+                    <Text style={s.regHoursSub}>Escalado · {breakdown?.hours || 0}h</Text>
+                    {hoursSummary.differenceMinutes > 0 ? (
+                      <>
+                        <Text style={[s.regHoursSub, { color: C.border.light }]}>·</Text>
+                        <Text style={[s.regHoursSub, { color: C.money, fontWeight: '700' }]}>
+                          + {TimeUtils.minutesToDisplay(hoursSummary.differenceMinutes)}
+                        </Text>
+                      </>
+                    ) : null}
+                  </View>
                 </View>
               </View>
             </View>
           </>
-        )}
+        ) : null}
 
-        {/* Quem está também — compact tap-to-detail */}
+        {/* Team row + coworker mini-stack */}
         {(() => {
           const today = new Date();
           today.setHours(0, 0, 0, 0);
           const shiftDate = new Date(shift.date + 'T00:00:00');
           const isPast = shiftDate < today;
           const isFuture = shiftDate > today;
-
           if (isFuture && !TodayCoworkersService.hasEntry(shift.id)) return null;
 
-          const shiftCoworkers = _getCoworkersForShift(shift);
-          const vacancies = isPast ? [] : _getVacanciesByGroupForShift(shift);
-          const totalVacancies = vacancies.reduce((acc, v) => acc + (v.available ?? 0), 0);
-          if (shiftCoworkers.length === 0 && totalVacancies === 0) return null;
+          const coworkers = _getCoworkersForShift(shift);
+          const vacancyGroups = isPast ? [] : _getVacanciesByGroupForShift(shift);
+          const totalVacancies = vacancyGroups.reduce((acc, v) => acc + (v.available ?? 0), 0);
+          if (coworkers.length === 0 && totalVacancies === 0) return null;
 
-          const MAX_PREVIEW = 4;
-          const hasVacancies = totalVacancies > 0;
-          const maxPersons = hasVacancies ? MAX_PREVIEW - 1 : MAX_PREVIEW;
-          const personPreview = shiftCoworkers.slice(0, maxPersons);
-          const vacancyPreview = hasVacancies ? 1 : 0;
-          const personOverflow = shiftCoworkers.length - personPreview.length;
-          const vacancyOverflow = totalVacancies - vacancyPreview;
-          const overflow = personOverflow + vacancyOverflow;
+          const MAX_PREV = 4;
+          const hasV = totalVacancies > 0;
+          const personPreview = coworkers.slice(0, hasV ? MAX_PREV - 1 : MAX_PREV);
+          const overflow = (coworkers.length - personPreview.length) + (totalVacancies - (hasV ? 1 : 0));
+          const names = personPreview.slice(0, 2).map(p => (p.name || '').split(' ')[0]).join(', ')
+            + (coworkers.length > 2 ? ` e mais ${coworkers.length - 2}` : '');
 
           return (
             <>
-              <View style={s.divider} />
+              <View style={s.hairlineRow} />
+              <View style={s.infoRow}>
+                <Ionicons name="people-outline" size={15} color={C.text.secondary} />
+                <Text style={s.infoRowLabel}>Equipe</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <Text style={s.infoRowValue}>{coworkers.length} colega{coworkers.length !== 1 ? 's' : ''}</Text>
+                  {totalVacancies > 0 ? (
+                    <Text style={[s.infoRowMeta, { color: C.warning }]}>{totalVacancies} vaga{totalVacancies !== 1 ? 's' : ''}</Text>
+                  ) : null}
+                </View>
+              </View>
               <TouchableOpacity
-                style={s.registeredHoursSection}
-                onPress={() => openCoworkersModal(shift, shiftCoworkers)}
+                style={s.coworkerMiniStack}
+                onPress={() => openCoworkersModal(shift, coworkers)}
                 activeOpacity={0.7}
               >
-                <View style={s.registeredHoursHeader}>
-                  <View style={s.registeredHoursHeaderLeft}>
-                    <Ionicons name="people-outline" size={16} color={C.primary} />
-                    <Text style={s.registeredHoursTitle}>
-                      Quem está também ({shiftCoworkers.length}{totalVacancies > 0 ? ` + ${totalVacancies} vaga${totalVacancies > 1 ? 's' : ''}` : ''})
-                    </Text>
-                  </View>
-                  <Ionicons name="chevron-forward" size={16} color={C.text.tertiary} />
-                </View>
-                <View style={s.coworkersRow}>
-                  {personPreview.map(person => (
-                    <CoworkerAvatar key={person.id} person={person} />
+                <View style={s.miniAvatarRow}>
+                  {personPreview.map((p, i) => (
+                    <View key={p.id} style={[s.miniAvatar, { marginLeft: i > 0 ? -8 : 0, zIndex: MAX_PREV - i }]}>
+                      {p.photo
+                        ? <Image source={{ uri: p.photo }} style={s.miniAvatarImg} />
+                        : <View style={[s.miniAvatarFallback, { backgroundColor: shiftColor + '28' }]}>
+                            <Text style={[s.miniAvatarInitials, { color: shiftColor }]}>{_initials(p.name)}</Text>
+                          </View>
+                      }
+                    </View>
                   ))}
-                  {Array.from({ length: vacancyPreview }).map((_, i) => (
-                    <VacancySlot key={`vacancy-${i}`} />
-                  ))}
-                  {overflow > 0 && (
-                    <View style={s.coworkerOverflow}>
-                      <View style={s.coworkerOverflowCircle}>
-                        <Text style={s.coworkerOverflowText}>+{overflow}</Text>
+                  {hasV ? (
+                    <View style={[s.miniAvatar, { marginLeft: personPreview.length > 0 ? -8 : 0, zIndex: 0 }]}>
+                      <View style={[s.miniAvatarFallback, { backgroundColor: C.warning + '20', borderColor: C.warning + '60', borderStyle: 'dashed', borderWidth: 1 }]}>
+                        <Ionicons name="star-outline" size={11} color={C.warning} />
                       </View>
                     </View>
-                  )}
+                  ) : null}
+                  {overflow > 0 ? (
+                    <View style={[s.miniAvatar, s.miniAvatarOverflow, { marginLeft: -8 }]}>
+                      <Text style={s.miniAvatarOverflowText}>+{overflow}</Text>
+                    </View>
+                  ) : null}
                 </View>
+                <Text style={s.coworkerNamesText} numberOfLines={1}>{names}</Text>
               </TouchableOpacity>
             </>
           );
         })()}
 
-        {/* Composição do Valor */}
-        {breakdown && (
-          <>
-            <View style={s.divider} />
+        <View style={s.hairlineRow} />
 
-            <View style={s.registeredHoursSection}>
-              <View style={s.registeredHoursHeader}>
-                <View style={s.registeredHoursHeaderLeft}>
-                  <Ionicons name="calculator-outline" size={16} color={C.primary} />
-                  <Text style={s.registeredHoursTitle}>
-                    Composição do valor
+        {/* Composição do valor / efetiva */}
+        {breakdown ? (
+          <View style={s.breakdownSection}>
+            <Text style={s.breakdownSectionTitle}>{hasRegisteredHours ? 'Composição efetiva' : 'Composição do valor'}</Text>
+            {shift.splitHours ? (
+              <>
+                <View style={s.breakdownRow}>
+                  <Text style={s.breakdownLabel}>
+                    {formatHourlyRate(breakdown.hourlyValue)} × {shift.splitHours.hoursThisMonth}h{breakdown.weekend && breakdown.isNaturalWeekend ? ' (FDS)' : ''}{breakdown.isFridayNight ? ' (Sexta N)' : ''}
                   </Text>
+                  <Text style={s.breakdownValue}>+ R$ {formatMoneyCompact((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth)}</Text>
                 </View>
-              </View>
-
-              <View style={s.valueCalculationDetails}>
-                {shift.splitHours ? (
-                  <>
-                    <View style={s.valueCalculationRow}>
-                      <Text style={[s.valueCalculationText, { color: C.info }]}>
-                        {formatHourlyRate(breakdown.hourlyValue)} × {shift.splitHours.hoursThisMonth}h (split - este mês)
-                        {breakdown.weekend && breakdown.isNaturalWeekend ? ' (FDS)' : ''}
-                        {breakdown.isFridayNight ? ' (Sexta N)' : ''}
-                      </Text>
-                      <Text style={[s.valueCalculationAmount, { color: C.info }]}>
-                        R$ {formatMoneyCompact((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth)}
-                      </Text>
-                    </View>
-
-                    {breakdown.loyaltyPercentage > 0 && (
-                      <View style={s.valueCalculationRow}>
-                        <Text style={[s.valueCalculationText, { color: C.primary }]}>
-                          + Fidelização {breakdown.loyaltyPercentage}% (sobre {shift.splitHours.hoursThisMonth}h)
-                        </Text>
-                        <Text style={[s.valueCalculationAmount, { color: C.primary }]}>
-                          R$ {formatMoneyCompact(((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth * breakdown.loyaltyPercentage) / 100)}
-                        </Text>
-                      </View>
-                    )}
-
-                    {breakdown.generalBonusPercentage > 0 && (
-                      <View style={s.valueCalculationRow}>
-                        <Text style={[s.valueCalculationText, { color: C.success }]}>
-                          + Bônus {breakdown.generalBonusPercentage}% (sobre {shift.splitHours.hoursThisMonth}h)
-                        </Text>
-                        <Text style={[s.valueCalculationAmount, { color: C.success }]}>
-                          R$ {formatMoneyCompact(((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth * breakdown.generalBonusPercentage) / 100)}
-                        </Text>
-                      </View>
-                    )}
-
-                    {hoursSummary && hoursSummary.differenceMinutes !== 0 && (
-                      <View style={s.valueCalculationRow}>
-                        <Text style={[s.valueCalculationText, {
-                          color: hoursSummary.differenceMinutes > 0 ? C.success : C.error
-                        }]}>
-                          {hoursSummary.differenceMinutes > 0 ? '+ ' : '- '}
-                          Horas {hoursSummary.differenceMinutes > 0 ? 'extras' : 'faltantes'}: {
-                            TimeUtils.minutesToDisplay(Math.abs(hoursSummary.differenceMinutes))
-                          }
-                        </Text>
-                        <Text style={[s.valueCalculationAmount, {
-                          color: hoursSummary.differenceMinutes > 0 ? C.success : C.error
-                        }]}>
-                          {hoursSummary.differenceMinutes > 0 ? '+' : '-'} R$ {
-                            formatMoneyCompact(Math.abs((hoursSummary.differenceMinutes / 60) * (breakdown.hourlyValue || 0) * (
-                              1 + (breakdown.loyaltyPercentage || 0) / 100 + (breakdown.generalBonusPercentage || 0) / 100
-                            )))
-                          }
-                        </Text>
-                      </View>
-                    )}
-                  </>
-                ) : (
-                  <>
-                    <View style={s.valueCalculationRow}>
-                      <Text style={s.valueCalculationText}>
-                        {formatHourlyRate(breakdown.hourlyValue)} × {breakdown.hours || 0}h
-                        {breakdown.weekend && breakdown.isNaturalWeekend ? ' (FDS)' : ''}
-                        {breakdown.isFridayNight ? ' (Sexta N)' : ''}
-                      </Text>
-                      <Text style={s.valueCalculationAmount}>
-                        R$ {formatMoneyCompact(breakdown.baseValue) || '0,00'}
-                      </Text>
-                    </View>
-
-                    {breakdown.loyaltyBonus > 0 && (
-                      <View style={s.valueCalculationRow}>
-                        <Text style={[s.valueCalculationText, { color: C.primary }]}>
-                          + Fidelização {breakdown.loyaltyPercentage}%
-                        </Text>
-                        <Text style={[s.valueCalculationAmount, { color: C.primary }]}>
-                          R$ {formatMoneyCompact(breakdown.loyaltyBonus)}
-                        </Text>
-                      </View>
-                    )}
-
-                    {breakdown.generalBonus > 0 && (
-                      <View style={s.valueCalculationRow}>
-                        <Text style={[s.valueCalculationText, { color: C.success }]}>
-                          + Bônus {breakdown.generalBonusPercentage}%
-                        </Text>
-                        <Text style={[s.valueCalculationAmount, { color: C.success }]}>
-                          R$ {formatMoneyCompact(breakdown.generalBonus)}
-                        </Text>
-                      </View>
-                    )}
-
-                    {hoursSummary && hoursSummary.differenceMinutes !== 0 && (
-                      <View style={s.valueCalculationRow}>
-                        <Text style={[s.valueCalculationText, {
-                          color: hoursSummary.differenceMinutes > 0 ? C.success : C.error
-                        }]}>
-                          {hoursSummary.differenceMinutes > 0 ? '+ ' : '- '}
-                          Horas {hoursSummary.differenceMinutes > 0 ? 'extras' : 'faltantes'}: {
-                            TimeUtils.minutesToDisplay(Math.abs(hoursSummary.differenceMinutes))
-                          }
-                        </Text>
-                        <Text style={[s.valueCalculationAmount, {
-                          color: hoursSummary.differenceMinutes > 0 ? C.success : C.error
-                        }]}>
-                          {hoursSummary.differenceMinutes > 0 ? '+' : '-'} R$ {
-                            formatMoneyCompact(Math.abs((hoursSummary.differenceMinutes / 60) * (breakdown.hourlyValue || 0) * (
-                              1 + (breakdown.loyaltyPercentage || 0) / 100 + (breakdown.generalBonusPercentage || 0) / 100
-                            )))
-                          }
-                        </Text>
-                      </View>
-                    )}
-                  </>
-                )}
-
-                {breakdown.isFridayNight && (
-                  <View style={s.shiftContextInfo}>
-                    <Text style={[s.contextInfoText, { color: C.warning }]}>
-                    - Sexta-feira (N) - aplicando valor de FDS
-                    </Text>
+                {breakdown.loyaltyPercentage > 0 ? (
+                  <View style={s.breakdownRow}>
+                    <Text style={[s.breakdownLabel, { color: C.text.tertiary }]}>Fidelização +{breakdown.loyaltyPercentage}%</Text>
+                    <Text style={s.breakdownValue}>+ R$ {formatMoneyCompact(((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth * breakdown.loyaltyPercentage) / 100)}</Text>
                   </View>
-                )}
+                ) : null}
+                {breakdown.generalBonusPercentage > 0 ? (
+                  <View style={s.breakdownRow}>
+                    <Text style={[s.breakdownLabel, { color: C.primary }]}>Bônus +{breakdown.generalBonusPercentage}%</Text>
+                    <Text style={[s.breakdownValue, { color: C.primary }]}>+ R$ {formatMoneyCompact(((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth * breakdown.generalBonusPercentage) / 100)}</Text>
+                  </View>
+                ) : null}
+              </>
+            ) : (
+              <>
+                <View style={s.breakdownRow}>
+                  <Text style={s.breakdownLabel}>
+                    {formatHourlyRate(breakdown.hourlyValue)} × {breakdown.hours || 0}h{breakdown.weekend && breakdown.isNaturalWeekend ? ' (FDS)' : ''}{breakdown.isFridayNight ? ' (Sexta N)' : ''}
+                  </Text>
+                  <Text style={s.breakdownValue}>+ R$ {formatMoneyCompact(breakdown.baseValue) || '0,00'}</Text>
+                </View>
+                {breakdown.loyaltyBonus > 0 ? (
+                  <View style={s.breakdownRow}>
+                    <Text style={[s.breakdownLabel, { color: C.text.tertiary }]}>Fidelização +{breakdown.loyaltyPercentage}%</Text>
+                    <Text style={s.breakdownValue}>+ R$ {formatMoneyCompact(breakdown.loyaltyBonus)}</Text>
+                  </View>
+                ) : null}
+                {breakdown.generalBonus > 0 ? (
+                  <View style={s.breakdownRow}>
+                    <Text style={[s.breakdownLabel, { color: C.primary }]}>Bônus +{breakdown.generalBonusPercentage}%</Text>
+                    <Text style={[s.breakdownValue, { color: C.primary }]}>+ R$ {formatMoneyCompact(breakdown.generalBonus)}</Text>
+                  </View>
+                ) : null}
+              </>
+            )}
+            {hoursSummary && hoursSummary.differenceMinutes !== 0 ? (
+              <View style={s.breakdownRow}>
+                <Text style={[s.breakdownLabel, { color: hoursSummary.differenceMinutes > 0 ? C.money : C.error }]}>
+                  Horas extras · {TimeUtils.minutesToDisplay(Math.abs(hoursSummary.differenceMinutes))}
+                </Text>
+                <Text style={[s.breakdownValue, { color: hoursSummary.differenceMinutes > 0 ? C.money : C.error }]}>
+                  {hoursSummary.differenceMinutes > 0 ? '+ ' : '- '}R$ {formatMoneyCompact(Math.abs((hoursSummary.differenceMinutes / 60) * (breakdown.hourlyValue || 0) * (1 + (breakdown.loyaltyPercentage || 0) / 100 + (breakdown.generalBonusPercentage || 0) / 100)))}
+                </Text>
               </View>
+            ) : null}
+            <View style={s.hairlineRow} />
+            <View style={s.breakdownRow}>
+              <Text style={s.breakdownTotalLabel}>{hasRegisteredHours ? 'Recebido' : 'Total'}</Text>
+              <Text style={s.breakdownTotalValue}>R$ {getDisplayValue()}</Text>
             </View>
-          </>
-        )}
+          </View>
+        ) : null}
+
+       
+
       </View>
     );
   };
 
-  if (!isVisible) return null;
-
   return (
+    <Modal
+      visible={isVisible}
+      transparent
+      animationType="none"
+      statusBarTranslucent
+      onRequestClose={onClose}
+    >
     <View style={s.container}>
       {/* Backdrop */}
       <Animated.View
@@ -1148,39 +1048,103 @@ const ShiftBottomSheet = ({
           {/* Header */}
           <View style={s.header}>
             <View style={s.headerContent}>
-              <Text style={s.dateTitle}>{formatDateHeader(selectedDate)}</Text>
-              <Text style={s.shiftsCountText}>
-                {shifts.length} {shifts.length === 1 ? 'plantão agendado' : 'plantões agendados'}
+              <Text style={s.dateLabel}>{formatDateHeader(selectedDate)}</Text>
+              <Text style={s.dateTitle}>
+                {shifts && shifts.length > 1
+                  ? `Plantão ${currentShiftIdx + 1} de ${shifts.length}`
+                  : 'Plantão do dia'}
               </Text>
             </View>
-
             <Pressable style={s.closeButton} onPress={onClose}>
-              <Ionicons name="close" size={24} color={C.text.secondary} />
+              <Ionicons name="close" size={20} color={C.text.secondary} />
             </Pressable>
           </View>
         </View>
 
-        {/* Content */}
+        {/* Pagination dots */}
+        {shifts && shifts.length > 1 ? (
+          <View style={s.pagination}>
+            {shifts.map((_, i) => (
+              <Pressable key={i} onPress={() => {
+                currentIdxRef.current = i;
+                setCurrentShiftIdx(i);
+                hScrollRef.current?.scrollTo({ x: i * SCREEN_WIDTH, animated: true });
+              }}>
+                <View style={[s.paginationDot, i === currentShiftIdx && s.paginationDotActive]} />
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
+
+        {/* Card pager — native horizontal scroll */}
         <ScrollView
-          style={s.content}
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={s.scrollContent}
-          bounces={false}
-          scrollEventThrottle={16}
+          ref={hScrollRef}
+          horizontal
+          pagingEnabled
+          showsHorizontalScrollIndicator={false}
+          scrollEnabled={shifts && shifts.length > 1}
+          style={s.cardArea}
           keyboardShouldPersistTaps="handled"
-          nestedScrollEnabled={true}
           overScrollMode="never"
+          bounces={false}
+          onMomentumScrollEnd={(e) => {
+            const i = Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH);
+            currentIdxRef.current = i;
+            setCurrentShiftIdx(i);
+          }}
         >
-          {shifts && shifts.length > 0 ? (
-            shifts.map((shift, index) => renderShiftCard(shift, index))
-          ) : (
-            <View style={s.emptyState}>
+          {shifts && shifts.length > 0 ? shifts.map((shift, index) => (
+            <ScrollView
+              key={index}
+              style={{ width: SCREEN_WIDTH }}
+              contentContainerStyle={s.scrollContent}
+              showsVerticalScrollIndicator={false}
+              bounces={false}
+              keyboardShouldPersistTaps="handled"
+              nestedScrollEnabled={true}
+              overScrollMode="never"
+            >
+              {renderShiftCard(shift, index)}
+            </ScrollView>
+          )) : (
+            <View style={[s.emptyState, { width: SCREEN_WIDTH }]}>
               <Ionicons name="calendar-outline" size={48} color={C.text.tertiary} />
               <Text style={s.emptyTitle}>Nenhum plantão</Text>
               <Text style={s.emptySubtitle}>Não há plantões agendados para este dia</Text>
             </View>
           )}
         </ScrollView>
+
+        {/* CTA — fixed at bottom, always visible */}
+        {shifts && shifts.length > 0 ? (
+          <View style={{ marginBottom: 14 + insets.bottom }}>
+            <View style={s.ctaRow}>
+              {getHoursSummary(shifts[currentShiftIdx], currentShiftIdx) === null ? (
+                <TouchableOpacity style={[s.ctaButton, { flex: 1 }]} onPress={() => openHoursEditor(currentShiftIdx)}>
+                  <Ionicons name="add" size={18} color="#fff" />
+                  <Text style={s.ctaText}>Registrar horas</Text>
+                </TouchableOpacity>
+              ) : (
+                <>
+                  <TouchableOpacity style={[s.ctaButtonSecondary, { flex: 1 }]} onPress={() => confirmClearHours(currentShiftIdx)}>
+                    <Ionicons name="trash-outline" size={16} color={C.error} />
+                    <Text style={[s.ctaText, { color: C.error }]}>Apagar</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[s.ctaButton, { flex: 2 }]} onPress={() => openHoursEditor(currentShiftIdx)}>
+                    <Ionicons name="create-outline" size={18} color="#fff" />
+                    <Text style={s.ctaText}>Editar horas</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+            </View>
+            {shifts[currentShiftIdx]?.isManual ? (
+              <TouchableOpacity style={s.deleteShiftBtn} onPress={() => setDeleteConfirmVisible(true)}>
+                <Ionicons name="trash-outline" size={14} color={C.error} />
+                <Text style={[s.deleteShiftBtnText, { color: C.error }]}>Excluir plantão</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        ) : null}
       </Animated.View>
 
       {/* Modal — Quem está também (detalhe) */}
@@ -1191,7 +1155,7 @@ const ShiftBottomSheet = ({
         onRequestClose={() => setCoworkersModal(null)}
       >
         <Pressable style={s.modalBackdrop} onPress={() => setCoworkersModal(null)} />
-        <View style={s.modalSheet}>
+        <View style={[s.modalSheet, { paddingBottom: 16 + insets.bottom }]}>
           {/* Header */}
           <View style={s.modalHeader}>
             <View style={s.handle} />
@@ -1314,7 +1278,36 @@ const ShiftBottomSheet = ({
         shift={editingShift !== null && shifts && shifts[editingShift] ? shifts[editingShift] : null}
         currentHours={editingShift !== null && realHours && realHours[editingShift] ? realHours[editingShift] : {}}
       />
+
+      {/* Confirmação de exclusão de plantão manual */}
+      <Modal visible={deleteConfirmVisible} transparent animationType="fade" onRequestClose={() => setDeleteConfirmVisible(false)}>
+        <Pressable style={s.confirmBackdrop} onPress={() => setDeleteConfirmVisible(false)} />
+        <View style={s.confirmBox}>
+          <View style={[s.confirmIconWrap, { backgroundColor: C.error + '15' }]}>
+            <Ionicons name="trash-outline" size={24} color={C.error} />
+          </View>
+          <Text style={[s.confirmTitle, { color: C.text.primary }]}>Excluir plantão?</Text>
+          <Text style={[s.confirmBody, { color: C.text.secondary }]}>Este plantão foi adicionado manualmente e será removido permanentemente.</Text>
+          <View style={s.confirmActions}>
+            <Pressable style={[s.confirmBtn, { backgroundColor: C.background.secondary, borderColor: C.border.light }]} onPress={() => setDeleteConfirmVisible(false)}>
+              <Text style={[s.confirmBtnText, { color: C.text.primary }]}>Cancelar</Text>
+            </Pressable>
+            <Pressable
+              style={[s.confirmBtn, { backgroundColor: C.error }]}
+              onPress={() => {
+                const shift = shifts?.[currentShiftIdx];
+                if (shift?.isManual) deleteManualShift(shift.id, shift.monthKey);
+                setDeleteConfirmVisible(false);
+                onClose();
+              }}
+            >
+              <Text style={[s.confirmBtnText, { color: '#fff' }]}>Excluir</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </View>
+    </Modal>
   );
 };
 
@@ -1359,8 +1352,9 @@ const makeStyles = (C) => ({
     flexDirection: 'row',
     alignItems: 'flex-start',
     justifyContent: 'space-between',
-    paddingHorizontal: Spacing.lg,
-    paddingVertical: Spacing.md,
+    paddingHorizontal: 18,
+    paddingTop: 8,
+    paddingBottom: 14,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: C.border.light,
   },
@@ -1369,27 +1363,449 @@ const makeStyles = (C) => ({
     flex: 1,
   },
 
-  dateTitle: {
-    fontSize: Typography.fontSize.title2,
-    fontWeight: Typography.fontWeight.bold,
-    color: C.text.primary,
-    marginBottom: 2,
+  dateLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    color: C.text.tertiary,
   },
 
-  shiftsCountText: {
-    fontSize: Typography.fontSize.subhead,
-    color: C.text.secondary,
-    textTransform: 'lowercase',
+  dateTitle: {
+    fontSize: 22,
+    fontFamily: Typography.fontFamily.display,
+    fontWeight: Typography.fontWeight.bold,
+    color: C.text.primary,
+    marginTop: 2,
+    letterSpacing: -0.4,
   },
 
   closeButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
     backgroundColor: C.background.secondary,
     alignItems: 'center',
     justifyContent: 'center',
     marginLeft: Spacing.md,
+    marginTop: 2,
+  },
+
+  // ── Registered / completed variant ────────────────────────────────────────
+  completedWash: {
+    position: 'absolute',
+    top: 0, left: 0, right: 0,
+    pointerEvents: 'none',
+  },
+
+  completedPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    height: 22,
+    paddingHorizontal: 10,
+    borderRadius: 11,
+    backgroundColor: C.money,
+  },
+
+  completedPillText: {
+    fontSize: 10.5,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+    color: '#fff',
+  },
+
+  secondaryBadge: {
+    height: 22,
+    paddingHorizontal: 8,
+    borderRadius: 11,
+    borderWidth: 0.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  secondaryBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.3,
+    textTransform: 'uppercase',
+  },
+
+  valueDeltaBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 4,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 8,
+    backgroundColor: C.money + '18',
+    alignSelf: 'flex-end',
+  },
+
+  valueDeltaText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: C.money,
+    fontFamily: Typography.fontFamily.mono || 'monospace',
+  },
+
+  regHoursSection: {
+    padding: 12,
+    paddingHorizontal: 18,
+    paddingBottom: 14,
+  },
+
+  regHoursSectionTitle: {
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    color: C.text.tertiary,
+    marginBottom: 10,
+  },
+
+  regHoursRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+
+  regHoursCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: C.money + '18',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+
+  regHoursTime: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: C.text.primary,
+    fontFamily: Typography.fontFamily.mono || 'monospace',
+  },
+
+  regHoursSub: {
+    fontSize: 11.5,
+    color: C.text.tertiary,
+  },
+
+
+  // ── A2 ShiftDetailCard styles ──────────────────────────────────────────────
+  cardHeader: {
+    padding: 14,
+    paddingLeft: 18,
+    paddingBottom: 12,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  cardHeaderLeft: {
+    flex: 1,
+    minWidth: 0,
+  },
+  cardHeaderRight: {
+    alignItems: 'flex-end',
+  },
+  typeBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    marginBottom: 5,
+    borderRadius: 6,
+    borderWidth: 1,
+    alignSelf: 'flex-start',
+  },
+  typeBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+  },
+  institutionText: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: C.text.primary,
+    marginTop: 8,
+    fontFamily: Typography.fontFamily.display,
+    letterSpacing: -0.2,
+  },
+  groupNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    marginTop: 2,
+  },
+  groupDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+  },
+  groupNameText: {
+    fontSize: 12,
+    color: C.text.secondary,
+  },
+  valorLabel: {
+    fontSize: 9.5,
+    fontWeight: '700',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    color: C.text.tertiary,
+  },
+  valorAmount: {
+    fontSize: 22,
+    fontWeight: '800',
+    color: C.money,
+    fontFamily: Typography.fontFamily.display,
+    letterSpacing: -0.4,
+    marginTop: 2,
+  },
+  hairlineRow: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: C.border.light,
+    marginLeft: 18,
+  },
+  infoRow: {
+    paddingHorizontal: 18,
+    paddingVertical: 11,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  infoRowLabel: {
+    flex: 1,
+    fontSize: 12.5,
+    color: C.text.secondary,
+    fontWeight: '500',
+  },
+  infoRowValue: {
+    fontSize: 13,
+    color: C.text.primary,
+    fontWeight: '700',
+  },
+  infoRowMeta: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: C.text.tertiary,
+  },
+  coworkerMiniStack: {
+    paddingHorizontal: 18,
+    paddingBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  miniAvatarRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  miniAvatar: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: C.background.primary,
+  },
+  miniAvatarImg: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+  },
+  miniAvatarFallback: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  miniAvatarInitials: {
+    fontSize: 9,
+    fontWeight: '700',
+  },
+  miniAvatarOverflow: {
+    backgroundColor: C.border.light,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  miniAvatarOverflowText: {
+    fontSize: 9,
+    fontWeight: '600',
+    color: C.text.secondary,
+  },
+  coworkerNamesText: {
+    fontSize: 11,
+    color: C.text.tertiary,
+    flex: 1,
+  },
+  breakdownSection: {
+    padding: 12,
+    paddingHorizontal: 18,
+    paddingBottom: 14,
+  },
+  breakdownSectionTitle: {
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    color: C.text.tertiary,
+    marginBottom: 8,
+  },
+  breakdownRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'baseline',
+    paddingVertical: 4,
+  },
+  breakdownLabel: {
+    fontSize: 12,
+    color: C.text.secondary,
+    fontWeight: '500',
+    flex: 1,
+  },
+  breakdownValue: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: C.text.primary,
+  },
+  breakdownTotalLabel: {
+    fontSize: 13,
+    color: C.text.primary,
+    fontWeight: '700',
+  },
+  breakdownTotalValue: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: C.money,
+  },
+  ctaRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginHorizontal: 18,
+    marginTop: 4,
+  },
+
+  ctaButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: C.primary,
+    paddingVertical: 14,
+    borderRadius: 14,
+  },
+
+  ctaButtonSecondary: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: C.error + '12',
+    borderWidth: 1,
+    borderColor: C.error + '30',
+    paddingVertical: 14,
+    borderRadius: 14,
+  },
+  ctaText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#fff',
+  },
+
+  deleteShiftBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    marginHorizontal: 18,
+    marginTop: 10,
+    paddingVertical: 10,
+  },
+  deleteShiftBtnText: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+
+  confirmBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  confirmBox: {
+    position: 'absolute',
+    left: 24,
+    right: 24,
+    top: '35%',
+    backgroundColor: C.background.elevated,
+    borderRadius: BorderRadius.lg,
+    padding: 24,
+    alignItems: 'center',
+    ...Shadows.strong,
+  },
+  confirmIconWrap: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 14,
+  },
+  confirmTitle: {
+    fontSize: 17,
+    fontFamily: Typography.fontFamily.display,
+    fontWeight: '700',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  confirmBody: {
+    fontSize: 13,
+    lineHeight: 19,
+    textAlign: 'center',
+    marginBottom: 22,
+  },
+  confirmActions: {
+    flexDirection: 'row',
+    gap: 10,
+    width: '100%',
+  },
+  confirmBtn: {
+    flex: 1,
+    height: 44,
+    borderRadius: 10,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  confirmBtnText: {
+    fontSize: 14,
+    fontWeight: '700',
+  },
+
+  pagination: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 8,
+  },
+
+  paginationDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: C.border.medium || C.border.light,
+  },
+
+  paginationDotActive: {
+    width: 16,
+    backgroundColor: C.primary,
+  },
+
+  cardArea: {
+    flex: 1,
+    overflow: 'hidden',
   },
 
   content: {
@@ -1397,15 +1813,15 @@ const makeStyles = (C) => ({
   },
 
   scrollContent: {
-    padding: Spacing.lg,
-    paddingBottom: Spacing.xxxl,
+    paddingHorizontal: Spacing.lg,
+    paddingTop: Spacing.sm,
+    paddingBottom: Spacing.md,
   },
 
   // Shift Card
   shiftCard: {
-    backgroundColor: C.background.primary,
+    backgroundColor: C.background.elevated,
     borderRadius: BorderRadius.lg,
-    marginBottom: Spacing.md,
     overflow: 'hidden',
     ...Shadows.small,
   },
@@ -1724,7 +2140,6 @@ const makeStyles = (C) => ({
     borderTopLeftRadius: BorderRadius.xxl,
     borderTopRightRadius: BorderRadius.xxl,
     maxHeight: '75%',
-    paddingBottom: 32,
   },
   modalHeader: {
     alignItems: 'center',

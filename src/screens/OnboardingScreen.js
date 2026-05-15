@@ -10,17 +10,16 @@ import {
   Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { IconCalendarMonth, IconUsersGroup, IconClockHour4 } from '@tabler/icons-react-native';
+import { IconConfetti, IconUsersGroup, IconCalendarBolt } from '@tabler/icons-react-native';
 import { useColors, Typography, Spacing, BorderRadius } from '../constants/DesignSystem';
 
 const { width: W, height: H } = Dimensions.get('window');
 
 const STEPS = [
   {
-    title: 'Organize seus turnos',
-    subtitle: 'Visualize todos os seus turnos em um só lugar, com clareza e simplicidade.',
-    Icon: IconCalendarMonth,
-    // blob positions/sizes per step [x%, y%, size, opacity]
+    title: 'Bem-vindo ao Aurora!',
+    subtitle: 'Aqui você vai ter visibilidade total dos seus plantões — com clareza, sem complicação. Que bom ter você aqui.',
+    Icon: IconConfetti,
     blobs: [
       { x: -0.15, y: -0.05, size: W * 0.9, opacity: 0.45 },
       { x: 0.5,  y: 0.15,  size: W * 0.6, opacity: 0.35 },
@@ -29,8 +28,8 @@ const STEPS = [
     blobColors: ['teal', 'ice', 'teal'],
   },
   {
-    title: 'Saiba quem está junto',
-    subtitle: 'Veja quem mais está escalado no mesmo turno que você.',
+    title: 'Peça para entrar nos grupos',
+    subtitle: 'Para ver seus plantões, você precisa ser adicionado aos grupos pelo seu gestor ou administrador. Manda uma mensagem pra eles — é rapidinho.',
     Icon: IconUsersGroup,
     blobs: [
       { x: 0.4,  y: -0.1,  size: W * 0.8, opacity: 0.4  },
@@ -40,9 +39,9 @@ const STEPS = [
     blobColors: ['mint', 'teal', 'mint'],
   },
   {
-    title: 'Adicione horas facilmente',
-    subtitle: 'Registre horas extras ou ajuste turnos com um toque.',
-    Icon: IconClockHour4,
+    title: 'Agarre seus plantões',
+    subtitle: 'Com os grupos liberados, é só ir pegando os plantões — como se fosse um Pokémon. Vai lá, caça todos.',
+    Icon: IconCalendarBolt,
     blobs: [
       { x: 0.1,  y: 0.05,  size: W * 0.85, opacity: 0.38 },
       { x: 0.55, y: -0.05, size: W * 0.6,  opacity: 0.3  },
