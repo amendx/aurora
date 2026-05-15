@@ -14,11 +14,12 @@ import {
   PanResponder,
 } from 'react-native';
 import * as Haptics from 'expo-haptics';
+import * as SecureStore from 'expo-secure-store';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useShifts } from '../contexts/ShiftsContext';
 import { useColors, Typography, Spacing, BorderRadius, Shadows } from '../constants/DesignSystem';
-import { getShiftValues, calculateShiftValueSync } from '../utils/ShiftValueCalculator';
+import { getFullShiftConfig, calculateShiftValueSync, roundCurrency, getShiftPeriod, shouldUseWeekendValue } from '../utils/ShiftValueCalculator';
 import ShiftBottomSheet from '../components/ShiftBottomSheet';
 import AddManualShiftModal from '../components/AddManualShiftModal';
 import { AuthContext } from '../context/AuthContext';
@@ -73,13 +74,15 @@ const buildWeekDays = (centerDate) => {
 const DayViewScreen = ({ navigation, initialDate }) => {
   const C = useColors();
   const insets = useSafeAreaInsets();
-  const { daysWithShifts } = useShifts();
+  const { daysWithShifts, hoursReport } = useShifts();
   const { user } = useContext(AuthContext);
 
   const today = useMemo(() => new Date(), []);
   const [selectedDate, setSelectedDate] = useState(initialDate || today);
   const [groupColors, setGroupColors] = useState({});
   const [savedValues, setSavedValues] = useState(null);
+  const [fullConfig, setFullConfig] = useState(null);
+  const [dayRealHours, setDayRealHours] = useState({});
 
   const [bsVisible, setBsVisible] = useState(false);
   const [bsShifts, setBsShifts] = useState([]);
@@ -143,9 +146,15 @@ const DayViewScreen = ({ navigation, initialDate }) => {
 
   useEffect(() => {
     const userId = user?.id;
-    getShiftValues().then(v => setSavedValues(v)).catch(() => {});
+    getFullShiftConfig().then(cfg => { setSavedValues(cfg.hourValues); setFullConfig(cfg); }).catch(() => {});
     if (userId) getGroupColors(userId).then(colors => setGroupColors(colors || {}));
   }, [user?.id]);
+
+  useEffect(() => {
+    SecureStore.getItemAsync(`real_hours_${selectedDateStr}`)
+      .then(raw => setDayRealHours(raw ? JSON.parse(raw) : {}))
+      .catch(() => setDayRealHours({}));
+  }, [selectedDateStr]);
 
   const resolveGroupColor = (shift) => {
     const raw = groupColors[String(shift.group?.id)] || shift.group?.color;
@@ -184,7 +193,48 @@ const DayViewScreen = ({ navigation, initialDate }) => {
     const timeStr = parseShiftTime(shift.time);
     const typeKey = shiftTypeKey(shift);
     const badgeColor = SHIFT_TYPE_COLOR[typeKey] || C.primary;
-    const value = calculateShiftValueSync(shift, shift.date, savedValues);
+    const baseValue = calculateShiftValueSync(shift, shift.date, savedValues);
+    const value = (() => {
+      let mult = 1;
+      const monthlyHours = hoursReport?.realHours || 0;
+      if (fullConfig?.loyaltyEnabled && fullConfig.loyaltyOptions?.length) {
+        const tier = fullConfig.loyaltyOptions
+          .filter(o => o.minHours <= monthlyHours)
+          .sort((a, b) => b.minHours - a.minHours)[0];
+        if (tier) mult += tier.percentage / 100;
+      }
+      if (fullConfig?.bonusEnabled && fullConfig.bonus) {
+        const month = new Date(shift.date + 'T00:00:00').getMonth() + 1;
+        if (month >= fullConfig.bonus.startMonth && month <= fullConfig.bonus.endMonth) {
+          mult += (parseFloat(fullConfig.bonus.percentage) || 0) / 100;
+        }
+      }
+      // extra hours from registered real hours
+      const realEntry = dayRealHours[index];
+      let extraValue = 0;
+      if (realEntry?.startTime && realEntry?.endTime) {
+        const toMin = t => { const [h, m] = t.replace('h', ':').split(':').map(Number); return h * 60 + (m || 0); };
+        const scheduledMin = (() => {
+          const parts = (shift.time || '').split(/\s*[–-]\s*/);
+          if (parts.length < 2) return 0;
+          const s = toMin(parts[0].replace(/\s*\([^)]*\)/, '').trim());
+          let e = toMin(parts[1].replace(/\s*\([^)]*\)/, '').trim());
+          if (e < s) e += 1440;
+          return e - s;
+        })();
+        const realStart = toMin(realEntry.startTime);
+        let realEnd = toMin(realEntry.endTime);
+        if (realEnd < realStart) realEnd += 1440;
+        const extraMin = (realEnd - realStart) - scheduledMin;
+        if (extraMin > 0 && savedValues) {
+          const period = getShiftPeriod(shift.label);
+          const useWe = shouldUseWeekendValue(shift.date, shift.label, fullConfig?.fridayNightAsWeekend);
+          const hourly = parseFloat((useWe ? savedValues.weekend : savedValues.weekday)?.[period]) || 0;
+          extraValue = roundCurrency((extraMin / 60) * hourly * mult);
+        }
+      }
+      return roundCurrency(baseValue * mult) + extraValue;
+    })();
 
     let coworkers = TodayCoworkersService.getCoworkers(shift.id);
     if (coworkers.length === 0 && shift?.originalData?.coworkers?.length > 0) {
