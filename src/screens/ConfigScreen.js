@@ -22,12 +22,6 @@ export default function ConfigScreen({ navigation }) {
     weekday: { day: 130, night: 143 },
     weekend: { day: 170, night: 185 },
   });
-  const [loyaltyOptions, setLoyaltyOptions] = useState([
-    { percentage: 10, minHours: 72,  active: false },
-    { percentage: 20, minHours: 120, active: false },
-    { percentage: 25, minHours: 168, active: false },
-    { percentage: 30, minHours: 264, active: false },
-  ]);
   const [bonusEnabled, setBonusEnabled]           = useState(false);
   const [bonus, setBonus]                         = useState({ percentage: 5, startMonth: 3, endMonth: 4 });
   const [fridayNightAsWeekend, setFridayNightAsWeekend] = useState(false);
@@ -44,7 +38,6 @@ export default function ConfigScreen({ navigation }) {
       }
       if (!cfg) return;
       if (cfg.hourValues)               setHourValues(cfg.hourValues);
-      if (cfg.loyaltyOptions)           setLoyaltyOptions(cfg.loyaltyOptions);
       if (cfg.bonusEnabled !== undefined) setBonusEnabled(cfg.bonusEnabled);
       if (cfg.bonus)                    setBonus(cfg.bonus);
       if (cfg.fridayNightAsWeekend !== undefined) setFridayNightAsWeekend(cfg.fridayNightAsWeekend);
@@ -57,18 +50,20 @@ export default function ConfigScreen({ navigation }) {
   const save = async () => {
     try {
       const now = new Date();
-      const loyaltyEnabled = loyaltyOptions.some(o => o.active);
+      const raw = await SecureStore.getItemAsync('shift_configurations');
+      const existing = raw ? JSON.parse(raw) : {};
       const cfg = {
-        hourValues, loyaltyEnabled, loyaltyOptions,
+        ...existing,
+        hourValues,
         bonusEnabled, bonus, fridayNightAsWeekend, fractionalExtraHours,
         savedAt: now.toISOString(),
       };
       await SecureStore.setItemAsync('shift_configurations', JSON.stringify(cfg));
       if (userId) {
-        const existing = await LocalCache.getFinancialConfig(userId);
+        const cachedCfg = await LocalCache.getFinancialConfig(userId);
         await LocalCache.saveFinancialConfig(userId, {
           ...cfg, userId,
-          version: (existing?.version || 0) + 1,
+          version: (cachedCfg?.version || 0) + 1,
           effectiveFrom: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`,
           updatedAt: now.toISOString(),
         });
@@ -87,15 +82,13 @@ export default function ConfigScreen({ navigation }) {
         </Pressable>
       ),
     });
-  }, [hourValues, loyaltyOptions, bonusEnabled, bonus, fridayNightAsWeekend, fractionalExtraHours]);
+  }, [hourValues, bonusEnabled, bonus, fridayNightAsWeekend, fractionalExtraHours]);
 
   const handleHourChange = (period, type, value) =>
     setHourValues(p => ({ ...p, [period]: { ...p[period], [type]: value } }));
 
   const handleBonusChange = (field, value) =>
     setBonus(p => ({ ...p, [field]: value }));
-
-  const activeTier = loyaltyOptions.find(o => o.active);
 
   const vals = [hourValues.weekday.day, hourValues.weekday.night, hourValues.weekend.day, hourValues.weekend.night];
   const avgRate = vals.reduce((a, b) => a + Number(b || 0), 0) / vals.length;
@@ -150,26 +143,20 @@ export default function ConfigScreen({ navigation }) {
       </View>
 
       {/* Fidelização */}
-      <SL C={C} top>
-        {'Fidelização'}
-        <Text style={{ color: C.text.tertiary, fontWeight: '400', textTransform: 'none', letterSpacing: 0 }}> · definido pelo hospital</Text>
-      </SL>
-      <View style={[card(C), { marginHorizontal: Spacing.screen, padding: 14 }]}>
-        <Text style={[t.fidelityHint, { color: C.text.secondary }]}>
-          {activeTier
-            ? `Você está em +${activeTier.percentage}%. Bônus aplicado conforme as horas trabalhadas no mês.`
-            : 'Selecione a faixa de fidelização ativa do seu hospital.'}
-        </Text>
-        <View style={{ marginTop: 12 }}>
-          <FidelityScale
-            C={C}
-            tiers={loyaltyOptions.map(o => ({ hours: o.minHours, pct: o.percentage }))}
-            current={activeTier?.minHours ?? null}
-            onSelect={hours => setLoyaltyOptions(p => p.map(o => ({ ...o, active: o.minHours === hours && !o.active ? true : o.minHours === hours ? false : false })))}
-            onToggle={hours => setLoyaltyOptions(p => p.map(o => ({ ...o, active: o.minHours === hours ? !o.active : false })))}
-          />
+      <SL C={C} top>Fidelização</SL>
+      <Pressable
+        style={[card(C), { marginHorizontal: Spacing.screen, flexDirection: 'row', alignItems: 'center', gap: 12, padding: 12 }]}
+        onPress={() => navigation?.navigate?.('HospitalsScreen')}
+      >
+        <View style={{ width: 32, height: 32, borderRadius: 9, backgroundColor: C.accentSoft, alignItems: 'center', justifyContent: 'center' }}>
+          <Ionicons name="business-outline" size={16} color={C.primary} />
         </View>
-      </View>
+        <View style={{ flex: 1 }}>
+          <Text style={[t.toggleLabel, { color: C.text.primary }]}>Meus hospitais</Text>
+          <Text style={[t.toggleHint, { color: C.text.tertiary }]}>Configure a fidelização por hospital</Text>
+        </View>
+        <Ionicons name="chevron-forward" size={16} color={C.text.tertiary} />
+      </Pressable>
 
       {/* Bônus geral */}
       <SL C={C} top>Bônus geral</SL>
@@ -202,7 +189,7 @@ export default function ConfigScreen({ navigation }) {
       </View>
 
       <Text style={[t.disclaimer, { color: C.text.tertiary }]}>
-        Estas configurações são salvas no seu dispositivo. A fidelização e os valores-base vêm do hospital — alterações aqui afetam apenas a estimativa exibida no app.
+        Estas configurações são salvas no seu dispositivo e sincronizadas com o servidor.
       </Text>
     </ScrollView>
   );
@@ -287,36 +274,6 @@ function ToggleRow({ C, iconName, iconColor, iconBg, label, hint, value, onValue
   );
 }
 
-function FidelityScale({ C, tiers, current, onToggle }) {
-  return (
-    <View style={{ flexDirection: 'row', gap: 4 }}>
-      {tiers.map((tier, i) => {
-        const active = tier.hours === current;
-        return (
-          <Pressable
-            key={i}
-            style={[
-              t.tierCell,
-              {
-                backgroundColor: active ? C.accentSoft : 'transparent',
-                borderColor: active ? C.primary + '40' : 'transparent',
-                flex: 1,
-              },
-            ]}
-            onPress={() => onToggle(tier.hours)}
-          >
-            <Text style={[t.tierPct, { color: active ? C.primary : C.text.tertiary, fontFamily: Typography.fontFamily.display }]}>
-              +{tier.pct}%
-            </Text>
-            <Text style={[t.tierHours, { color: C.text.tertiary, fontFamily: Typography.fontFamily.regular }]}>
-              {tier.hours}h
-            </Text>
-          </Pressable>
-        );
-      })}
-    </View>
-  );
-}
 
 function BonusDetail({ C, bonus, onChange }) {
   const [editing, setEditing] = useState(null); // 'from' | 'to' | null
@@ -469,10 +426,6 @@ const t = StyleSheet.create({
   toggleLabel: { fontSize: 14, fontWeight: '700' },
   toggleHint:  { fontSize: 11, marginTop: 1 },
 
-  tierCell: { padding: 8, borderRadius: 8, borderWidth: 1, alignItems: 'center' },
-  tierPct:   { fontSize: 15, fontWeight: '800', letterSpacing: -0.3 },
-  tierHours: { fontSize: 10, marginTop: 1 },
-
   monthPickerBtn: { paddingHorizontal: 12, paddingVertical: 10, borderRadius: 10 },
   monthPickerLabel: { fontSize: 10, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.6 },
   monthPickerValue: { fontSize: 15, fontWeight: '600' },
@@ -481,6 +434,5 @@ const t = StyleSheet.create({
   monthGridText: { fontSize: 12 },
 
   subLabel: { fontSize: 10.5, fontWeight: '700', letterSpacing: 0.8, textTransform: 'uppercase', marginBottom: 8 },
-  fidelityHint: { fontSize: 11.5, lineHeight: 17 },
   disclaimer: { fontSize: 11, lineHeight: 16, paddingHorizontal: Spacing.screen, paddingTop: 20, paddingBottom: 24 },
 });

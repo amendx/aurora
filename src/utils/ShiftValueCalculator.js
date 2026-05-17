@@ -196,8 +196,35 @@ export const calculateShiftValueWithBreakdown = async (shift, dateString, totalM
       finalValue: baseValue
     };
 
-    // Aplicar bônus de fidelização — tier mais alto que o usuário qualifica por horas do mês
-    if (config.loyaltyEnabled && config.loyaltyOptions) {
+    // Aplicar fidelização — per-institution (priority) ou global (fallback)
+    const instId = String(shift.group?.institution?.id || '');
+    const instCfg = instId ? config.institutionLoyalty?.[instId] : null;
+    const instEarned = instId ? config.currentInstitutionLoyalty?.[instId] : null;
+
+    if (instCfg) {
+      let loyaltyPct = 0;
+      let loyaltyMinH = 0;
+      if (instCfg.autoFromHours) {
+        if (instEarned) {
+          loyaltyPct = instEarned.percentage || 0;
+          loyaltyMinH = instEarned.minHours || 0;
+        } else {
+          const tier = (instCfg.loyaltyOptions || [])
+            .filter(o => o.minHours <= totalMonthlyHours)
+            .sort((a, b) => b.minHours - a.minHours)[0] || null;
+          loyaltyPct = tier?.percentage || 0;
+          loyaltyMinH = tier?.minHours || 0;
+        }
+      } else {
+        loyaltyPct = instCfg.manualPercentage || 0;
+      }
+      if (loyaltyPct > 0) {
+        breakdown.loyaltyBonus = roundCurrency((baseValue * loyaltyPct) / 100);
+        breakdown.loyaltyPercentage = loyaltyPct;
+        breakdown.loyaltyMinHours = loyaltyMinH;
+      }
+    } else if (config.loyaltyEnabled && config.loyaltyOptions) {
+      // Legacy global loyalty fallback
       const activeLoyalty = config.loyaltyOptions
         .filter(o => o.minHours <= totalMonthlyHours)
         .sort((a, b) => b.minHours - a.minHours)[0] || null;

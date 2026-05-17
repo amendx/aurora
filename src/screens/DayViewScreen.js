@@ -43,8 +43,7 @@ const SHIFT_TYPE_COLOR = { M: '#3FA9A7', T: '#97CAFC', N: '#5B6FBF', D: '#5B6FBF
 
 const fmtBRLk = (v) => {
   if (!v || isNaN(v)) return null;
-  if (v >= 1000) return 'R$ ' + (v / 1000).toFixed(1).replace('.', ',') + 'k';
-  return 'R$ ' + v.toFixed(2).replace('.', ',');
+  return v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 };
 
 const parseShiftTime = (timeStr) => {

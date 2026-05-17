@@ -26,7 +26,7 @@ import * as Google from 'expo-auth-session/providers/google';
 import * as ImagePicker from 'expo-image-picker';
 import { AuthContext } from '../context/AuthContext';
 import { useColors, useTheme, Typography, Spacing } from '../constants/DesignSystem';
-import { GOOGLE_WEB_CLIENT_ID, GOOGLE_IOS_CLIENT_ID } from '../services/firebase/GoogleSignInService';
+// import { GOOGLE_WEB_CLIENT_ID, GOOGLE_IOS_CLIENT_ID } from '../services/firebase/GoogleSignInService'; // re-enable with androidClientId
 import Logger from '../utils/Logger';
 
 WebBrowser.maybeCompleteAuthSession();
@@ -177,23 +177,28 @@ export default function AuthScreen() {
   };
 
   // ── Google auth ──────────────────────────────────────────────────────────
-  const [_request, googleResponse, promptGoogleAsync] = Google.useAuthRequest({
-    webClientId: GOOGLE_WEB_CLIENT_ID,
-    iosClientId: GOOGLE_IOS_CLIENT_ID || undefined,
-  });
-
-  useEffect(() => {
-    if (googleResponse?.type === 'success') {
-      const { authentication } = googleResponse;
-      if (authentication?.accessToken) {
-        setGoogleLoading(true);
-        loginWithGoogle(authentication.accessToken)
-          .then((result) => { if (!result?.success) Alert.alert('Erro', result?.error || 'Falha no login com Google'); })
-          .catch((e) => Alert.alert('Erro', e.message))
-          .finally(() => setGoogleLoading(false));
-      }
-    }
-  }, [googleResponse]);
+  // TODO: add EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID to .env.local and uncomment below
+  // expo-auth-session ~7.x requires androidClientId on Android — crashes without it.
+  //
+  // const [_request, googleResponse, promptGoogleAsync] = Google.useAuthRequest({
+  //   webClientId: GOOGLE_WEB_CLIENT_ID,
+  //   iosClientId: GOOGLE_IOS_CLIENT_ID || undefined,
+  //   androidClientId: process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID || undefined,
+  // });
+  //
+  // useEffect(() => {
+  //   if (googleResponse?.type === 'success') {
+  //     const { authentication } = googleResponse;
+  //     if (authentication?.accessToken) {
+  //       setGoogleLoading(true);
+  //       loginWithGoogle(authentication.accessToken)
+  //         .then((result) => { if (!result?.success) Alert.alert('Erro', result?.error || 'Falha no login com Google'); })
+  //         .catch((e) => Alert.alert('Erro', e.message))
+  //         .finally(() => setGoogleLoading(false));
+  //     }
+  //   }
+  // }, [googleResponse]);
+  const promptGoogleAsync = null;
 
   // ── Handlers ─────────────────────────────────────────────────────────────
   const isValidEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
@@ -225,8 +230,8 @@ export default function AuthScreen() {
   };
 
   const handleGooglePress = () => {
-    if (!GOOGLE_WEB_CLIENT_ID) { Alert.alert('Indisponível', 'Login com Google não está configurado.'); return; }
-    promptGoogleAsync();
+    // Google Sign-In disabled — see TODO above (androidClientId missing)
+    Alert.alert('Indisponível', 'Login com Google temporariamente desabilitado.');
   };
 
   const pickPhoto = async () => {
@@ -275,7 +280,7 @@ export default function AuthScreen() {
 
         <KeyboardAvoidingView
           style={s.cardBody}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         >
           <Animated.View style={[s.cardContent, { opacity: contentOpacity }]}>
             {mode === 'login' ? (

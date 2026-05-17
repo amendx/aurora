@@ -32,8 +32,7 @@ const LABEL_MAP = { M: 'Manhã', T: 'Tarde', N: 'Noite', D: 'Noite', FN: 'Sex. N
 
 const fmtBRLk = (v) => {
   if (!v || isNaN(v)) return 'R$ —';
-  if (v >= 1000) return 'R$ ' + (v / 1000).toFixed(1).replace('.', ',') + 'k';
-  return 'R$ ' + v.toFixed(2).replace('.', ',');
+  return v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 };
 
 const parseShiftTime = (timeStr) => {
@@ -585,7 +584,7 @@ const CalendarScreen = ({ navigation }) => {
     <>
       <ScrollView
         style={[s.container]}
-        contentContainerStyle={{ paddingBottom: insets.bottom + Spacing.xl + 70 }}
+        contentContainerStyle={{ paddingBottom: Spacing.xl }}
         showsVerticalScrollIndicator={false}
       >
         {renderMonthHeader()}

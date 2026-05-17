@@ -33,12 +33,11 @@ const HoursEditModal = ({ visible, onClose, onSave, shift, currentHours = {} }) 
   const keyboardOffset = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
-    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    if (Platform.OS !== 'ios') return; // Android resizes the window itself — no offset needed
     const onShow = (e) => Animated.spring(keyboardOffset, { toValue: -e.endCoordinates.height, ...SPRING }).start();
     const onHide = () => Animated.spring(keyboardOffset, { toValue: 0, ...SPRING }).start();
-    const sub1 = Keyboard.addListener(showEvent, onShow);
-    const sub2 = Keyboard.addListener(hideEvent, onHide);
+    const sub1 = Keyboard.addListener('keyboardWillShow', onShow);
+    const sub2 = Keyboard.addListener('keyboardWillHide', onHide);
     return () => { sub1.remove(); sub2.remove(); };
   }, []);
 

@@ -54,8 +54,7 @@ const SHIFT_TYPE_COLOR = {
 
 const fmtBRLk = (v) => {
   if (!v || isNaN(v)) return 'R$ —';
-  if (v >= 1000) return 'R$ ' + (v / 1000).toFixed(1).replace('.', ',') + 'k';
-  return 'R$ ' + v.toFixed(2).replace('.', ',');
+  return v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 };
 
 // Parse "07h00 – 13h00 (M)" or "07:00 - 13:00" → "07:00–13:00"
