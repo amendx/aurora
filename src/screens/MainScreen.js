@@ -43,6 +43,7 @@ import ReportsScreen from './ReportsScreen';
 import GroupVisibilityScreen from './GroupVisibilityScreen';
 import DayViewScreen from './DayViewScreen';
 import HospitalsScreen from './HospitalsScreen';
+import HospitalDetailScreen from './HospitalDetailScreen';
 import ChartsScreen from './ChartsScreen';
 import TabBar from '../components/TabBar';
 import { useColors, Spacing } from '../constants/DesignSystem';
@@ -76,6 +77,7 @@ const SCREEN_MAP = {
   DayView:               'dayView',
   ChartsScreen:          'charts',
   HospitalsScreen:       'hospitals',
+  HospitalDetailScreen:  'hospitalDetail',
 };
 
 export default function MainScreen() {
@@ -396,7 +398,14 @@ export default function MainScreen() {
       case 'charts':
         return <ChartsScreen />;
       case 'hospitals':
-        return <HospitalsScreen navigation={{ goBack: handleBackNavigation }} />;
+        return <HospitalsScreen navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }} />;
+      case 'hospitalDetail':
+        return (
+          <HospitalDetailScreen
+            navigation={{ goBack: handleBackNavigation }}
+            institution={screen.params?.institution}
+          />
+        );
       default:
         return null;
     }

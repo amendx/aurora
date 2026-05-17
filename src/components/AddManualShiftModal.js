@@ -110,134 +110,148 @@ export default function AddManualShiftModal({ visible, onClose, date }) {
     onClose();
   };
 
-  return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <KeyboardAvoidingView
-        style={s.overlay}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+  const sheetContent = (
+    <>
+      <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+      <ScrollView
+        style={[s.sheet, { maxHeight: '90%' }]}
+        contentContainerStyle={{ paddingBottom: insets.bottom + Spacing.lg }}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
       >
-        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
-        <View style={[s.sheet, { paddingBottom: insets.bottom + Spacing.lg }]}>
-          <View style={s.handle} />
-          <Text style={s.title}>Adicionar plantão</Text>
+        <View style={s.handle} />
+        <Text style={s.title}>Adicionar plantão</Text>
 
-          {/* Shift type */}
-          <Text style={s.fieldLabel}>Tipo de plantão</Text>
-          <View style={s.labelRow}>
-            {LABELS.map(l => {
-              const taken = takenLabels.has(l);
-              return (
-                <Pressable
-                  key={l}
-                  style={[
-                    s.labelChip,
-                    label === l && { backgroundColor: C.primary, borderColor: C.primary },
-                    taken && { opacity: 0.35, backgroundColor: C.background.tertiary },
-                  ]}
-                  onPress={() => !taken && onLabelSelect(l)}
-                  disabled={taken}
-                >
-                  <Text style={[s.labelChipText, label === l && { color: '#fff' }]}>{LABEL_NAMES[l]}</Text>
-                  <Text style={{ fontSize: 9, color: taken ? C.text.tertiary : C.text.secondary, marginTop: 2 }}>{taken ? 'já adicionado' : 'disponível'}</Text>
-                </Pressable>
-              );
-            })}
-          </View>
+        {/* Shift type */}
+        <Text style={s.fieldLabel}>Tipo de plantão</Text>
+        <View style={s.labelRow}>
+          {LABELS.map(l => {
+            const taken = takenLabels.has(l);
+            return (
+              <Pressable
+                key={l}
+                style={[
+                  s.labelChip,
+                  label === l && { backgroundColor: C.primary, borderColor: C.primary },
+                  taken && { opacity: 0.35, backgroundColor: C.background.tertiary },
+                ]}
+                onPress={() => !taken && onLabelSelect(l)}
+                disabled={taken}
+              >
+                <Text style={[s.labelChipText, label === l && { color: '#fff' }]}>{LABEL_NAMES[l]}</Text>
+                <Text style={{ fontSize: 9, color: taken ? C.text.tertiary : C.text.secondary, marginTop: 2 }}>{taken ? 'já adicionado' : 'disponível'}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
 
-          {/* Hospital */}
-          <Text style={s.fieldLabel}>Hospital</Text>
-          {hospitals.length > 0 && (
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8 }}>
-              <View style={s.hospitalRow}>
-                {hospitals.map(h => (
-                  <Pressable
-                    key={h}
-                    style={[s.hospitalChip, hospital === h && { backgroundColor: C.accentSoft, borderColor: C.primary }]}
-                    onPress={() => { setHospital(h); setCustomHospital(''); }}
-                  >
-                    <Text style={[s.hospitalChipText, hospital === h && { color: C.primary }]}>{h}</Text>
-                  </Pressable>
-                ))}
+        {/* Hospital */}
+        <Text style={s.fieldLabel}>Hospital</Text>
+        {hospitals.length > 0 && (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8 }} keyboardShouldPersistTaps="handled">
+            <View style={s.hospitalRow}>
+              {hospitals.map(h => (
                 <Pressable
-                  style={[s.hospitalChip, hospital === '__custom__' && { backgroundColor: C.accentSoft, borderColor: C.primary }]}
-                  onPress={() => setHospital('__custom__')}
+                  key={h}
+                  style={[s.hospitalChip, hospital === h && { backgroundColor: C.accentSoft, borderColor: C.primary }]}
+                  onPress={() => { setHospital(h); setCustomHospital(''); }}
                 >
-                  <Text style={[s.hospitalChipText, hospital === '__custom__' && { color: C.primary }]}>Outro…</Text>
+                  <Text style={[s.hospitalChipText, hospital === h && { color: C.primary }]}>{h}</Text>
                 </Pressable>
-              </View>
-            </ScrollView>
-          )}
-          {(hospital === '__custom__' || hospitals.length === 0) && (
+              ))}
+              <Pressable
+                style={[s.hospitalChip, hospital === '__custom__' && { backgroundColor: C.accentSoft, borderColor: C.primary }]}
+                onPress={() => setHospital('__custom__')}
+              >
+                <Text style={[s.hospitalChipText, hospital === '__custom__' && { color: C.primary }]}>Outro…</Text>
+              </Pressable>
+            </View>
+          </ScrollView>
+        )}
+        {(hospital === '__custom__' || hospitals.length === 0) && (
+          <TextInput
+            style={s.input}
+            value={customHospital}
+            onChangeText={setCustomHospital}
+            placeholder="Nome do hospital"
+            placeholderTextColor={C.text.placeholder}
+            autoCapitalize="words"
+          />
+        )}
+
+        {/* Times */}
+        <View style={s.timeRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={s.fieldLabel}>Entrada</Text>
             <TextInput
               style={s.input}
-              value={customHospital}
-              onChangeText={setCustomHospital}
-              placeholder="Nome do hospital"
+              value={startTime}
+              onChangeText={setStartTime}
+              placeholder="07:00"
               placeholderTextColor={C.text.placeholder}
-              autoCapitalize="words"
+              keyboardType="numeric"
+              maxLength={5}
             />
-          )}
+          </View>
+          <View style={s.timeSep}>
+            <Ionicons name="arrow-forward" size={16} color={C.text.tertiary} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={s.fieldLabel}>Saída</Text>
+            <TextInput
+              style={s.input}
+              value={endTime}
+              onChangeText={setEndTime}
+              placeholder="13:00"
+              placeholderTextColor={C.text.placeholder}
+              keyboardType="numeric"
+              maxLength={5}
+            />
+          </View>
+        </View>
 
-          {/* Times */}
-          <View style={s.timeRow}>
-            <View style={{ flex: 1 }}>
-              <Text style={s.fieldLabel}>Entrada</Text>
-              <TextInput
-                style={s.input}
-                value={startTime}
-                onChangeText={setStartTime}
-                placeholder="07:00"
-                placeholderTextColor={C.text.placeholder}
-                keyboardType="numeric"
-                maxLength={5}
-              />
+        {/* Summary */}
+        {duration !== null && (
+          <View style={[s.summary, { backgroundColor: C.background.secondary, borderColor: C.border.light }]}>
+            <View style={s.summaryRow}>
+              <Text style={[s.summaryLabel, { color: C.text.secondary }]}>Duração</Text>
+              <Text style={[s.summaryValue, { color: C.text.primary }]}>
+                {Math.floor(duration / 60)}h{duration % 60 > 0 ? ` ${duration % 60}min` : ''}
+                {crossesMidnight ? ' (vira meia-noite)' : ''}
+              </Text>
             </View>
-            <View style={s.timeSep}>
-              <Ionicons name="arrow-forward" size={16} color={C.text.tertiary} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={s.fieldLabel}>Saída</Text>
-              <TextInput
-                style={s.input}
-                value={endTime}
-                onChangeText={setEndTime}
-                placeholder="13:00"
-                placeholderTextColor={C.text.placeholder}
-                keyboardType="numeric"
-                maxLength={5}
-              />
+            <View style={s.summaryRow}>
+              <Text style={[s.summaryLabel, { color: C.text.secondary }]}>Valor estimado</Text>
+              <Text style={[s.summaryValue, { color: C.money }]}>{fmtBRL(estimatedValue)}</Text>
             </View>
           </View>
+        )}
 
-          {/* Summary */}
-          {duration !== null && (
-            <View style={[s.summary, { backgroundColor: C.background.secondary, borderColor: C.border.light }]}>
-              <View style={s.summaryRow}>
-                <Text style={[s.summaryLabel, { color: C.text.secondary }]}>Duração</Text>
-                <Text style={[s.summaryValue, { color: C.text.primary }]}>
-                  {Math.floor(duration / 60)}h{duration % 60 > 0 ? ` ${duration % 60}min` : ''}
-                  {crossesMidnight ? ' (vira meia-noite)' : ''}
-                </Text>
-              </View>
-              <View style={s.summaryRow}>
-                <Text style={[s.summaryLabel, { color: C.text.secondary }]}>Valor estimado</Text>
-                <Text style={[s.summaryValue, { color: C.money }]}>{fmtBRL(estimatedValue)}</Text>
-              </View>
-            </View>
-          )}
+        <Pressable
+          style={[s.saveBtn, { backgroundColor: C.primary }, !isValid && { opacity: 0.45 }]}
+          onPress={handleSave}
+          disabled={!isValid || saving}
+        >
+          {saving
+            ? <ActivityIndicator size="small" color="#fff" />
+            : <Text style={s.saveBtnText}>Salvar plantão</Text>
+          }
+        </Pressable>
+      </ScrollView>
+    </>
+  );
 
-          <Pressable
-            style={[s.saveBtn, { backgroundColor: C.primary }, !isValid && { opacity: 0.45 }]}
-            onPress={handleSave}
-            disabled={!isValid || saving}
-          >
-            {saving
-              ? <ActivityIndicator size="small" color="#fff" />
-              : <Text style={s.saveBtnText}>Salvar plantão</Text>
-            }
-          </Pressable>
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      {Platform.OS === 'ios' ? (
+        <KeyboardAvoidingView style={s.overlay} behavior="padding">
+          {sheetContent}
+        </KeyboardAvoidingView>
+      ) : (
+        <View style={s.overlay}>
+          {sheetContent}
         </View>
-      </KeyboardAvoidingView>
+      )}
     </Modal>
   );
 }

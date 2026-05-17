@@ -458,6 +458,74 @@ export const ShiftsProvider = ({ children }) => {
 
       const standardHours = realBreakdown.M.hours + realBreakdown.T.hours + realBreakdown.N.hours;
 
+      // Compute hours per institution so loyalty tiers can be auto-resolved per hospital
+      const hoursByInstitution = {};
+      daysWithShifts.forEach(day => {
+        day.shifts.forEach(shift => {
+          const iid = String(shift.group?.institution?.id || '');
+          if (!iid) return;
+          let h = 0;
+          if (shift.splitHours) {
+            h = shift.splitHours.hoursThisMonth;
+          } else {
+            const timeStr = shift.time || '';
+            let parts = timeStr.split(' – ');
+            if (parts.length !== 2) parts = timeStr.split(' - ');
+            if (parts.length === 2) {
+              const norm = t => t.replace(/\s*\([^)]*\)/, '').replace('h', ':').trim();
+              const m = TimeUtils.calculateDurationMinutes(norm(parts[0]), norm(parts[1]));
+              if (m !== null && m > 0) h = m / 60;
+            }
+            if (!h) h = (shift.label?.charAt(0) === 'N' || shift.carryover) ? 12 : 6;
+          }
+          hoursByInstitution[iid] = (hoursByInstitution[iid] || 0) + h;
+        });
+      });
+
+      // Persist earned loyalty tier per institution to SecureStore + LocalCache + Firestore
+      try {
+        const loyaltyCfg = await getFullShiftConfig();
+        const institutionLoyalty = loyaltyCfg.institutionLoyalty || {};
+        if (Object.keys(institutionLoyalty).length > 0) {
+          const currentInstitutionLoyalty = {};
+          for (const [iid, iloy] of Object.entries(institutionLoyalty)) {
+            if (iloy.autoFromHours) {
+              const h = hoursByInstitution[iid] || 0;
+              const tier = (iloy.loyaltyOptions || [])
+                .filter(o => o.minHours <= h)
+                .sort((a, b) => b.minHours - a.minHours)[0] || null;
+              currentInstitutionLoyalty[iid] = {
+                percentage: tier?.percentage || 0,
+                minHours: tier?.minHours || 0,
+                hoursWorked: h,
+                earnedAt: new Date().toISOString(),
+              };
+            } else {
+              currentInstitutionLoyalty[iid] = {
+                percentage: iloy.manualPercentage || 0,
+                manual: true,
+              };
+            }
+          }
+          const updatedCfg = { ...loyaltyCfg, currentInstitutionLoyalty };
+          await SecureStore.setItemAsync('shift_configurations', JSON.stringify(updatedCfg));
+          if (userId) {
+            const existing = await LocalCache.getFinancialConfig(userId);
+            await LocalCache.saveFinancialConfig(userId, {
+              ...updatedCfg, userId,
+              version: (existing?.version || 0) + 1,
+              updatedAt: new Date().toISOString(),
+            });
+            FirebaseAdapter.saveFinancialConfig(userId, { ...updatedCfg, userId }).catch(
+              err => Logger.warn('[Firebase] loyalty sync failed:', err?.message)
+            );
+          }
+          Logger.info(`💾 Loyalty tiers computed and saved for ${Object.keys(currentInstitutionLoyalty).length} institutions`);
+        }
+      } catch (loyaltyErr) {
+        Logger.warn('Loyalty auto-compute error:', loyaltyErr?.message);
+      }
+
       // Calcular horas extras registradas pelo usuário.
       // Reads from the correct key format used by ShiftBottomSheet:
       //   real_hours_{YYYY-MM-DD}  →  { [shiftIndex]: { startTime, endTime, ... } }

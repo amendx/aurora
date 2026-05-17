@@ -30,8 +30,7 @@ const fmtBRL = (v) => {
 
 const fmtBRLk = (v) => {
   if (!v || isNaN(v)) return '—';
-  if (v >= 1000) return 'R$' + (v / 1000).toFixed(1).replace('.', ',') + 'k';
-  return 'R$ ' + v.toFixed(0);
+  return v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 };
 
 // ── LineChart ─────────────────────────────────────────────────────────────────

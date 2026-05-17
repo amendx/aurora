@@ -573,6 +573,27 @@ export class WebClientApiService {
     }
   }
 
+  static async getInstitution(token, id) {
+    try {
+      const url = `${API_BASE_URL}/institutions/${id}`;
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+          'Accept-Version': '2.0',
+          'Authorization': `Bearer ${token}`,
+          'Origin': API_ORIGIN,
+        },
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const json = await response.json();
+      return { success: true, data: json.data || null };
+    } catch (err) {
+      Logger.warn(`[API] getInstitution ${id}: ${err.message}`);
+      return { success: false, data: null };
+    }
+  }
+
   /**
    * Fetch a single shift's full detail.
    * FALLBACK ONLY — use only when daily data is missing/incomplete for a specific shift.

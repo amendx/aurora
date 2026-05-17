@@ -84,6 +84,7 @@ export default function ReportsScreen({ onExportReady } = {}) {
   const [totals, setTotals] = useState({ hours: 0, value: 0 });
   const [computing, setComputing] = useState(false);
   const [chartData, setChartData] = useState([]);
+  const [chartLoading, setChartLoading] = useState(true);
 
   // Refs for debouncing month navigation
   const navigationTimeoutRef = useRef(null);
@@ -267,7 +268,7 @@ export default function ReportsScreen({ onExportReady } = {}) {
     navigateToMonth(d);
   }, [viewDate, navigateToMonth]);
 
-  const isLoading = loading || computing;
+  const isLoading = loading || computing || chartLoading;
 
   const exportCSV = async () => {
     if (rows.length === 0) {
@@ -300,12 +301,13 @@ export default function ReportsScreen({ onExportReady } = {}) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows.length]);
 
-  // Load last 6 months of summaries for bar chart
+  // Load last 3 months of summaries for bar chart
   useEffect(() => {
     if (!user?.id) return;
+    setChartLoading(true);
     const load = async () => {
       const months = [];
-      for (let i = 5; i >= 0; i--) {
+      for (let i = 2; i >= 0; i--) {
         const d = new Date(viewDate.getFullYear(), viewDate.getMonth() - i, 1);
         const mk = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
         const summary = await LocalCache.getSummary(user.id, mk);
@@ -319,6 +321,7 @@ export default function ReportsScreen({ onExportReady } = {}) {
         });
       }
       setChartData(months);
+      setChartLoading(false);
     };
     load();
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -335,8 +338,7 @@ export default function ReportsScreen({ onExportReady } = {}) {
 
   const fmtBRLk = (v) => {
     if (!v || isNaN(v)) return 'R$ —';
-    if (v >= 1000) return 'R$' + (v / 1000).toFixed(1).replace('.', ',') + 'k';
-    return 'R$ ' + v.toFixed(0);
+    return v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
   };
 
   const LABEL_COLORS = {
@@ -374,13 +376,20 @@ export default function ReportsScreen({ onExportReady } = {}) {
       </View>
 
       {/* Bar chart */}
-      {chartData.length > 0 && (
-        <View style={s.chartCard}>
-          <View style={s.chartCardHeader}>
-            <Text style={s.chartCardLabel}>6 meses</Text>
-          </View>
-          <View style={s.chartBars}>
-            {(() => {
+      <View style={s.chartCard}>
+        <View style={s.chartCardHeader}>
+          <Text style={s.chartCardLabel}>3 meses</Text>
+        </View>
+        <View style={s.chartBars}>
+          {chartLoading ? (
+            [0, 1, 2].map(i => (
+              <View key={i} style={[s.chartBarCol, { justifyContent: 'flex-end', gap: 6 }]}>
+                <SkeletonBox width="100%" height={20 + i * 22} style={{ borderRadius: 6 }} />
+                <SkeletonBox width={28} height={10} style={{ borderRadius: 4 }} />
+              </View>
+            ))
+          ) : (
+            (() => {
               const max = Math.max(...chartData.map(d => d.value), 1);
               return chartData.map((b, i) => {
                 const h = Math.max((b.value / max) * 80, b.value > 0 ? 6 : 2);
@@ -401,10 +410,10 @@ export default function ReportsScreen({ onExportReady } = {}) {
                   </View>
                 );
               });
-            })()}
-          </View>
+            })()
+          )}
         </View>
-      )}
+      </View>
 
       {/* Mini stats */}
       <View style={s.miniStatsRow}>
@@ -433,7 +442,7 @@ export default function ReportsScreen({ onExportReady } = {}) {
       {/* Shift list */}
       <Text style={s.sectionLabel}>Plantões do mês</Text>
       <View style={s.listCard}>
-        {isLoading && rows.length === 0 ? (
+        {isLoading ? (
           [0, 1, 2].map(i => (
             <View key={i} style={[s.reportRow, i === 0 && { borderTopWidth: 0 }]}>
               <View style={s.reportDateCol}>

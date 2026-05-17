@@ -1,54 +1,47 @@
-import { useState, useContext } from 'react';
-import {
-  View, Text, TextInput, Pressable, ScrollView,
-  StyleSheet, Alert, ActivityIndicator,
-} from 'react-native';
+import { useMemo } from 'react';
+import { View, Text, Pressable, ScrollView, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { doc, updateDoc } from 'firebase/firestore';
-import { db } from '../services/firebase/config';
-import { AuthContext } from '../context/AuthContext';
+import { useGroups } from '../contexts/GroupsContext';
 import { useColors, Typography, Spacing, BorderRadius, Shadows } from '../constants/DesignSystem';
-import Logger from '../utils/Logger';
+import * as SecureStore from 'expo-secure-store';
+import { useEffect, useState } from 'react';
 
 export default function HospitalsScreen({ navigation }) {
   const C = useColors();
-  const s = makeStyles(C);
   const insets = useSafeAreaInsets();
-  const { user, updateUser } = useContext(AuthContext);
+  const { groups: groupsById } = useGroups();
+  const [loyaltyCfg, setLoyaltyCfg] = useState({});
 
-  const [hospitals, setHospitals] = useState(Array.isArray(user?.hospitals) ? [...user.hospitals] : []);
-  const [input, setInput] = useState('');
-  const [saving, setSaving] = useState(false);
-
-  const addHospital = () => {
-    const h = input.trim();
-    if (!h || hospitals.includes(h)) { setInput(''); return; }
-    setHospitals(prev => [...prev, h]);
-    setInput('');
-  };
-
-  const removeHospital = (h) => {
-    Alert.alert('Remover hospital', `Remover "${h}"?`, [
-      { text: 'Cancelar', style: 'cancel' },
-      { text: 'Remover', style: 'destructive', onPress: () => setHospitals(prev => prev.filter(x => x !== h)) },
-    ]);
-  };
-
-  const handleSave = async () => {
-    setSaving(true);
-    try {
-      if (db && user?.id) {
-        await updateDoc(doc(db, 'users', user.id), { hospitals });
+  useEffect(() => {
+    SecureStore.getItemAsync('shift_configurations').then(raw => {
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        setLoyaltyCfg(parsed.institutionLoyalty || {});
       }
-      await updateUser({ hospitals });
-      navigation?.goBack?.();
-    } catch (err) {
-      Logger.error('HospitalsScreen save error:', err?.message);
-      Alert.alert('Erro', 'Não foi possível salvar. Tente novamente.');
-    } finally {
-      setSaving(false);
-    }
+    }).catch(() => {});
+  }, []);
+
+  // Deduplicate institutions from all groups
+  const institutions = useMemo(() => {
+    const seen = {};
+    Object.values(groupsById).forEach(g => {
+      const inst = g.institution;
+      if (!inst?.id) return;
+      if (!seen[inst.id]) {
+        seen[inst.id] = { id: inst.id, name: inst.name, groups: [] };
+      }
+      seen[inst.id].groups.push(g);
+    });
+    return Object.values(seen).sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+  }, [groupsById]);
+
+  const getLoyaltyBadge = (instId) => {
+    const cfg = loyaltyCfg[String(instId)];
+    if (!cfg) return null;
+    if (cfg.autoFromHours) return 'Auto';
+    if (cfg.manualPercentage > 0) return `+${cfg.manualPercentage}%`;
+    return null;
   };
 
   return (
@@ -57,86 +50,67 @@ export default function HospitalsScreen({ navigation }) {
         <Pressable onPress={() => navigation?.goBack?.()} hitSlop={12} style={s.backBtn}>
           <Ionicons name="chevron-back" size={22} color={C.primary} />
         </Pressable>
-        <Text style={s.title}>Meus hospitais</Text>
+        <Text style={[s.title, { color: C.text.primary }]}>Meus hospitais</Text>
       </View>
 
-      <ScrollView
-        contentContainerStyle={{ padding: Spacing.screen, paddingBottom: insets.bottom + 100 }}
-        keyboardShouldPersistTaps="handled"
-      >
-        <Text style={s.hint}>Adicione os hospitais onde você trabalha. Eles aparecem como opção ao registrar plantões manuais.</Text>
-
-        {/* Input row */}
-        <View style={[s.inputRow, { backgroundColor: C.background.elevated, borderColor: C.border.light }]}>
-          <TextInput
-            style={[s.input, { color: C.text.primary }]}
-            value={input}
-            onChangeText={setInput}
-            placeholder="Nome do hospital"
-            placeholderTextColor={C.text.placeholder}
-            autoCapitalize="words"
-            onSubmitEditing={addHospital}
-            returnKeyType="done"
-          />
-          <Pressable onPress={addHospital} style={[s.addBtn, { backgroundColor: C.primary }]}>
-            <Ionicons name="add" size={20} color="#fff" />
-          </Pressable>
-        </View>
-
-        {/* List */}
-        {hospitals.length === 0 ? (
-          <Text style={[s.empty, { color: C.text.tertiary }]}>Nenhum hospital adicionado ainda.</Text>
+      <ScrollView contentContainerStyle={{ padding: Spacing.screen, paddingBottom: insets.bottom + 32 }}>
+        {institutions.length === 0 ? (
+          <View style={[s.empty, { backgroundColor: C.background.elevated, borderColor: C.border.light }]}>
+            <Ionicons name="business-outline" size={28} color={C.text.tertiary} style={{ marginBottom: 10 }} />
+            <Text style={[s.emptyText, { color: C.text.tertiary }]}>Nenhum hospital vinculado.</Text>
+            <Text style={[s.emptyHint, { color: C.text.tertiary }]}>Os hospitais aparecem automaticamente conforme seus grupos.</Text>
+          </View>
         ) : (
           <View style={[s.list, { backgroundColor: C.background.elevated, borderColor: C.border.light, ...Shadows.small }]}>
-            {hospitals.map((h, i) => (
-              <View key={h} style={[s.row, i < hospitals.length - 1 && { borderBottomWidth: 0.5, borderBottomColor: C.border.light }]}>
-                <Ionicons name="business-outline" size={16} color={C.primary} style={{ marginRight: 10 }} />
-                <Text style={[s.rowText, { color: C.text.primary }]} numberOfLines={1}>{h}</Text>
-                <Pressable onPress={() => removeHospital(h)} hitSlop={10}>
-                  <Ionicons name="trash-outline" size={16} color={C.error} />
+            {institutions.map((inst, i) => {
+              const badge = getLoyaltyBadge(inst.id);
+              return (
+                <Pressable
+                  key={inst.id}
+                  style={[s.row, i < institutions.length - 1 && { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.border.light }]}
+                  onPress={() => navigation?.navigate?.('HospitalDetailScreen', { institution: inst })}
+                >
+                  <View style={[s.iconWrap, { backgroundColor: C.accentSoft }]}>
+                    <Ionicons name="business-outline" size={16} color={C.primary} />
+                  </View>
+                  <View style={s.rowContent}>
+                    <Text style={[s.rowTitle, { color: C.text.primary }]} numberOfLines={1}>{inst.name}</Text>
+                    <Text style={[s.rowSub, { color: C.text.tertiary }]} numberOfLines={1}>
+                      {inst.groups.map(g => g.name).join(' · ')}
+                    </Text>
+                  </View>
+                  {badge ? (
+                    <View style={[s.badge, { backgroundColor: C.money + '1a' }]}>
+                      <Text style={[s.badgeText, { color: C.money }]}>{badge}</Text>
+                    </View>
+                  ) : null}
+                  <Ionicons name="chevron-forward" size={16} color={C.text.tertiary} />
                 </Pressable>
-              </View>
-            ))}
+              );
+            })}
           </View>
         )}
       </ScrollView>
-
-      {/* Save button */}
-      <View style={[s.footer, { paddingBottom: insets.bottom + Spacing.md, backgroundColor: C.background.secondary, borderTopColor: C.border.light }]}>
-        <Pressable style={[s.saveBtn, { backgroundColor: C.primary }]} onPress={handleSave} disabled={saving}>
-          {saving
-            ? <ActivityIndicator size="small" color="#fff" />
-            : <Text style={s.saveBtnText}>Salvar</Text>
-          }
-        </Pressable>
-      </View>
     </View>
   );
 }
 
-const makeStyles = (C) => StyleSheet.create({
+const s = StyleSheet.create({
   root: { flex: 1 },
   header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: Spacing.screen, paddingBottom: 12, gap: 8 },
   backBtn: { padding: 4 },
-  title: { fontSize: 20, fontFamily: Typography.fontFamily.display, fontWeight: '700', color: C.text.primary },
-
-  hint: { fontSize: 13, color: C.text.secondary, lineHeight: 19, marginBottom: Spacing.lg },
-
-  inputRow: {
-    flexDirection: 'row', alignItems: 'center',
-    borderRadius: BorderRadius.md, borderWidth: 1,
-    overflow: 'hidden', marginBottom: Spacing.lg,
-  },
-  input: { flex: 1, paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, fontFamily: Typography.fontFamily.regular },
-  addBtn: { width: 48, alignItems: 'center', justifyContent: 'center', alignSelf: 'stretch' },
-
-  empty: { fontSize: 14, textAlign: 'center', marginTop: Spacing.xl },
+  title: { fontSize: 20, fontFamily: Typography.fontFamily.display, fontWeight: '700' },
 
   list: { borderRadius: BorderRadius.md, borderWidth: 0.5, overflow: 'hidden' },
-  row: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 13 },
-  rowText: { flex: 1, fontSize: 15, fontFamily: Typography.fontFamily.regular },
+  row: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 13, gap: 12 },
+  iconWrap: { width: 32, height: 32, borderRadius: 9, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
+  rowContent: { flex: 1 },
+  rowTitle: { fontSize: 15, fontWeight: '700' },
+  rowSub: { fontSize: 11, marginTop: 1 },
+  badge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 20 },
+  badgeText: { fontSize: 11, fontWeight: '700' },
 
-  footer: { paddingHorizontal: Spacing.screen, paddingTop: Spacing.md, borderTopWidth: 0.5 },
-  saveBtn: { height: 50, borderRadius: BorderRadius.pill, alignItems: 'center', justifyContent: 'center' },
-  saveBtnText: { fontSize: 15, fontFamily: Typography.fontFamily.bold, color: '#fff', fontWeight: '700' },
+  empty: { borderRadius: BorderRadius.md, borderWidth: 0.5, padding: Spacing.xl, alignItems: 'center' },
+  emptyText: { fontSize: 15, fontWeight: '600', marginBottom: 6 },
+  emptyHint: { fontSize: 13, textAlign: 'center', lineHeight: 18 },
 });
