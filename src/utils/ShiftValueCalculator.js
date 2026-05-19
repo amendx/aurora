@@ -309,7 +309,7 @@ export const calculateShiftValueSync = (shift, dateString, savedValues = null) =
   const weekend = isWeekend(dateString);
   const period = getShiftPeriod(shift.label);
   const hours = getShiftHours(shift.label);
-  
+
   // Selecionar valor base correto - corrigir conversão de string para número
   let hourlyValue;
   if (weekend) {
@@ -317,9 +317,89 @@ export const calculateShiftValueSync = (shift, dateString, savedValues = null) =
   } else {
     hourlyValue = parseFloat(values.weekday?.[period]) || DEFAULT_VALUES.weekday[period];
   }
-  
+
   // Calcular valor total
   const totalValue = hourlyValue * hours;
-  
+
   return totalValue;
+};
+
+/**
+ * Synchronous full breakdown — same math as calculateShiftValueWithBreakdown
+ * but accepts a pre-loaded config + monthly hours, so the UI can render the
+ * final value (base + loyalty + general bonus + real-hour extras) without an
+ * async round-trip per card.
+ *
+ * @param {object} shift
+ * @param {string} dateString               "YYYY-MM-DD"
+ * @param {object} config                   getFullShiftConfig() result
+ * @param {number} totalMonthlyHours        for loyalty tier resolution
+ * @param {object} [realHoursEntry]         { startTime, endTime } for the shift, if registered
+ * @returns {number}                        final value in BRL
+ */
+export const calculateShiftFinalValueSync = (shift, dateString, config, totalMonthlyHours = 0, realHoursEntry = null) => {
+  if (!config) return calculateShiftValueSync(shift, dateString, null);
+
+  const useWeekendValue = shouldUseWeekendValue(dateString, shift.label, config.fridayNightAsWeekend);
+  const period = getShiftPeriod(shift.label);
+  const standardHours = getShiftHours(shift.label);
+
+  const rates = config.hourValues || DEFAULT_VALUES;
+  let hourlyValue;
+  if (useWeekendValue) {
+    hourlyValue = parseFloat(rates.weekend?.[period]) || DEFAULT_VALUES.weekend[period];
+  } else {
+    hourlyValue = parseFloat(rates.weekday?.[period]) || DEFAULT_VALUES.weekday[period];
+  }
+
+  // Real hours override (if user logged actual times)
+  let effectiveHours = standardHours;
+  if (realHoursEntry?.startTime && realHoursEntry?.endTime) {
+    const [sh, sm] = realHoursEntry.startTime.split(':').map(Number);
+    const [eh, em] = realHoursEntry.endTime.split(':').map(Number);
+    if (![sh, sm, eh, em].some(isNaN)) {
+      const start = sh * 60 + sm;
+      let end = eh * 60 + em;
+      if (end < start) end += 1440;
+      const realMin = end - start;
+      if (realMin > 0) effectiveHours = realMin / 60;
+    }
+  }
+
+  const baseValue = hourlyValue * effectiveHours;
+
+  // Loyalty — per-institution first, then legacy global
+  let loyaltyPct = 0;
+  const instId = String(shift.group?.institution?.id || '');
+  const instCfg = instId ? config.institutionLoyalty?.[instId] : null;
+  const instEarned = instId ? config.currentInstitutionLoyalty?.[instId] : null;
+  if (instCfg) {
+    if (instCfg.autoFromHours) {
+      if (instEarned) {
+        loyaltyPct = instEarned.percentage || 0;
+      } else {
+        const tier = (instCfg.loyaltyOptions || [])
+          .filter(o => o.minHours <= totalMonthlyHours)
+          .sort((a, b) => b.minHours - a.minHours)[0];
+        loyaltyPct = tier?.percentage || 0;
+      }
+    } else {
+      loyaltyPct = instCfg.manualPercentage || 0;
+    }
+  } else if (config.loyaltyEnabled && config.loyaltyOptions) {
+    const activeLoyalty = config.loyaltyOptions
+      .filter(o => o.minHours <= totalMonthlyHours)
+      .sort((a, b) => b.minHours - a.minHours)[0];
+    loyaltyPct = activeLoyalty?.percentage || 0;
+  }
+  const loyaltyBonus = (baseValue * loyaltyPct) / 100;
+
+  // General bonus
+  let generalBonus = 0;
+  if (config.bonusEnabled && config.bonus && isBonusApplicable(dateString, config.bonus)) {
+    const bonusPct = parseFloat(config.bonus.percentage) || 0;
+    generalBonus = (baseValue * bonusPct) / 100;
+  }
+
+  return baseValue + loyaltyBonus + generalBonus;
 };

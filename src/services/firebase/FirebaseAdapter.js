@@ -321,6 +321,322 @@ const FirebaseAdapter = {
     }));
     return _writeBatched(writes, `saveTimeEntries/${userId}/${monthKey}`);
   },
+
+  /**
+   * Persist an Aurora-native opening to Firestore.
+   * openings/{openingId}
+   */
+  saveOpening: (opening) => {
+    if (!db || !opening?.id) return Promise.resolve();
+    const ref = doc(db, 'openings', String(opening.id));
+    return _write(ref, { ...opening });
+  },
+
+  /**
+   * Atomically claim a slot in an Aurora opening.
+   * Uses setDoc with merge on the specific slot document path.
+   * openings/{openingId}/slots/{slotId}
+   */
+  claimSlot: (openingId, slotId, userId) => {
+    if (!db || !openingId || !slotId || !userId) return Promise.resolve();
+    const ref = doc(db, 'openings', String(openingId), 'slots', String(slotId));
+    return _write(ref, {
+      status: 'claimed',
+      claimedByUserId: String(userId),
+      claimedAt: new Date().toISOString(),
+    });
+  },
+
+  /**
+   * Query openings for a set of group IDs.
+   * Returns raw Firestore docs — caller normalizes with fromFirestore().
+   * openings/ where groupId in groupIds and status == 'active'
+   */
+  getOpeningsForGroups: async (groupIds) => {
+    if (!db || !groupIds?.length) return [];
+    try {
+      const { collection, query, where, getDocs } = await import('firebase/firestore');
+      const chunks = [];
+      for (let i = 0; i < groupIds.length; i += 10) {
+        chunks.push(groupIds.slice(i, i + 10));
+      }
+      const results = [];
+      for (const chunk of chunks) {
+        const q = query(
+          collection(db, 'openings'),
+          where('group.id', 'in', chunk),
+          where('status', '==', 'active'),
+        );
+        const snap = await getDocs(q);
+        snap.forEach(d => results.push({ id: d.id, ...d.data() }));
+      }
+      return results;
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] getOpeningsForGroups: ${err.message}`);
+      return [];
+    }
+  },
+
+  // ── Ceder / Trocar — offers and swaps ──────────────────────────────────────
+
+  /** shiftOffers/{offerId} */
+  createOffer: (offer) => {
+    if (!db || !offer?.id) return Promise.resolve();
+    return _write(doc(db, 'shiftOffers', String(offer.id)), { ...offer }, false);
+  },
+
+  /** Update an existing offer's status (accept/reject/cancel/expire). */
+  respondOffer: (offerId, patch) => {
+    if (!db || !offerId) return Promise.resolve();
+    return _write(doc(db, 'shiftOffers', String(offerId)), {
+      ...patch,
+      respondedAt: patch.respondedAt || new Date().toISOString(),
+    });
+  },
+
+  cancelOffer: (offerId) => {
+    if (!db || !offerId) return Promise.resolve();
+    return _write(doc(db, 'shiftOffers', String(offerId)), {
+      status: 'cancelled',
+      respondedAt: new Date().toISOString(),
+    });
+  },
+
+  /** Query pending offers either sent to OR from a user. */
+  getPendingOffersForUser: async (userId) => {
+    if (!db || !userId) return [];
+    try {
+      const { collection, query, where, getDocs } = await import('firebase/firestore');
+      const uid = String(userId);
+      const [snapTo, snapFrom] = await Promise.all([
+        getDocs(query(collection(db, 'shiftOffers'), where('toUserId', '==', uid), where('status', '==', 'pending'))),
+        getDocs(query(collection(db, 'shiftOffers'), where('fromUserId', '==', uid), where('status', '==', 'pending'))),
+      ]);
+      const out = [];
+      const seen = new Set();
+      const add = (d) => { if (!seen.has(d.id)) { seen.add(d.id); out.push({ id: d.id, ...d.data() }); } };
+      snapTo.forEach(add);
+      snapFrom.forEach(add);
+      return out;
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] getPendingOffersForUser: ${err.message}`);
+      return [];
+    }
+  },
+
+  /** shiftSwaps/{swapId} */
+  createSwap: (swap) => {
+    if (!db || !swap?.id) return Promise.resolve();
+    return _write(doc(db, 'shiftSwaps', String(swap.id)), { ...swap }, false);
+  },
+
+  respondSwap: (swapId, patch) => {
+    if (!db || !swapId) return Promise.resolve();
+    return _write(doc(db, 'shiftSwaps', String(swapId)), {
+      ...patch,
+      respondedAt: patch.respondedAt || new Date().toISOString(),
+    });
+  },
+
+  cancelSwap: (swapId) => {
+    if (!db || !swapId) return Promise.resolve();
+    return _write(doc(db, 'shiftSwaps', String(swapId)), {
+      status: 'cancelled',
+      respondedAt: new Date().toISOString(),
+    });
+  },
+
+  getPendingSwapsForUser: async (userId) => {
+    if (!db || !userId) return [];
+    try {
+      const { collection, query, where, getDocs } = await import('firebase/firestore');
+      const uid = String(userId);
+      const [snapTarget, snapInitiator] = await Promise.all([
+        getDocs(query(collection(db, 'shiftSwaps'), where('targetUserId', '==', uid), where('status', '==', 'pending'))),
+        getDocs(query(collection(db, 'shiftSwaps'), where('initiatorUserId', '==', uid), where('status', '==', 'pending'))),
+      ]);
+      const out = [];
+      const seen = new Set();
+      const add = (d) => { if (!seen.has(d.id)) { seen.add(d.id); out.push({ id: d.id, ...d.data() }); } };
+      snapTarget.forEach(add);
+      snapInitiator.forEach(add);
+      return out;
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] getPendingSwapsForUser: ${err.message}`);
+      return [];
+    }
+  },
+
+  /**
+   * Read a user's upcoming shifts across a list of month keys.
+   * Used by Trocar to surface the target's swappable shifts.
+   */
+  getUserShiftsForMonths: async (userId, monthKeys) => {
+    if (!db || !userId || !monthKeys?.length) return [];
+    try {
+      const { collection, getDocs } = await import('firebase/firestore');
+      const out = [];
+      for (const mk of monthKeys) {
+        const snap = await getDocs(collection(db, 'users', String(userId), 'months', String(mk), 'shifts'));
+        snap.forEach(d => out.push({ id: d.id, monthKey: mk, ...d.data() }));
+      }
+      return out;
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] getUserShiftsForMonths: ${err.message}`);
+      return [];
+    }
+  },
+
+  /**
+   * Delete a single shift from a user's month/shifts subcollection.
+   * Used when a cede-backed opening is claimed — origin shift must be removed.
+   */
+  deleteUserShift: async (userId, monthKey, shiftId) => {
+    if (!db || !userId || !monthKey || !shiftId) return Promise.resolve();
+    try {
+      const { deleteDoc } = await import('firebase/firestore');
+      await deleteDoc(_sub(userId, 'months', monthKey, 'shifts', String(shiftId)));
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] deleteUserShift: ${err.message}`);
+    }
+  },
+
+  // ── Atomic shift transfer / swap ───────────────────────────────────────────
+
+  /**
+   * Atomically move a shift from one user's calendar to another's.
+   * Uses Firestore writeBatch: delete origin + write destination in one commit.
+   * Returns the new shift id (caller mirrors to LocalCache).
+   */
+  transferShift: async (fromUserId, toUserId, shift) => {
+    if (!db || !fromUserId || !toUserId || !shift?.id || !shift?.monthKey) {
+      return { success: false, newShiftId: null };
+    }
+    try {
+      const newId = `received_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      const batch = writeBatch(db);
+      const fromRef = _sub(fromUserId, 'months', shift.monthKey, 'shifts', String(shift.id));
+      const toRef   = _sub(toUserId,   'months', shift.monthKey, 'shifts', newId);
+      const now = new Date().toISOString();
+      batch.delete(fromRef);
+      batch.set(toRef, {
+        ..._stripShift(shift),
+        id: newId,
+        userId: toUserId,
+        source: 'received',
+        originUserId: String(fromUserId),
+        originalShiftId: String(shift.id),
+        transferredAt: now,
+        _updatedAt: now,
+      });
+      await batch.commit();
+      return { success: true, newShiftId: newId };
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] transferShift: ${err.message}`);
+      return { success: false, newShiftId: null };
+    }
+  },
+
+  /**
+   * Atomically swap two shifts between two users.
+   * 4 ops in one batch: delete A's, delete B's, write A→B's slot, write B→A's slot.
+   */
+  swapShifts: async (uidA, uidB, shiftA, shiftB) => {
+    if (!db || !uidA || !uidB || !shiftA?.id || !shiftB?.id) {
+      return { success: false };
+    }
+    try {
+      const newIdForB = `received_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      const newIdForA = `received_${Date.now()}_${Math.random().toString(36).slice(2, 7)}a`;
+      const batch = writeBatch(db);
+      const now = new Date().toISOString();
+
+      // Delete originals
+      batch.delete(_sub(uidA, 'months', shiftA.monthKey, 'shifts', String(shiftA.id)));
+      batch.delete(_sub(uidB, 'months', shiftB.monthKey, 'shifts', String(shiftB.id)));
+
+      // Shift A → B's calendar
+      batch.set(_sub(uidB, 'months', shiftA.monthKey, 'shifts', newIdForB), {
+        ..._stripShift(shiftA),
+        id: newIdForB,
+        userId: uidB,
+        source: 'received',
+        originUserId: String(uidA),
+        originalShiftId: String(shiftA.id),
+        transferredAt: now,
+        _updatedAt: now,
+      });
+
+      // Shift B → A's calendar
+      batch.set(_sub(uidA, 'months', shiftB.monthKey, 'shifts', newIdForA), {
+        ..._stripShift(shiftB),
+        id: newIdForA,
+        userId: uidA,
+        source: 'received',
+        originUserId: String(uidB),
+        originalShiftId: String(shiftB.id),
+        transferredAt: now,
+        _updatedAt: now,
+      });
+
+      await batch.commit();
+      return { success: true, newIdForA, newIdForB };
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] swapShifts: ${err.message}`);
+      return { success: false };
+    }
+  },
+
+  // ── Notifications ──────────────────────────────────────────────────────────
+
+  /** Write an inbox notification for a user. */
+  writeNotification: (userId, notif) => {
+    if (!db || !userId || !notif?.id) return Promise.resolve();
+    return _write(_sub(userId, 'notifications', String(notif.id)), {
+      ...notif,
+      read: notif.read ?? false,
+      createdAt: notif.createdAt || new Date().toISOString(),
+    }, false);
+  },
+
+  markNotificationRead: (userId, notifId) => {
+    if (!db || !userId || !notifId) return Promise.resolve();
+    return _write(_sub(userId, 'notifications', String(notifId)), { read: true });
+  },
+
+  /** users/{userId}/settings/notifications */
+  saveNotificationPrefs: (userId, prefs) =>
+    _write(_sub(userId, 'settings', 'notifications'), { ...prefs }),
+
+  loadNotificationPrefs: async (userId) => {
+    if (!db || !userId) return null;
+    try {
+      const { getDoc } = await import('firebase/firestore');
+      const snap = await getDoc(_sub(userId, 'settings', 'notifications'));
+      return snap.exists() ? snap.data() : null;
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] loadNotificationPrefs: ${err.message}`);
+      return null;
+    }
+  },
+
+  /** users/{userId}/devices/{deviceId} — push token registry */
+  savePushDevice: (userId, deviceId, payload) =>
+    _write(_sub(userId, 'devices', String(deviceId)), { ...payload, registeredAt: new Date().toISOString() }),
+
+  loadPushDevices: async (userId) => {
+    if (!db || !userId) return [];
+    try {
+      const { collection, getDocs } = await import('firebase/firestore');
+      const snap = await getDocs(collection(db, 'users', String(userId), 'devices'));
+      const out = [];
+      snap.forEach(d => out.push({ id: d.id, ...d.data() }));
+      return out;
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] loadPushDevices: ${err.message}`);
+      return [];
+    }
+  },
 };
 
 export default FirebaseAdapter;

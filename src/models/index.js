@@ -274,4 +274,92 @@
  * Stored shape: { dynamic_schedule: ApiDynamicScheduleSlot[], fetchedAt: ISO }
  */
 
+/**
+ * @typedef {Object} Opening
+ * Unified model for a claimable shift slot. Source-agnostic.
+ *
+ * @property {string}           id
+ * @property {'aurora'|'webClient'} source
+ * @property {string}           startISO
+ * @property {string|null}      endISO
+ * @property {string}           dateKey       - "YYYY-MM-DD"
+ * @property {string}           monthKey      - "YYYY-MM"
+ * @property {string}           label         - M | T | N | D | REF | APO | custom
+ * @property {number}           durationMinutes
+ * @property {number}           totalSlots
+ * @property {number}           availableSlots
+ * @property {{ id: string, name: string, color: string, institution: { id: number, name: string, city: string, uf: string } }} group
+ * @property {{ id: string, name: string, photo: string|null, description: string, council: string }[]} coworkers
+ * @property {number|null}      estimatedValue
+ * @property {boolean}          claimable
+ * @property {string|null}      claimedByUserId
+ * @property {string|null}      schedulePublicId
+ * @property {string|null}      webClientTransactionId
+ * @property {string}           createdAt
+ * @property {string|null}      createdBy
+ * @property {string|null}      [restrictedToGroupId]  - When set, only members of this group can see/claim. Used by cede-open.
+ * @property {string|null}      [originShiftId]        - Back-ref to the shift being released (cede-open only).
+ * @property {string|null}      [originUserId]         - Doctor who released the shift (cede-open only).
+ */
+
+/**
+ * @typedef {Object} ShiftOffer
+ * A targeted cede — one doctor offers a specific shift to one colleague.
+ * Firestore path: shiftOffers/{id}
+ *
+ * @property {string} id
+ * @property {'cede'} kind
+ * @property {string} fromUserId            - Firebase UID of the doctor giving up the shift
+ * @property {string} toUserId              - Firebase UID of the targeted colleague
+ * @property {Object} shiftSnapshot         - Immutable snapshot of the shift at offer time
+ * @property {'pending'|'accepted'|'rejected'|'cancelled'|'expired'} status
+ * @property {string} groupId               - Group of the shift (eligibility scope)
+ * @property {string} monthKey
+ * @property {string} createdAt             - ISO
+ * @property {string|null} respondedAt      - ISO; null while pending
+ * @property {string} expiresAt             - ISO = shiftSnapshot.startISO
+ */
+
+/**
+ * @typedef {Object} ShiftSwap
+ * A targeted swap — initiator picks both their shift AND the colleague's shift to trade.
+ * Firestore path: shiftSwaps/{id}
+ *
+ * @property {string} id
+ * @property {'swap'} kind
+ * @property {string} initiatorUserId
+ * @property {string} targetUserId
+ * @property {Object} shiftA                - Initiator's shift snapshot
+ * @property {Object} shiftB                - Target's shift snapshot
+ * @property {'pending'|'accepted'|'rejected'|'cancelled'|'expired'} status
+ * @property {string[]} eligibleGroupIds    - Groups both users are members of (audit)
+ * @property {string[]} monthKeys           - [shiftA.monthKey, shiftB.monthKey]
+ * @property {string} createdAt
+ * @property {string|null} respondedAt
+ * @property {string} expiresAt             - ISO = min(shiftA.startISO, shiftB.startISO)
+ */
+
+/**
+ * @typedef {Object} Notification
+ * In-app inbox entry. Firestore path: users/{uid}/notifications/{id}
+ *
+ * @property {string} id
+ * @property {'ceder_in_my_group'|'ceder_offered_to_me'|'swap_proposed_to_me'|'offer_outcome'} type
+ * @property {string} title
+ * @property {string} body
+ * @property {Object} payload               - Free-form per-type data (e.g. { offerId, swapId, openingId })
+ * @property {boolean} read
+ * @property {string} createdAt             - ISO
+ */
+
+/**
+ * @typedef {Object} NotificationPrefs
+ * Firestore path: users/{uid}/settings/notifications
+ *
+ * @property {boolean} enabled                  - Master switch
+ * @property {boolean} cededInMyGroups          - Someone in my group opened a cede
+ * @property {boolean} swapProposalsToMe        - Someone proposed a swap with me
+ * @property {boolean} myOfferOutcomes          - Outcomes of offers/swaps I initiated
+ */
+
 export default {};

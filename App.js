@@ -1,4 +1,5 @@
 import 'react-native-gesture-handler';
+import './src/utils/Logger'; // silences stray console.* — must load first
 import React, { useContext } from 'react';
 import { View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -6,11 +7,16 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AuthProvider } from './src/context/AuthContext';
 import { ShiftsProvider } from './src/contexts/ShiftsContext';
 import { GroupsProvider } from './src/contexts/GroupsContext';
+import { OpeningsProvider } from './src/contexts/OpeningsContext';
+import { OffersProvider } from './src/contexts/OffersContext';
 import { ThemeProvider } from './src/contexts/ThemeContext';
 import AuthScreen from './src/screens/AuthScreen';
 import MainScreen from './src/screens/MainScreen';
 import { AuthContext } from './src/context/AuthContext';
 import OnboardingScreen from './src/screens/OnboardingScreen';
+import DebugApiCounter from './src/components/DebugApiCounter';
+import NotificationService from './src/services/NotificationService';
+import { useEffect } from 'react';
 
 // To enable Nexa fonts:
 // 1. Download Nexa-Regular.ttf, Nexa-Bold.ttf, Nexa-Heavy.ttf from Fontfabric
@@ -35,6 +41,13 @@ function useCachedFonts() {
 function RootNavigator() {
   const { isAuthenticated, user, completeOnboarding } = useContext(AuthContext);
 
+  // Register for push notifications once we have an authenticated user.
+  useEffect(() => {
+    if (isAuthenticated && user?.id) {
+      NotificationService.registerForPushAsync(user.id);
+    }
+  }, [isAuthenticated, user?.id]);
+
   if (isAuthenticated && user?.showOnboarding) {
     return <OnboardingScreen onDone={completeOnboarding} />;
   }
@@ -53,7 +66,12 @@ export default function App() {
       <AuthProvider>
         <ShiftsProvider>
           <GroupsProvider>
-            <RootNavigator />
+            <OpeningsProvider>
+              <OffersProvider>
+                <RootNavigator />
+                <DebugApiCounter />
+              </OffersProvider>
+            </OpeningsProvider>
           </GroupsProvider>
         </ShiftsProvider>
       </AuthProvider>

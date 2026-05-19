@@ -91,9 +91,10 @@ const SettingsScreen = ({ navigation }) => {
 
       <SL>Conta</SL>
       <View style={s.card}>
-        <Row icon="person-outline"  label="Perfil"                  hint="Foto, nome, informações"      onPress={() => navigation?.navigate?.('Profile')} />
-        <Row icon="people-outline"  label="Grupos"                  hint="Seus grupos e equipes"         onPress={() => navigation?.navigate?.('GroupsScreen')} />
-        <Row icon="eye-outline"     label="Visibilidade de equipes" hint="Quem aparece no seu plantão"   onPress={() => navigation?.navigate?.('GroupVisibilityScreen')} last />
+        <Row icon="person-outline"        label="Perfil"                  hint="Foto, nome, informações"      onPress={() => navigation?.navigate?.('Profile')} />
+        <Row icon="people-outline"        label="Grupos"                  hint="Seus grupos e equipes"         onPress={() => navigation?.navigate?.('GroupsScreen')} />
+        <Row icon="eye-outline"           label="Visibilidade de equipes" hint="Quem aparece no seu plantão"   onPress={() => navigation?.navigate?.('GroupVisibilityScreen')} />
+        <Row icon="notifications-outline" label="Notificações"            hint="Ofertas, trocas e atualizações" onPress={() => navigation?.navigate?.('NotificationsSettingsScreen')} last />
       </View>
 
       <SL top>Plantões & valores</SL>

@@ -44,6 +44,9 @@ import GroupVisibilityScreen from './GroupVisibilityScreen';
 import DayViewScreen from './DayViewScreen';
 import HospitalsScreen from './HospitalsScreen';
 import HospitalDetailScreen from './HospitalDetailScreen';
+import OpeningsScreen from './OpeningsScreen';
+import AvisosScreen from './AvisosScreen';
+import NotificationsSettingsScreen from './NotificationsSettingsScreen';
 import ChartsScreen from './ChartsScreen';
 import TabBar from '../components/TabBar';
 import { useColors, Spacing } from '../constants/DesignSystem';
@@ -64,7 +67,7 @@ const EASING_OUT        = Easing.bezier(0, 0, 0.2, 1);   // ease-out (tab fade)
 
 // Screens that include their own full-screen header + handle their own safe area.
 // These are rendered in the overlay WITHOUT an injected AppHeader.
-const SELF_CONTAINED = new Set(['dayView']);
+const SELF_CONTAINED = new Set(['dayView', 'avisos', 'notifsettings']);
 
 // Map handleNavigation() screen-name → internal state key
 const SCREEN_MAP = {
@@ -78,6 +81,9 @@ const SCREEN_MAP = {
   ChartsScreen:          'charts',
   HospitalsScreen:       'hospitals',
   HospitalDetailScreen:  'hospitalDetail',
+  OpeningsScreen:        'openings',
+  AvisosScreen:          'avisos',
+  NotificationsSettingsScreen: 'notifsettings',
 };
 
 export default function MainScreen() {
@@ -230,6 +236,7 @@ export default function MainScreen() {
   const handleBackNavigation = () => {
     if (isAnimating.current) return;
     isAnimating.current = true;
+    Logger.nav(`pop ← ${currentScreen || 'overlay'}`);
 
     const finish = () => {
       setOverlayScreen(null);
@@ -283,24 +290,20 @@ export default function MainScreen() {
 
   // ── Tab switch ────────────────────────────────────────────────────────────────
   const handleTabPress = (tabId) => {
-    // If coming from a sub-screen, pop first then switch tab
     if (overlayScreen !== null) {
       handleBackNavigation();
-      // Tab switch happens after pop completes — defer via state
-      // (pop finish sets currentScreen to null; tab is already correct after this)
       setCurrentTab(tabId);
+      Logger.nav(`tab → ${tabId}`);
       return;
     }
     if (currentTab === tabId) return;
-
-    // Instant switch — tabs stay mounted, display:none toggles layout participation.
-    // No crossfade needed; native tab bars never crossfade (iOS, Android, WhatsApp, etc.)
     setCurrentTab(tabId);
+    Logger.nav(`tab → ${tabId}`);
   };
 
   // ── Navigation handler (called by child screens) ───────────────────────────────
   const handleNavigation = (screenName, params = null) => {
-    Logger.debug(`📱 Navegação para: ${screenName}`);
+    Logger.nav(`push → ${screenName}`);
     if (screenName === 'calendar') {
       handleTabPress('calendar');
       return;
@@ -349,6 +352,17 @@ export default function MainScreen() {
         return { title: 'Valores do Plantão', subtitle: 'Configure valores e parâmetros', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
       case 'charts':
         return { title: 'Gráficos', subtitle: 'Estimativas mensais', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
+      case 'hospitals':
+        return { title: 'Meus hospitais', subtitle: 'Instituições e fidelização', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
+      case 'hospitalDetail': {
+        const inst = screenParams?.institution;
+        return {
+          title: inst?.popular_name || inst?.name || 'Hospital',
+          showBackButton: true, onBackPress: handleBackNavigation, backLabel,
+        };
+      }
+      case 'openings':
+        return { title: 'Vagas disponíveis', subtitle: 'Plantões em aberto', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
       default:
         return { title: '', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
     }
@@ -406,6 +420,12 @@ export default function MainScreen() {
             institution={screen.params?.institution}
           />
         );
+      case 'openings':
+        return <OpeningsScreen navigation={{ goBack: handleBackNavigation }} />;
+      case 'avisos':
+        return <AvisosScreen navigation={{ goBack: handleBackNavigation }} />;
+      case 'notifsettings':
+        return <NotificationsSettingsScreen navigation={{ goBack: handleBackNavigation }} />;
       default:
         return null;
     }
