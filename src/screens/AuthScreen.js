@@ -274,7 +274,7 @@ export default function AuthScreen() {
 
       {/* Animated card */}
       <Animated.View style={[s.cardContainer, { top: cardTopAnim }]}>
-        <Svg viewBox="0 0 390 60" preserveAspectRatio="none" width={W} height={50}>
+        <Svg viewBox="0 0 390 60" preserveAspectRatio="none" width={W} height={50} style={{ marginBottom: -2 }}>
           <Path d="M0 30 Q97 0 195 30 T390 30 V60 H0 Z" fill={C.background.card} />
         </Svg>
 
@@ -604,14 +604,14 @@ const makeStyles = (C) => StyleSheet.create({
   cardContainer: {
     position: 'absolute',
     left: 0, right: 0, bottom: 0,
-  },
-  cardBody: {
-    flex: 1,
-    backgroundColor: C.background.card,
     ...Platform.select({
       ios:     { shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.08, shadowRadius: 16 },
       android: { elevation: 8 },
     }),
+  },
+  cardBody: {
+    flex: 1,
+    backgroundColor: C.background.card,
   },
   cardContent: { flex: 1 },
   cardScroll: { paddingHorizontal: 24, paddingTop: 8, paddingBottom: 16 },

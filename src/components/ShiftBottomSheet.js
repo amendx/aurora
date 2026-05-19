@@ -137,6 +137,8 @@ const ShiftBottomSheet = ({
   calculateShiftValue,
   onHoursChanged,
   onNavigateToGroup,
+  onCede,
+  onTrocar,
 }) => {
   const C = useColors();
   const s = makeStyles(C);
@@ -844,6 +846,20 @@ const ShiftBottomSheet = ({
             ) : null}
           </View>
         </View>
+
+        {/* Received-shift attribution */}
+        {shift?.source === 'received' && (shift?.originUserName || shift?.originUserId) ? (
+          <>
+            <View style={s.hairlineRow} />
+            <View style={s.infoRow}>
+              <Ionicons name="enter-outline" size={15} color={C.text.secondary} />
+              <Text style={s.infoRowLabel}>Recebido de</Text>
+              <Text style={s.infoRowValue} numberOfLines={1}>
+                {shift.originUserName || `Doutor#${String(shift.originUserId).slice(0, 6)}`}
+              </Text>
+            </View>
+          </>
+        ) : null}
          {/* Horas registradas — A2 design */}
         {hasRegisteredHours ? (
           <>
@@ -1119,6 +1135,26 @@ const ShiftBottomSheet = ({
         {/* CTA — fixed at bottom, always visible */}
         {shifts && shifts.length > 0 ? (
           <View style={{ marginBottom: 14 + insets.bottom }}>
+            {(() => {
+              const sh = shifts[currentShiftIdx];
+              const startTs = sh?.startISO ? new Date(sh.startISO).getTime() : 0;
+              const isAuroraOwned = sh?.isManual
+                || ['aurora', 'aurora_opening', 'received'].includes(sh?.source);
+              const canCedeOrSwap = !!onCede && !!onTrocar && isAuroraOwned && startTs > Date.now();
+              if (!canCedeOrSwap) return null;
+              return (
+                <View style={s.transferActionsRow}>
+                  <TouchableOpacity style={s.transferActionBtn} onPress={() => onCede(sh)}>
+                    <Ionicons name="exit-outline" size={15} color={C.primary} />
+                    <Text style={[s.transferActionText, { color: C.primary }]}>Ceder</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={s.transferActionBtn} onPress={() => onTrocar(sh)}>
+                    <Ionicons name="swap-horizontal" size={15} color={C.primary} />
+                    <Text style={[s.transferActionText, { color: C.primary }]}>Trocar</Text>
+                  </TouchableOpacity>
+                </View>
+              );
+            })()}
             <View style={s.ctaRow}>
               {getHoursSummary(shifts[currentShiftIdx], currentShiftIdx) === null ? (
                 <TouchableOpacity style={[s.ctaButton, { flex: 1 }]} onPress={() => openHoursEditor(currentShiftIdx)}>
@@ -1192,12 +1228,14 @@ const ShiftBottomSheet = ({
                 const groupVacancies = vacanciesByGroup.filter(
                   v => !group.groupId || String(v.groupId) === String(group.groupId)
                 );
+                const memberCount = group.coworkers.length;
+                const vacancyCount = groupVacancies.reduce((acc, v) => acc + (v.available || 0), 0);
                 return (
-                  <View key={group.groupId || gi}>
+                  <View key={group.groupId || gi} style={s.teamGroupBlock}>
                     {showGroupHeaders ? (
                       <TouchableOpacity
-                        style={s.modalGroupHeader}
-                        activeOpacity={onNavigateToGroup && group.groupId ? 0.6 : 1}
+                        style={s.teamGroupHeader}
+                        activeOpacity={onNavigateToGroup && group.groupId ? 0.7 : 1}
                         onPress={() => {
                           if (onNavigateToGroup && group.groupId) {
                             setCoworkersModal(null);
@@ -1205,63 +1243,47 @@ const ShiftBottomSheet = ({
                           }
                         }}
                       >
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                          {group.groupColor ? (
-                            <View style={[s.groupColorDot, { backgroundColor: group.groupColor }]} />
-                          ) : null}
-                          <Text style={s.modalGroupName} numberOfLines={1}>
-                            {group.groupName || 'Grupo'}
-                          </Text>
-                          {onNavigateToGroup && group.groupId ? (
-                            <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
-                          ) : null}
+                        <Text style={s.teamGroupName} numberOfLines={1}>
+                          {group.groupName || 'Grupo'}
+                        </Text>
+                        <View style={s.teamGroupCount}>
+                          <Text style={s.teamGroupCountText}>{memberCount}</Text>
                         </View>
-                        {group.institutionName ? (
-                          <Text style={s.modalGroupInstitution} numberOfLines={1}>
-                            {group.institutionName}
-                          </Text>
-                        ) : null}
                       </TouchableOpacity>
                     ) : null}
-                    {group.coworkers.map(person => (
-                      <View key={person.id} style={s.modalPersonRow}>
-                        <CoworkerAvatar person={person} />
-                        <View style={s.modalPersonInfo}>
-                          <Text style={s.modalPersonName} numberOfLines={1}>
-                            {person.full_name || person.name}
-                          </Text>
-                          {person.description ? (
-                            <Text style={s.modalPersonDesc} numberOfLines={1}>
-                              {person.description}
-                            </Text>
-                          ) : null}
-                          {person.council ? (
-                            <Text style={s.modalPersonCouncil} numberOfLines={1}>
-                              {person.council}
-                            </Text>
-                          ) : null}
-                        </View>
-                      </View>
-                    ))}
-                    {groupVacancies.flatMap((v, vi) =>
-                      Array.from({ length: v.available ?? 0 }).map((_, si) => {
-                        const av = makeAvatarStyles(C);
-                        return (
-                          <View key={`vacancy-${v.groupId || vi}-${si}`} style={s.modalPersonRow}>
-                            <View style={av.item}>
-                              <View style={[av.fallback, { backgroundColor: C.warning + '18', borderWidth: 1.5, borderColor: C.warning + '60', borderStyle: 'dashed' }]}>
-                                <Ionicons name="star-outline" size={16} color={C.warning} />
-                              </View>
-                              <Text style={[av.name, { color: C.warning }]} numberOfLines={1}>Vago</Text>
+                    {group.coworkers.map((person, pi) => {
+                      const fullName = person.full_name || person.name || '';
+                      const initials = _initials(person.name);
+                      const meta = [person.description, person.council].filter(Boolean).join(' · ');
+                      return (
+                        <View key={person.id || pi} style={s.teamRow}>
+                          {person.photo ? (
+                            <Image source={{ uri: person.photo }} style={s.teamAvatar} />
+                          ) : (
+                            <View style={[s.teamAvatar, s.teamAvatarFallback]}>
+                              <Text style={s.teamAvatarInitials}>{initials}</Text>
                             </View>
-                            <View style={s.modalPersonInfo}>
-                              <Text style={[s.modalPersonName, { color: C.warning }]} numberOfLines={1}>
-                                Vaga Aberta
-                              </Text>
-                            </View>
+                          )}
+                          <View style={s.teamRowInfo}>
+                            <Text style={s.teamRowName} numberOfLines={1}>{fullName}</Text>
+                            {meta ? (
+                              <Text style={s.teamRowMeta} numberOfLines={1}>{meta}</Text>
+                            ) : null}
                           </View>
-                        );
-                      })
+                        </View>
+                      );
+                    })}
+                    {groupVacancies.flatMap((v, vi) =>
+                      Array.from({ length: v.available ?? 0 }).map((_, si) => (
+                        <View key={`vacancy-${v.groupId || vi}-${si}`} style={s.teamRow}>
+                          <View style={[s.teamAvatar, s.teamAvatarVacancy]}>
+                            <Ionicons name="star-outline" size={16} color={C.warning} />
+                          </View>
+                          <View style={s.teamRowInfo}>
+                            <Text style={[s.teamRowName, { color: C.warning }]} numberOfLines={1}>Vaga aberta</Text>
+                          </View>
+                        </View>
+                      ))
                     )}
                   </View>
                 );
@@ -1608,8 +1630,7 @@ const makeStyles = (C) => ({
     width: 28,
     height: 28,
     borderRadius: 14,
-    borderWidth: 1.5,
-    borderColor: C.background.primary,
+    overflow: 'hidden',
   },
   miniAvatarImg: {
     width: 28,
@@ -1687,6 +1708,29 @@ const makeStyles = (C) => ({
     gap: 10,
     marginHorizontal: 18,
     marginTop: 4,
+  },
+
+  transferActionsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginHorizontal: 18,
+    marginBottom: 10,
+  },
+  transferActionBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: C.accentSoft,
+    borderWidth: 0.5,
+    borderColor: C.primary + '30',
+  },
+  transferActionText: {
+    fontSize: 13,
+    fontWeight: '700',
   },
 
   ctaButton: {
@@ -2176,31 +2220,89 @@ const makeStyles = (C) => ({
     paddingHorizontal: Spacing.lg,
     paddingTop: Spacing.sm,
   },
-  modalPersonRow: {
+  // ── Team modal (reference: B _ Lista clean _ dark) ─────────────────────────
+  teamGroupBlock: {
+    marginBottom: Spacing.lg,
+  },
+  teamGroupHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: Spacing.sm,
+    justifyContent: 'space-between',
+    paddingTop: Spacing.md,
+    paddingBottom: Spacing.sm,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: C.border.light,
+    marginBottom: Spacing.sm,
   },
-  modalPersonInfo: {
+  teamGroupName: {
     flex: 1,
-    marginLeft: Spacing.sm,
-  },
-  modalPersonName: {
-    fontSize: Typography.fontSize.subhead,
-    fontWeight: Typography.fontWeight.medium,
-    color: C.text.primary,
-  },
-  modalPersonDesc: {
-    fontSize: Typography.fontSize.footnote,
-    color: C.text.secondary,
-    marginTop: 1,
-  },
-  modalPersonCouncil: {
-    fontSize: Typography.fontSize.caption1,
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
     color: C.text.tertiary,
-    marginTop: 1,
+  },
+  teamGroupCount: {
+    minWidth: 22,
+    height: 20,
+    paddingHorizontal: 7,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: C.background.secondary,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: C.border.light,
+  },
+  teamGroupCountText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: C.text.secondary,
+  },
+  teamRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    gap: 12,
+  },
+  teamAvatar: {
+    width: 40,
+    height: 40,
+    borderRadius: 10,
+    backgroundColor: C.background.secondary,
+  },
+  teamAvatarFallback: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: C.primaryLight + '22',
+  },
+  teamAvatarVacancy: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: C.warning + '18',
+    borderWidth: 1,
+    borderColor: C.warning + '55',
+    borderStyle: 'dashed',
+  },
+  teamAvatarInitials: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: C.primary,
+    letterSpacing: -0.2,
+  },
+  teamRowInfo: {
+    flex: 1,
+    minWidth: 0,
+  },
+  teamRowName: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: C.text.primary,
+    letterSpacing: -0.1,
+  },
+  teamRowMeta: {
+    fontSize: 11.5,
+    color: C.text.tertiary,
+    marginTop: 2,
   },
 
   // Vacancy badge

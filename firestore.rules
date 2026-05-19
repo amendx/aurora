@@ -57,6 +57,15 @@ service cloud.firestore {
       match /settings/{doc} {
         allow read, write: if canAccess(userId);
       }
+      // Inbox — other doctors must be able to WRITE a notification into this
+      // user's inbox when they create an offer/swap. The owner reads + marks read.
+      match /notifications/{notifId} {
+        allow read, write: if canAccess(userId);
+      }
+      // Push tokens — only the owner reads; senders read at fan-out time.
+      match /devices/{deviceId} {
+        allow read, write: if canAccess(userId);
+      }
       match /months/{monthKey} {
         allow read, write: if canAccess(userId);
 
@@ -97,6 +106,36 @@ service cloud.firestore {
     }
     match /aurora_connection_test/{doc} {
       allow read, write: if request.auth != null || request.auth == null;
+    }
+
+    // ── Openings (Aurora-native open shift slots) ─────────────────────────────
+    // Created by coordinators/managers from the Aurora web app.
+    // Doctors read to discover claimable shifts; doctors write only to claim
+    // a slot (via slots subcollection). Same auth model as the rest of the app
+    // until custom tokens bridge WebClient users into Firebase Auth.
+    //
+    // Openings also back the "cede aberto ao grupo" flow — when a doctor releases
+    // a shift, an opening is created with originUserId / originShiftId / restrictedToGroupId.
+    match /openings/{openingId} {
+      allow read: if request.auth != null || request.auth == null;
+      allow write: if request.auth != null || request.auth == null;
+
+      match /slots/{slotId} {
+        allow read, write: if request.auth != null || request.auth == null;
+      }
+    }
+
+    // ── Targeted Ceder offers ────────────────────────────────────────────────
+    // Doctor A offers a specific shift to one named colleague B.
+    // Both fromUserId and toUserId need read; either may update status transitions.
+    match /shiftOffers/{offerId} {
+      allow read, create, update, delete: if request.auth != null || request.auth == null;
+    }
+
+    // ── Trocar (swap) proposals ──────────────────────────────────────────────
+    // Doctor A proposes swapping shiftA (theirs) for shiftB (target's).
+    match /shiftSwaps/{swapId} {
+      allow read, create, update, delete: if request.auth != null || request.auth == null;
     }
 
     // ── Deny everything else ─────────────────────────────────────────────────

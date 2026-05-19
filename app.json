@@ -30,7 +30,14 @@
     "plugins": [
       "expo-secure-store",
       "expo-image-picker",
-      "expo-web-browser"
+      "expo-web-browser",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#2F9266"
+        }
+      ]
     ]
   }
 }

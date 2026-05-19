@@ -106,14 +106,6 @@ export default function HospitalDetailScreen({ navigation, institution: instProp
 
   return (
     <View style={[s.root, { backgroundColor: C.background.secondary }]}>
-      {/* Header */}
-      <View style={[s.header, { paddingTop: insets.top + 12 }]}>
-        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={12} style={s.backBtn}>
-          <Ico name="chevron-back" size={22} color={C.primary} />
-        </Pressable>
-        <Text style={[s.title, { color: C.text.primary }]} numberOfLines={1}>{d.popular_name || d.name || 'Hospital'}</Text>
-      </View>
-
       <ScrollView contentContainerStyle={{ padding: Spacing.screen, paddingBottom: insets.bottom + 100 }}>
 
         {/* Institution info card */}
@@ -222,9 +214,6 @@ export default function HospitalDetailScreen({ navigation, institution: instProp
 
 const s = StyleSheet.create({
   root: { flex: 1 },
-  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: Spacing.screen, paddingBottom: 12, gap: 8 },
-  backBtn: { padding: 4 },
-  title: { flex: 1, fontSize: 18, fontFamily: Typography.fontFamily.display, fontWeight: '700' },
 
   card: { borderRadius: BorderRadius.md, borderWidth: 0.5, overflow: 'hidden', marginBottom: Spacing.sm, ...Shadows.small },
 

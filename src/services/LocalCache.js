@@ -46,6 +46,8 @@ const K = {
   financialConfig: (uid)      => `${P}_finconfig_${uid}`,
   migrationVersion:(uid)      => `${P}_migration_v_${uid}`,
   manualShifts:    (uid, mk)  => `${P}_manual_${uid}_${mk}`,
+  openings:        (uid, mk)  => `${P}_openings_${uid}_${mk}`,
+  openingsLastFetch: (uid)    => `${P}_openings_last_fetch_${uid}`,
 };
 
 // ── Staleness helpers ─────────────────────────────────────────────────────────
@@ -428,6 +430,26 @@ const deleteManualShift = async (userId, shiftId, monthKey) => {
   return _set(K.manualShifts(userId, monthKey), existing.filter(s => s.id !== shiftId));
 };
 
+// ── Openings ──────────────────────────────────────────────────────────────────
+
+const OPENINGS_TTL_MS = 15 * 60_000; // 15 min
+
+const getOpenings = async (userId, monthKey) => {
+  const raw = await _get(K.openings(userId, monthKey));
+  return Array.isArray(raw) ? raw : [];
+};
+
+const saveOpenings = async (userId, monthKey, openings) => {
+  await _set(K.openings(userId, monthKey), openings);
+  await _set(K.openingsLastFetch(userId), new Date().toISOString());
+};
+
+const isOpeningsStale = async (userId) => {
+  const ts = await _get(K.openingsLastFetch(userId));
+  if (!ts) return true;
+  return Date.now() - new Date(ts).getTime() > OPENINGS_TTL_MS;
+};
+
 // ── Firebase adapter registration ─────────────────────────────────────────────
 
 /**
@@ -483,6 +505,11 @@ const LocalCache = {
   getManualShifts,
   saveManualShift,
   deleteManualShift,
+
+  // Openings
+  getOpenings,
+  saveOpenings,
+  isOpeningsStale,
 
   // Migration
   getMigrationVersion,

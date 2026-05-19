@@ -74,7 +74,9 @@ const formatHoursWithExtras = (plannedMinutes, extraMinutes) => {
 const SCREEN_W = Dimensions.get('window').width;
 
 export default function ReportsScreen({ onExportReady } = {}) {
-  const { daysWithShifts, loading, loadMonthlyShifts } = useShifts();
+  const { loading, prefetchMonth, getMonthCache } = useShifts();
+  const [reportsDaysWithShifts, setReportsDaysWithShifts] = useState([]);
+  const daysWithShifts = reportsDaysWithShifts;
   const C = useColors();
   const insets = useSafeAreaInsets();
   const s = makeStyles(C);
@@ -109,22 +111,26 @@ export default function ReportsScreen({ onExportReady } = {}) {
     isNavigatingRef.current = true;
 
     // Wait 500ms after the last click before loading data
-    navigationTimeoutRef.current = setTimeout(() => {
-      const month = pendingDateRef.current.getMonth() + 1;
-      const year = pendingDateRef.current.getFullYear();
+    navigationTimeoutRef.current = setTimeout(async () => {
+      const m = pendingDateRef.current.getMonth() + 1;
+      const y = pendingDateRef.current.getFullYear();
 
-      loadMonthlyShifts(month, year);
+      await prefetchMonth(m, y);
+      setReportsDaysWithShifts(getMonthCache(m, y)?.daysWithShifts || []);
 
       isNavigatingRef.current = false;
       pendingDateRef.current = null;
     }, 500);
-  }, [loadMonthlyShifts]);
+  }, [prefetchMonth, getMonthCache]);
 
   // Load data immediately on mount, then rely on navigateToMonth for subsequent changes
   useEffect(() => {
     // Only load on initial mount
     if (!isNavigatingRef.current) {
-      loadMonthlyShifts(month, year);
+      (async () => {
+        await prefetchMonth(month, year);
+        setReportsDaysWithShifts(getMonthCache(month, year)?.daysWithShifts || []);
+      })();
     }
 
     // Cleanup function to clear timeout on unmount

@@ -16,6 +16,8 @@ import { useShifts } from '../contexts/ShiftsContext';
 import { useColors, Typography, Spacing, Shadows } from '../constants/DesignSystem';
 import Logger from '../utils/Logger';
 import ShiftBottomSheet from '../components/ShiftBottomSheet';
+import CederFlowSheet from './CederFlowSheet';
+import TrocarFlowSheet from './TrocarFlowSheet';
 import LocalCache from '../services/LocalCache';
 import { getShiftValues, getFullShiftConfig, calculateShiftValueSync } from '../utils/ShiftValueCalculator';
 import { getGroupColors } from '../utils/GroupColorConfig';
@@ -93,6 +95,8 @@ const CalendarScreen = ({ navigation }) => {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [isNavigating, setIsNavigating] = useState(false);
   const [bottomSheetVisible, setBottomSheetVisible] = useState(false);
+  const [cedeShift, setCedeShift] = useState(null);
+  const [trocarShift, setTrocarShift] = useState(null);
   const [selectedDayData, setSelectedDayData] = useState(null);
   const [shiftValues, setShiftValues] = useState(null);
   const [loyaltyConfig, setLoyaltyConfig] = useState(null);
@@ -615,7 +619,11 @@ const CalendarScreen = ({ navigation }) => {
         calculateShiftValue={calculateShiftValueForBottomSheet}
         onHoursChanged={handleHoursChanged}
         onNavigateToGroup={handleNavigateToGroup}
+        onCede={(sh) => { setBottomSheetVisible(false); setCedeShift(sh); }}
+        onTrocar={(sh) => { setBottomSheetVisible(false); setTrocarShift(sh); }}
       />
+      <CederFlowSheet visible={!!cedeShift} shift={cedeShift} onClose={() => setCedeShift(null)} />
+      <TrocarFlowSheet visible={!!trocarShift} shift={trocarShift} onClose={() => setTrocarShift(null)} />
     </>
   );
 };

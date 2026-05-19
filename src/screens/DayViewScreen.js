@@ -21,6 +21,8 @@ import { useShifts } from '../contexts/ShiftsContext';
 import { useColors, Typography, Spacing, BorderRadius, Shadows } from '../constants/DesignSystem';
 import { getFullShiftConfig, calculateShiftValueSync, roundCurrency, getShiftPeriod, shouldUseWeekendValue } from '../utils/ShiftValueCalculator';
 import ShiftBottomSheet from '../components/ShiftBottomSheet';
+import CederFlowSheet from './CederFlowSheet';
+import TrocarFlowSheet from './TrocarFlowSheet';
 import AddManualShiftModal from '../components/AddManualShiftModal';
 import { AuthContext } from '../context/AuthContext';
 import { getGroupColors } from '../utils/GroupColorConfig';
@@ -87,6 +89,8 @@ const DayViewScreen = ({ navigation, initialDate }) => {
   const [bsShifts, setBsShifts] = useState([]);
   const [bsDate, setBsDate] = useState(null);
   const [bsInitialIdx, setBsInitialIdx] = useState(0);
+  const [cedeShift, setCedeShift] = useState(null);
+  const [trocarShift, setTrocarShift] = useState(null);
 
   const [shiftPickerVisible, setShiftPickerVisible] = useState(false);
   const [addModalVisible, setAddModalVisible] = useState(false);
@@ -425,7 +429,11 @@ const DayViewScreen = ({ navigation, initialDate }) => {
         shifts={bsShifts}
         selectedDate={bsDate}
         initialShiftIndex={bsInitialIdx}
+        onCede={(sh) => { setBsVisible(false); setCedeShift(sh); }}
+        onTrocar={(sh) => { setBsVisible(false); setTrocarShift(sh); }}
       />
+      <CederFlowSheet visible={!!cedeShift} shift={cedeShift} onClose={() => setCedeShift(null)} />
+      <TrocarFlowSheet visible={!!trocarShift} shift={trocarShift} onClose={() => setTrocarShift(null)} />
 
       <AddManualShiftModal
         visible={addModalVisible}

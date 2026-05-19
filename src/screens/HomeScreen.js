@@ -12,12 +12,15 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AuthContext } from '../context/AuthContext';
 import { useShifts } from '../contexts/ShiftsContext';
+import { useOffers } from '../contexts/OffersContext';
 import { useColors, Typography, Spacing, Shadows } from '../constants/DesignSystem';
 import ShiftBottomSheet from '../components/ShiftBottomSheet';
+import CederFlowSheet from './CederFlowSheet';
+import TrocarFlowSheet from './TrocarFlowSheet';
 import TodayCoworkersService from '../services/TodayCoworkersService';
 import { getGroupColors } from '../utils/GroupColorConfig';
 import LocalCache from '../services/LocalCache';
-import { getShiftValues, getFullShiftConfig, calculateShiftValueSync } from '../utils/ShiftValueCalculator';
+import { getShiftValues, getFullShiftConfig, calculateShiftValueSync, calculateShiftFinalValueSync } from '../utils/ShiftValueCalculator';
 
 // ── Skeleton ──────────────────────────────────────────────────────────────────
 const SkeletonBox = ({ width = '100%', height = 20, style }) => {
@@ -69,7 +72,24 @@ const parseShiftTime = (timeStr) => {
 
 const HomeScreen = ({ navigation }) => {
   const { user } = useContext(AuthContext);
-  const { daysWithShifts, totalShifts, hoursReport, loading, loadedFor, loadMonthlyShifts, monthSummary: contextSummary } = useShifts();
+  const ctx = useShifts();
+  const { loading, loadedFor, loadMonthlyShifts, monthSummary: contextSummary, getMonthCache } = ctx;
+  const { unreadCount: avisosUnread, offersReceived, swapsReceived } = useOffers();
+  const pendingActionable = offersReceived.length + swapsReceived.length;
+  const badgeCount = Math.max(avisosUnread, pendingActionable);
+
+  // Always pin Home to the CURRENT month — Reports/Charts may swap the active
+  // month in shiftsData, but Home must remain anchored to "today's" month.
+  const _now = new Date();
+  const _curMonth = _now.getMonth() + 1;
+  const _curYear  = _now.getFullYear();
+  const _curKey   = `${_curYear}-${_curMonth}`;
+  const _curCache = getMonthCache?.(_curMonth, _curYear);
+  const _activeIsCurrent = ctx.currentMonth === _curMonth && ctx.currentYear === _curYear;
+
+  const daysWithShifts = _curCache?.daysWithShifts ?? (_activeIsCurrent ? ctx.daysWithShifts : []);
+  const totalShifts    = _curCache?.totalShifts    ?? (_activeIsCurrent ? ctx.totalShifts    : null);
+  const hoursReport    = _curCache?.hoursReport    ?? (_activeIsCurrent ? ctx.hoursReport    : null);
   const [refreshing, setRefreshing] = useState(false);
   const [groupColors, setGroupColors] = useState({});
   const [cachedSummary, setCachedSummary] = useState(null);
@@ -77,6 +97,7 @@ const HomeScreen = ({ navigation }) => {
   const [prevSummary, setPrevSummary] = useState(null);
   const [savedValues, setSavedValues] = useState(null);
   const [loyaltyConfig, setLoyaltyConfig] = useState(null);
+  const [timeEntriesByMonth, setTimeEntriesByMonth] = useState({});
   const C = useColors();
   const insets = useSafeAreaInsets();
   const s = makeStyles(C);
@@ -96,11 +117,22 @@ const HomeScreen = ({ navigation }) => {
     const prevDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const prevKey = `${prevDate.getFullYear()}-${String(prevDate.getMonth() + 1).padStart(2, '0')}`;
     LocalCache.getSummary(userId, prevKey).then(s => s && setPrevSummary(s)).catch(() => {});
+
+    // Load time-entries for current + next month so upcoming-shift values can
+    // include extra hours when the user has registered real start/end times.
+    const nextDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const nextKey = `${nextDate.getFullYear()}-${String(nextDate.getMonth() + 1).padStart(2, '0')}`;
+    Promise.all([
+      LocalCache.getTimeEntries(userId, monthKey).catch(() => ({})),
+      LocalCache.getTimeEntries(userId, nextKey).catch(() => ({})),
+    ]).then(([cur, nxt]) => setTimeEntriesByMonth({ [monthKey]: cur || {}, [nextKey]: nxt || {} }));
   }, [userId]);
 
   const [bsVisible, setBsVisible] = useState(false);
   const [bsShifts, setBsShifts] = useState([]);
   const [bsDate, setBsDate] = useState(null);
+  const [cedeShift, setCedeShift] = useState(null);
+  const [trocarShift, setTrocarShift] = useState(null);
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -170,16 +202,30 @@ const HomeScreen = ({ navigation }) => {
             <Text style={s.headerDate}>{dateStr}</Text>
             <Text style={s.headerGreeting}>Olá, {firstName}</Text>
           </View>
-          <Pressable style={s.avatarWrap} onPress={() => navigation?.navigate?.('profile')}>
-            {user?.photo ? (
-              <Image source={{ uri: user.photo }} style={s.avatarImg} />
-            ) : (
-              <View style={[s.avatarFallback, { backgroundColor: C.accentSoft }]}>
-                <Text style={s.avatarInitial}>{firstName.charAt(0).toUpperCase()}</Text>
-              </View>
-            )}
-            <View style={s.avatarStatusDot} />
-          </Pressable>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+            <Pressable
+              onPress={() => navigation?.navigate?.('AvisosScreen')}
+              hitSlop={8}
+              style={s.bellBtn}
+            >
+              <Ionicons name="notifications-outline" size={22} color={C.text.primary} />
+              {badgeCount > 0 && (
+                <View style={[s.bellBadge, { backgroundColor: C.error }]}>
+                  <Text style={s.bellBadgeText}>{badgeCount > 9 ? '9+' : badgeCount}</Text>
+                </View>
+              )}
+            </Pressable>
+            <Pressable style={s.avatarWrap} onPress={() => navigation?.navigate?.('profile')}>
+              {user?.photo ? (
+                <Image source={{ uri: user.photo }} style={s.avatarImg} />
+              ) : (
+                <View style={[s.avatarFallback, { backgroundColor: C.accentSoft }]}>
+                  <Text style={s.avatarInitial}>{firstName.charAt(0).toUpperCase()}</Text>
+                </View>
+              )}
+              <View style={s.avatarStatusDot} />
+            </Pressable>
+          </View>
         </View>
       </View>
     );
@@ -207,6 +253,8 @@ const HomeScreen = ({ navigation }) => {
       : monthSummary
         ? Math.round((monthSummary.totalScheduledMinutes || 0) / 60)
         : null;
+
+    const shiftsCount = totalShifts ?? monthSummary?.shiftCount ?? null;
 
     const remaining = upcomingShifts.length;
 
@@ -248,7 +296,7 @@ const HomeScreen = ({ navigation }) => {
 
           <View style={s.heroStatsRow}>
             <View style={s.heroStat}>
-              <Text style={s.heroStatValue}>{loading ? '—' : totalShifts ?? '—'}</Text>
+              <Text style={s.heroStatValue}>{loading ? '—' : shiftsCount ?? '—'}</Text>
               <Text style={s.heroStatLabel}>plantões</Text>
             </View>
             <View style={s.heroStatDivider} />
@@ -286,7 +334,12 @@ const HomeScreen = ({ navigation }) => {
     const typeKey = shiftTypeKey(shift);
     const badgeColor = SHIFT_TYPE_COLOR[typeKey] || C.primary;
 
-    const value = calculateShiftValueSync(shift, shift.date, savedValues);
+    const shiftMonthKey = (shift.date || '').slice(0, 7);
+    const realEntry = timeEntriesByMonth?.[shiftMonthKey]?.[shift.id] || null;
+    const monthlyHours = hoursReport?.standardHours || ((monthSummary?.totalScheduledMinutes || 0) / 60) || 0;
+    const value = loyaltyConfig
+      ? calculateShiftFinalValueSync(shift, shift.date, loyaltyConfig, monthlyHours, realEntry)
+      : calculateShiftValueSync(shift, shift.date, savedValues);
 
     let coworkers = TodayCoworkersService.getCoworkers(shift.id);
     if (coworkers.length === 0 && shift?.originalData?.coworkers?.length > 0) {
@@ -382,41 +435,27 @@ const HomeScreen = ({ navigation }) => {
   );
 
   // ── Quick Actions ─────────────────────────────────────────────────────────────
-  const renderActions = () => (
-    <ScrollView
-      horizontal
-      showsHorizontalScrollIndicator={false}
-      contentContainerStyle={s.actionsRow}
+  const renderActionTile = ({ icon, label, iconColor, iconBg, onPress, disabled }) => (
+    <Pressable
+      key={label}
+      style={({ pressed }) => [s.actionTile, disabled && s.actionTileDisabled, pressed && !disabled && { opacity: 0.8 }]}
+      onPress={onPress}
+      disabled={disabled}
     >
-      <Pressable style={({ pressed }) => [s.actionBtn, pressed && { opacity: 0.8 }]} onPress={() => navigation?.navigate?.('ChartsScreen')}>
-        <View style={s.actionIcon}>
-          <Ionicons name="bar-chart" size={18} color={C.primary} />
-        </View>
-        <Text style={s.actionLabel}>Gráficos</Text>
-        <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
-      </Pressable>
-      <Pressable style={({ pressed }) => [s.actionBtn, pressed && { opacity: 0.8 }]} onPress={() => navigation?.navigate?.('Reports')}>
-        <View style={[s.actionIcon, { backgroundColor: C.moneySoft }]}>
-          <Ionicons name="document-text" size={18} color={C.money} />
-        </View>
-        <Text style={s.actionLabel}>Relatórios</Text>
-        <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
-      </Pressable>
-      <Pressable style={[s.actionBtn, s.actionBtnDisabled]} disabled>
-        <View style={[s.actionIcon, { backgroundColor: C.background.secondary }]}>
-          <Ionicons name="medkit" size={18} color={C.text.tertiary} />
-        </View>
-        <Text style={[s.actionLabel, s.actionLabelDisabled]}>Plantões</Text>
-        <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
-      </Pressable>
-      <Pressable style={[s.actionBtn, s.actionBtnDisabled]} disabled>
-        <View style={[s.actionIcon, { backgroundColor: C.background.secondary }]}>
-          <Ionicons name="people" size={18} color={C.text.tertiary} />
-        </View>
-        <Text style={[s.actionLabel, s.actionLabelDisabled]}>Grupos</Text>
-        <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
-      </Pressable>
-    </ScrollView>
+      <View style={[s.actionTileIcon, { backgroundColor: iconBg }]}>
+        <Ionicons name={icon} size={20} color={iconColor} />
+      </View>
+      <Text style={[s.actionTileLabel, disabled && s.actionLabelDisabled]} numberOfLines={1}>{label}</Text>
+    </Pressable>
+  );
+
+  const renderActions = () => (
+    <View style={s.actionsGrid}>
+      {renderActionTile({ icon: 'bar-chart',     label: 'Gráficos',   iconColor: C.primary,       iconBg: C.accentSoft,           onPress: () => navigation?.navigate?.('ChartsScreen') })}
+      {renderActionTile({ icon: 'document-text', label: 'Relatórios', iconColor: C.money,         iconBg: C.moneySoft,            onPress: () => navigation?.navigate?.('Reports') })}
+      {renderActionTile({ icon: 'medkit',        label: 'Vagas',      iconColor: C.money,         iconBg: C.moneySoft,            onPress: () => navigation?.navigate?.('OpeningsScreen') })}
+      {/* {renderActionTile({ icon: 'people',        label: 'Grupos',     iconColor: C.text.tertiary, iconBg: C.background.secondary, disabled: true })} */}
+    </View>
   );
 
   return (
@@ -477,7 +516,11 @@ const HomeScreen = ({ navigation }) => {
         onClose={() => setBsVisible(false)}
         shifts={bsShifts}
         selectedDate={bsDate}
+        onCede={(sh) => { setBsVisible(false); setCedeShift(sh); }}
+        onTrocar={(sh) => { setBsVisible(false); setTrocarShift(sh); }}
       />
+      <CederFlowSheet visible={!!cedeShift} shift={cedeShift} onClose={() => setCedeShift(null)} />
+      <TrocarFlowSheet visible={!!trocarShift} shift={trocarShift} onClose={() => setTrocarShift(null)} />
     </>
   );
 };
@@ -547,6 +590,21 @@ const makeStyles = (C) => ({
     borderWidth: 2,
     borderColor: C.background.primary,
   },
+  bellBtn: {
+    width: 38, height: 38, borderRadius: 19,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: C.background.elevated,
+    position: 'relative',
+  },
+  bellBadge: {
+    position: 'absolute',
+    top: 2, right: 2,
+    minWidth: 16, height: 16,
+    paddingHorizontal: 4,
+    borderRadius: 8,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  bellBadgeText: { color: '#fff', fontSize: 9, fontWeight: '800' },
 
   // ── Hero card ────────────────────────────────────────────────────────────────
   heroWrap: {
@@ -852,40 +910,42 @@ const makeStyles = (C) => ({
   },
 
   // ── Quick Actions ─────────────────────────────────────────────────────────────
-  actionsRow: {
+  actionsGrid: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 10,
-    paddingRight: 4,
   },
-  actionBtn: {
-    width: 170,
+  actionTile: {
+    flexBasis: '31%',
+    flexGrow: 1,
+    aspectRatio: 1,
+    maxWidth: '32%',
     backgroundColor: C.background.elevated,
     borderRadius: 14,
     paddingVertical: 14,
-    paddingHorizontal: 14,
-    flexDirection: 'row',
+    paddingHorizontal: 10,
     alignItems: 'center',
-    gap: 12,
+    justifyContent: 'center',
+    gap: 8,
     borderWidth: 0.5,
     borderColor: C.border.light,
     ...Shadows.small,
   },
-  actionBtnDisabled: {
+  actionTileDisabled: {
     opacity: 0.45,
   },
-  actionIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
+  actionTileIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: C.accentSoft,
   },
-  actionLabel: {
-    fontSize: 14,
+  actionTileLabel: {
+    fontSize: 12,
     fontFamily: Typography.fontFamily.semiBold,
     color: C.text.primary,
-    flex: 1,
+    textAlign: 'center',
   },
   actionLabelDisabled: {
     color: C.text.tertiary,
