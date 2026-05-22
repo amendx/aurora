@@ -19,7 +19,8 @@ import ShiftBottomSheet from '../components/ShiftBottomSheet';
 import CederFlowSheet from './CederFlowSheet';
 import TrocarFlowSheet from './TrocarFlowSheet';
 import LocalCache from '../services/LocalCache';
-import { getShiftValues, getFullShiftConfig, calculateShiftValueSync } from '../utils/ShiftValueCalculator';
+import { getShiftValues, getFullShiftConfig, calculateShiftValueSync, calculateShiftFinalValueSync } from '../utils/ShiftValueCalculator';
+import { getMonthTotalValue } from '../utils/MonthSummaryComputer';
 import { getGroupColors } from '../utils/GroupColorConfig';
 import TodayCoworkersService from '../services/TodayCoworkersService';
 import TimeUtils from '../utils/TimeUtils';
@@ -104,6 +105,7 @@ const CalendarScreen = ({ navigation }) => {
   const [cachedSummary, setCachedSummary] = useState(null);
   const monthSummary = contextSummary || cachedSummary;
   const [groupColors, setGroupColors] = useState({});
+  const [timeEntriesByMonth, setTimeEntriesByMonth] = useState({});
 
   const navigationTimeoutRef = useRef(null);
   const isNavigatingRef = useRef(false);
@@ -129,6 +131,24 @@ const CalendarScreen = ({ navigation }) => {
     const monthKey = `${year}-${String(month).padStart(2, '0')}`;
     LocalCache.getSummary(userId, monthKey).then(s => s && setCachedSummary(s)).catch(() => {});
   }, [userId, currentDate.getFullYear(), currentDate.getMonth(), daysWithShifts]);
+
+  // Load time-entries for current + next + currently-viewed month so the
+  // summary's "Horas extras" totalizer stays accurate as the user navigates.
+  useEffect(() => {
+    if (!userId) return;
+    const now = new Date();
+    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const nextDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const nextKey = `${nextDate.getFullYear()}-${String(nextDate.getMonth() + 1).padStart(2, '0')}`;
+    const viewKey = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}`;
+    const keys = Array.from(new Set([monthKey, nextKey, viewKey]));
+    Promise.all(keys.map(k => LocalCache.getTimeEntries(userId, k).catch(() => ({}))))
+      .then(maps => {
+        const next = {};
+        keys.forEach((k, i) => { next[k] = maps[i] || {}; });
+        setTimeEntriesByMonth(next);
+      });
+  }, [userId, currentDate.getFullYear(), currentDate.getMonth()]);
 
   // Initial data load
   useEffect(() => {
@@ -209,14 +229,30 @@ const CalendarScreen = ({ navigation }) => {
     return map;
   }, [daysWithShifts, currentDate]);
 
-  const stats = useMemo(() => ({
-    totalShifts: (daysWithShifts || []).reduce((sum, d) => sum + (d.shifts || []).length, 0),
-    totalHours: hoursReport?.standardHours || 0,
-  }), [daysWithShifts, hoursReport]);
+  const stats = useMemo(() => {
+    // Extras: sum per-shift positive (actual - planned) using the time entries
+    // for the displayed month. Same rule the Reports screen uses.
+    const viewMonthKey = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}`;
+    const entries = timeEntriesByMonth?.[viewMonthKey] || {};
+    let extraMin = 0;
+    (daysWithShifts || []).forEach(d => {
+      (d.shifts || []).forEach(shift => {
+        const entry = entries[shift.id];
+        if (!entry?.actualDurationMinutes) return;
+        const planned = shift.splitHours?.minutesThisMonth
+          ?? TimeUtils.getShiftStandardMinutes(shift.label);
+        const diff = entry.actualDurationMinutes - planned;
+        if (diff > 0) extraMin += diff;
+      });
+    });
+    return {
+      totalShifts: (daysWithShifts || []).reduce((sum, d) => sum + (d.shifts || []).length, 0),
+      totalHours: hoursReport?.standardHours || 0,
+      extraHours: extraMin / 60,
+    };
+  }, [daysWithShifts, hoursReport, timeEntriesByMonth, currentDate]);
 
-  const projected = monthSummary
-    ? (monthSummary.totalGrossValue || 0) + (monthSummary.totalLoyaltyValue || 0) + (monthSummary.totalBonusValue || 0)
-    : null;
+  const projected = getMonthTotalValue(monthSummary);
 
   // ── Handlers ──────────────────────────────────────────────────────────────────
   const resolveGroupColor = (shift) => {
@@ -471,24 +507,10 @@ const CalendarScreen = ({ navigation }) => {
           <Text style={s.summaryStatValue}>{loading ? '—' : formatHours(stats.totalHours)}</Text>
         </View>
         <View style={[s.summaryStat, { borderLeftWidth: 0.5, borderLeftColor: C.border.light }]}>
-          {(() => {
-            const totalHours = stats.totalHours ?? 0;
-            const tiers = loyaltyConfig?.loyaltyOptions;
-            const earnedTier = tiers?.length > 0
-              ? [...tiers].sort((a, b) => b.minHours - a.minHours).find(o => totalHours >= o.minHours)
-              : null;
-            return earnedTier ? (
-              <>
-                <Text style={s.summaryStatLabel}>Fideliz.</Text>
-                <Text style={[s.summaryStatValue, { color: C.money }]}>{loading ? '—' : `${earnedTier.percentage}%`}</Text>
-              </>
-            ) : (
-              <>
-                <Text style={s.summaryStatLabel}>Restam</Text>
-                <Text style={[s.summaryStatValue, { color: C.warning }]}>{loading ? '—' : upcomingShifts.length}</Text>
-              </>
-            );
-          })()}
+          <Text style={s.summaryStatLabel}>Horas extras</Text>
+          <Text style={[s.summaryStatValue, stats.extraHours > 0 && { color: C.warning }]}>
+            {loading ? '—' : (stats.extraHours > 0 ? formatHours(stats.extraHours) : '—')}
+          </Text>
         </View>
       </View>
     </View>
@@ -501,7 +523,12 @@ const CalendarScreen = ({ navigation }) => {
     const typeKey = shift.carryover ? 'D' : (shift.label?.charAt(0) || 'M');
     const badgeColor = SHIFT_TYPE_COLOR[typeKey] || C.primary;
     const groupColor = resolveGroupColor(shift);
-    const value = calculateShiftValueSync(shift, shift.date, shiftValues);
+    const shiftMonthKey = (shift.date || '').slice(0, 7);
+    const realEntry = timeEntriesByMonth?.[shiftMonthKey]?.[shift.id] || null;
+    const monthlyHours = hoursReport?.standardHours || ((monthSummary?.totalScheduledMinutes || 0) / 60) || 0;
+    const value = loyaltyConfig
+      ? calculateShiftFinalValueSync(shift, shift.date, loyaltyConfig, monthlyHours, realEntry)
+      : calculateShiftValueSync(shift, shift.date, shiftValues);
     const timeStr = parseShiftTime(shift.time);
     const typeLabel = LABEL_MAP[typeKey] || 'Plantão';
 
@@ -523,8 +550,10 @@ const CalendarScreen = ({ navigation }) => {
 
         {/* Date column */}
         <View style={s.compactDateCol}>
-          <Text style={s.compactDay}>{d.getDate()}</Text>
-          <Text style={s.compactWeekday}>
+          <Text style={s.compactDay} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.7}>
+            {d.getDate()}
+          </Text>
+          <Text style={s.compactWeekday} numberOfLines={1}>
             {d.toLocaleDateString('pt-BR', { weekday: 'short' }).replace('.', '')}
           </Text>
         </View>
@@ -852,19 +881,19 @@ const makeStyles = (C) => {
     },
     compactDateCol: {
       alignItems: 'center',
-      width: 54,
-      paddingLeft: 16,
-      paddingRight: 12,
+      width: 60,
+      paddingLeft: 14,
+      paddingRight: 10,
     },
     compactDay: {
-      fontSize: 22,
+      fontSize: 20,
       fontFamily: Typography.fontFamily.display,
       color: C.text.primary,
-      letterSpacing: -0.6,
-      lineHeight: 24,
+      letterSpacing: -0.5,
+      lineHeight: 22,
     },
     compactWeekday: {
-      fontSize: 10,
+      fontSize: 9,
       fontFamily: Typography.fontFamily.semiBold,
       color: C.text.tertiary,
       textTransform: 'uppercase',

@@ -1,10 +1,9 @@
 import React, { createContext, useContext, useState, useCallback, useRef } from 'react';
 import { AuthContext } from '../context/AuthContext';
 import { useGroups } from './GroupsContext';
-import WebClientApiService from '../services/WebClientApiService';
 import LocalCache from '../services/LocalCache';
 import FirebaseAdapter from '../services/firebase/FirebaseAdapter';
-import { fromWebClient, fromFirestore } from '../utils/OpeningNormalizer';
+import { fromFirestore } from '../utils/OpeningNormalizer';
 import NotificationService from '../services/NotificationService';
 import Logger from '../utils/Logger';
 
@@ -17,12 +16,12 @@ export const useOpenings = () => {
 };
 
 export const OpeningsProvider = ({ children }) => {
-  const { token, user } = useContext(AuthContext);
+  const { user } = useContext(AuthContext);
   const { groups } = useGroups();
   const userId = user?.id || 0;
-  const isWebClient = user?.source !== 'aurora';
 
   const [openings, setOpenings] = useState([]);
+  const [myCededOpenings, setMyCededOpenings] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const fetchingRef = useRef(false);
@@ -43,58 +42,36 @@ export const OpeningsProvider = ({ children }) => {
     setError(null);
 
     try {
-      const merged = [];
+      const claimable = [];
+      const mine = [];
       const seen = new Set();
 
-      const add = (item) => {
-        if (!item?.id || seen.has(item.id)) return;
-        seen.add(item.id);
-        merged.push(item);
-      };
-
-      // Aurora openings from Firestore (all user types)
+      // Aurora pool: openings in Firestore, scoped to the user's groups.
       const groupIds = _groupIds();
       if (groupIds.length) {
         const docs = await FirebaseAdapter.getOpeningsForGroups(groupIds);
         docs.forEach(d => {
           const o = fromFirestore(d);
-          // Hide cede-backed openings whose origin is the current user
-          // (you can't claim back your own ceded shift — use the cancel CTA instead).
-          if (o.originUserId && String(o.originUserId) === String(userId)) return;
+          if (!o?.id || seen.has(o.id)) return;
+          seen.add(o.id);
+          // Own active cedes go to mine (separately surfaced for cancel UX).
+          if (o.originUserId && String(o.originUserId) === String(userId)) {
+            if (o.claimable) mine.push(o);
+            return;
+          }
           // Enforce restrictedToGroupId scoping client-side as a defense in depth.
           if (o.restrictedToGroupId && !groupIds.includes(String(o.restrictedToGroupId))) return;
-          add(o);
+          claimable.push(o);
         });
       }
 
-      // webClient openings (only for webClient-source users)
-      if (isWebClient && token) {
-        let page = 1;
-        let hasMore = true;
-        while (hasMore) {
-          const res = await WebClientApiService.getPendingShifts(token, page, 20);
-          if (!res.success || !res.data.length) { hasMore = false; break; }
-          res.data
-            .filter(item => item.type === 'vacancy' || item.type === 'assignment')
-            .forEach(item => {
-              try {
-                const normalized = fromWebClient(item);
-                if (normalized) add(normalized);
-              } catch (e) {
-                Logger.error(`[OpeningsContext] normalize failed for ${item.id}: ${e.message}`);
-              }
-            });
-          hasMore = res.data.length === 20;
-          page++;
-          if (page > 10) break;
-        }
-      }
-
-      merged.sort((a, b) => a.startISO.localeCompare(b.startISO));
-      setOpenings(merged);
+      claimable.sort((a, b) => a.startISO.localeCompare(b.startISO));
+      mine.sort((a, b) => a.startISO.localeCompare(b.startISO));
+      setOpenings(claimable);
+      setMyCededOpenings(mine);
 
       const monthKey = new Date().toISOString().slice(0, 7);
-      await LocalCache.saveOpenings(userId, monthKey, merged);
+      await LocalCache.saveOpenings(userId, monthKey, claimable);
     } catch (err) {
       Logger.error('[OpeningsContext] refresh:', err?.message);
       setError(err?.message || 'Erro ao carregar vagas');
@@ -102,11 +79,12 @@ export const OpeningsProvider = ({ children }) => {
       setLoading(false);
       fetchingRef.current = false;
     }
-  }, [userId, token, isWebClient, groups]);
+  }, [userId, groups]);
 
   /**
    * Claim a slot on an Aurora-native opening.
-   * Writes to Firestore atomically, then writes the shift to LocalCache.
+   * The origin shift was already removed at cede time, so claim just writes
+   * the claimant's new shift + flips the slot status.
    */
   const claimOpening = useCallback(async (openingId, slotId) => {
     const opening = openings.find(o => o.id === openingId);
@@ -115,15 +93,8 @@ export const OpeningsProvider = ({ children }) => {
     try {
       await FirebaseAdapter.claimSlot(openingId, slotId, userId);
 
-      // If this opening was created by a doctor ceding a shift, the origin
-      // doctor's calendar must lose that shift atomically and be notified.
       const isCedeBacked = !!opening.originUserId && !!opening.originShiftId;
       if (isCedeBacked) {
-        await FirebaseAdapter.deleteUserShift(
-          opening.originUserId,
-          opening.monthKey,
-          opening.originShiftId,
-        );
         NotificationService.notify(opening.originUserId, 'offer_outcome', {
           title: 'Plantão cedido foi assumido',
           body: `${opening.group?.name || 'Grupo'} · ${opening.dateKey || ''}`,
@@ -131,24 +102,39 @@ export const OpeningsProvider = ({ children }) => {
         }).catch(() => {});
       }
 
-      // Write shift to claimant's calendar (local + Firestore via shadow)
+      // Build the received shift, preserving the original snapshot when present
+      // so the claimant gets the full shift shape (time string, etc.).
+      const snapshot = opening.originShiftSnapshot || {};
+      const newShiftId = `received_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       const shift = {
-        id: `opening_${openingId}_${slotId}`,
-        source: isCedeBacked ? 'received' : 'aurora_opening',
+        ...snapshot,
+        id: newShiftId,
+        userId,
+        source: 'received',
         openingId,
         originUserId: opening.originUserId || null,
         originalShiftId: opening.originShiftId || null,
-        label: opening.label,
-        startISO: opening.startISO,
-        endISO: opening.endISO,
-        monthKey: opening.monthKey,
-        durationMinutes: opening.durationMinutes,
-        group: opening.group,
-        estimatedValue: opening.estimatedValue,
+        label: opening.label || snapshot.label,
+        startISO: opening.startISO || snapshot.startISO,
+        endISO: opening.endISO || snapshot.endISO,
+        date: snapshot.date || (opening.startISO || '').slice(0, 10),
+        monthKey: opening.monthKey || snapshot.monthKey,
+        durationMinutes: opening.durationMinutes || snapshot.durationMinutes,
+        group: opening.group || snapshot.group,
+        estimatedValue: opening.estimatedValue ?? snapshot.estimatedValue ?? null,
         coworkers: [],
-        createdAt: new Date().toISOString(),
+        transferredAt: new Date().toISOString(),
+        isManual: false,
       };
-      await LocalCache.saveManualShift(userId, shift);
+
+      // Persist to Firestore (months path) and LocalCache (regularShifts bucket
+      // for received shifts so the source semantics stay correct).
+      try {
+        await FirebaseAdapter.restoreUserShift(userId, shift.monthKey, shift);
+      } catch (err) {
+        Logger.warn(`[OpeningsContext] write claimed shift: ${err?.message}`);
+      }
+      await LocalCache.saveRegularShift(userId, shift);
 
       // Optimistically update local openings list
       setOpenings(prev => prev.map(o => {
@@ -157,7 +143,7 @@ export const OpeningsProvider = ({ children }) => {
         return { ...o, availableSlots: newAvail, claimable: newAvail > 0 };
       }));
 
-      return { success: true };
+      return { success: true, claimedShift: shift };
     } catch (err) {
       Logger.error(`[OpeningsContext] claimOpening: ${err?.message}`);
       return { success: false, reason: err?.message };
@@ -165,26 +151,39 @@ export const OpeningsProvider = ({ children }) => {
   }, [openings, userId]);
 
   /**
-   * Cancel a cede-backed opening that THIS user created.
-   * The origin shift was never removed from the doctor's calendar (we only
-   * delete it on actual claim), so cancel is just a status update.
+   * Cancel a cede-backed opening that THIS user created, and restore the
+   * shift to the holder's calendar (Firestore + LocalCache).
    */
   const cancelCedeOpening = useCallback(async (openingId) => {
-    const opening = openings.find(o => o.id === openingId);
+    const opening = myCededOpenings.find(o => o.id === openingId)
+      || openings.find(o => o.id === openingId);
     if (!opening) return { success: false };
     if (String(opening.originUserId) !== String(userId)) return { success: false, reason: 'not_owner' };
     try {
       await FirebaseAdapter.saveOpening({ ...opening, id: opening.id, status: 'cancelled', updatedAt: new Date().toISOString() });
+
+      // Restore the original shift if we kept a snapshot.
+      const snap = opening.originShiftSnapshot;
+      if (snap?.id && snap?.monthKey) {
+        await FirebaseAdapter.restoreUserShift(userId, snap.monthKey, snap);
+        if (snap.isManual) {
+          await LocalCache.saveManualShift(userId, snap);
+        } else {
+          await LocalCache.saveRegularShift(userId, snap);
+        }
+      }
+
       setOpenings(prev => prev.filter(o => o.id !== openingId));
-      return { success: true };
+      setMyCededOpenings(prev => prev.filter(o => o.id !== openingId));
+      return { success: true, restoredShift: snap || null };
     } catch (err) {
       Logger.error(`[OpeningsContext] cancelCedeOpening: ${err?.message}`);
       return { success: false, reason: err?.message };
     }
-  }, [openings, userId]);
+  }, [openings, myCededOpenings, userId]);
 
   return (
-    <OpeningsContext.Provider value={{ openings, loading, error, refresh, claimOpening, cancelCedeOpening }}>
+    <OpeningsContext.Provider value={{ openings, myCededOpenings, loading, error, refresh, claimOpening, cancelCedeOpening }}>
       {children}
     </OpeningsContext.Provider>
   );

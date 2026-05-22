@@ -90,6 +90,20 @@
  * @property {{ percentage: number, startMonth: string, endMonth: string }} bonus
  *   - startMonth / endMonth as "YYYY-MM" (migration converts legacy numeric month)
  * @property {boolean} fridayNightAsWeekend
+ * @property {Object<string, { autoFromHours?: boolean, loyaltyOptions?: Array, manualPercentage?: number }>} [institutionLoyalty]
+ *   Per-hospital loyalty config (keyed by institution id). Pre-existing slot.
+ * @property {Object<string, { percentage: number, minHours: number, hoursWorked?: number, earnedAt?: string }>} [currentInstitutionLoyalty]
+ *   Per-hospital earned loyalty tier resolved at API-load time, keyed by institution id.
+ * @property {Object<string, {
+ *   hourValues?: { weekday: { day: number, night: number }, weekend: { day: number, night: number } },
+ *   bonusEnabled?: boolean,
+ *   bonus?: { percentage: number, startMonth: string|number, endMonth: string|number },
+ *   fridayNightAsWeekend?: boolean
+ * }>} [institutionConfig]
+ *   Per-hospital overrides of the four global financial pieces (hour values,
+ *   bonus, friday-night-as-weekend rule). Field-level fallback: any field
+ *   absent on the institution uses the global value. Resolved by
+ *   src/utils/HospitalConfigResolver.js.
  * @property {string}  updatedAt            - ISO timestamp
  */
 

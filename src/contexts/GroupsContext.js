@@ -4,6 +4,7 @@ import Logger from '../utils/Logger';
 import { AuthContext } from '../context/AuthContext';
 import { StorageService } from '../utils/StorageService';
 import LocalCache from '../services/LocalCache';
+import FirebaseAdapter from '../services/firebase/FirebaseAdapter';
 
 const GroupsContext = createContext();
 
@@ -361,21 +362,47 @@ export const GroupsProvider = ({ children }) => {
           lcData.groups.forEach(g => { groupsMap[g.id] = g; });
           setGroups(groupsMap);
           Logger.info(`📦 ${lcData.groups.length} grupos carregados do LocalCache`);
-          return;
+        } else {
+          // Fallback: legacy SecureStore cache
+          const cached = await StorageService.getGroups();
+          if (cached && Array.isArray(cached) && cached.length > 0) {
+            const groupsMap = {};
+            cached.forEach(g => { groupsMap[g.id] = g; });
+            setGroups(groupsMap);
+            Logger.info(`📦 ${cached.length} grupos carregados do cache legado`);
+          }
         }
       }
-      // Fallback: legacy SecureStore cache
-      const cached = await StorageService.getGroups();
-      if (cached && Array.isArray(cached) && cached.length > 0) {
-        const groupsMap = {};
-        cached.forEach(g => { groupsMap[g.id] = g; });
-        setGroups(groupsMap);
-        Logger.info(`📦 ${cached.length} grupos carregados do cache legado`);
-      }
+
     } catch (error) {
       Logger.error('Erro ao carregar grupos do cache:', error);
     }
   };
+
+  // Aurora users: hydrate group memberships + persons from Firestore on login.
+  // WebClient users get this from PlantaoAPI daily extraction (extractFromDailyShifts).
+  useEffect(() => {
+    if (user?.source !== 'aurora' || !userId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { groups: gList, membersByGroupId: mbgi, persons } = await FirebaseAdapter.fetchAuroraGroupMembers(userId);
+        if (cancelled) return;
+        if (gList.length) {
+          const groupsMap = {};
+          gList.forEach(g => { groupsMap[g.id] = g; });
+          setGroups(prev => ({ ...prev, ...groupsMap }));
+          LocalCache.saveGroups(userId, gList).catch(() => {});
+        }
+        if (Object.keys(mbgi).length) setMembersByGroupId(prev => ({ ...prev, ...mbgi }));
+        if (Object.keys(persons).length) setCoworkers(prev => ({ ...prev, ...persons }));
+        Logger.info(`👥 Aurora graph hydrated: ${gList.length} groups, ${Object.keys(mbgi).length} member-lists, ${Object.keys(persons).length} persons`);
+      } catch (err) {
+        Logger.warn(`Aurora group hydration falhou: ${err?.message}`);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [userId, user?.source]);
 
   // Obter grupos do usuário
   const getUserGroups = () => {

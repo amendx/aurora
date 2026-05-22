@@ -21,6 +21,7 @@ import TodayCoworkersService from '../services/TodayCoworkersService';
 import { getGroupColors } from '../utils/GroupColorConfig';
 import LocalCache from '../services/LocalCache';
 import { getShiftValues, getFullShiftConfig, calculateShiftValueSync, calculateShiftFinalValueSync } from '../utils/ShiftValueCalculator';
+import { getMonthTotalValue } from '../utils/MonthSummaryComputer';
 
 // ── Skeleton ──────────────────────────────────────────────────────────────────
 const SkeletonBox = ({ width = '100%', height = 20, style }) => {
@@ -145,16 +146,16 @@ const HomeScreen = ({ navigation }) => {
   useEffect(() => { loadedForRef.current = loadedFor; }, [loadedFor]);
 
   useEffect(() => {
-    const reload = (force = false) => {
+    const reload = () => {
       const now = new Date();
       const m = now.getMonth() + 1;
       const y = now.getFullYear();
       const key = `${y}-${m}`;
-      if (!force && loadedForRef.current === key && !loading) return;
+      if (loadedForRef.current === key && !loading) return;
       loadMonthlyShifts(m, y);
     };
     reload();
-    const unsubscribe = navigation?.addListener?.('focus', () => reload(true));
+    const unsubscribe = navigation?.addListener?.('focus', reload);
     return unsubscribe;
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -236,13 +237,8 @@ const HomeScreen = ({ navigation }) => {
     const now = new Date();
     const monthName = now.toLocaleDateString('pt-BR', { month: 'long' });
 
-    const projected = monthSummary
-      ? (monthSummary.totalGrossValue || 0) + (monthSummary.totalLoyaltyValue || 0) + (monthSummary.totalBonusValue || 0)
-      : null;
-
-    const prevProjected = prevSummary
-      ? (prevSummary.totalGrossValue || 0) + (prevSummary.totalLoyaltyValue || 0) + (prevSummary.totalBonusValue || 0)
-      : null;
+    const projected     = getMonthTotalValue(monthSummary);
+    const prevProjected = getMonthTotalValue(prevSummary);
 
     const deltaPct = projected != null && prevProjected && prevProjected > 0
       ? Math.round(((projected - prevProjected) / prevProjected) * 100)
@@ -258,14 +254,9 @@ const HomeScreen = ({ navigation }) => {
 
     const remaining = upcomingShifts.length;
 
-    // Fidelização — show the % tier the user has already unlocked based on hours done
-    const loyaltyTiers = loyaltyConfig?.loyaltyOptions;
-    const earnedTier = loyaltyTiers?.length > 0 && totalHours != null
-      ? [...loyaltyTiers]
-          .sort((a, b) => b.minHours - a.minHours)
-          .find(o => totalHours >= o.minHours)
-      : null;
-    const loyaltyPct = earnedTier ? earnedTier.percentage : null;
+    // Per-hospital loyalty makes a single global % meaningless on the hero —
+    // slot is intentionally left for a future stat. See HospitalDetailScreen
+    // for per-hospital fidelização configuration.
 
     return (
       <View style={s.heroWrap}>
@@ -306,19 +297,8 @@ const HomeScreen = ({ navigation }) => {
             </View>
             <View style={s.heroStatDivider} />
             <View style={s.heroStat}>
-              {loyaltyPct != null ? (
-                <>
-                  <Text style={[s.heroStatValue, { color: C.money }]}>
-                    {loading ? '—' : `${loyaltyPct}%`}
-                  </Text>
-                  <Text style={s.heroStatLabel}>fideliz.</Text>
-                </>
-              ) : (
-                <>
-                  <Text style={[s.heroStatValue, { color: C.warning }]}>{loading ? '—' : remaining}</Text>
-                  <Text style={s.heroStatLabel}>restam</Text>
-                </>
-              )}
+              <Text style={[s.heroStatValue, { color: C.warning }]}>{loading ? '—' : remaining}</Text>
+              <Text style={s.heroStatLabel}>próximos</Text>
             </View>
           </View>
         </View>
@@ -453,7 +433,7 @@ const HomeScreen = ({ navigation }) => {
     <View style={s.actionsGrid}>
       {renderActionTile({ icon: 'bar-chart',     label: 'Gráficos',   iconColor: C.primary,       iconBg: C.accentSoft,           onPress: () => navigation?.navigate?.('ChartsScreen') })}
       {renderActionTile({ icon: 'document-text', label: 'Relatórios', iconColor: C.money,         iconBg: C.moneySoft,            onPress: () => navigation?.navigate?.('Reports') })}
-      {renderActionTile({ icon: 'medkit',        label: 'Vagas',      iconColor: C.money,         iconBg: C.moneySoft,            onPress: () => navigation?.navigate?.('OpeningsScreen') })}
+      {renderActionTile({ icon: 'medkit',        label: 'Vagas',      iconColor: C.money,         iconBg: C.moneySoft,            onPress: () => navigation?.navigate?.(user?.source === 'aurora' ? 'OpeningsScreen' : 'NetworkVacanciesScreen') })}
       {/* {renderActionTile({ icon: 'people',        label: 'Grupos',     iconColor: C.text.tertiary, iconBg: C.background.secondary, disabled: true })} */}
     </View>
   );

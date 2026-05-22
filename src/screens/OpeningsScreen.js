@@ -1,25 +1,13 @@
 import { useEffect, useState, useCallback } from 'react';
 import {
   View, Text, ScrollView, Pressable, ActivityIndicator,
-  RefreshControl, StyleSheet, Linking,
+  RefreshControl, StyleSheet,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useColors, Spacing, BorderRadius, Shadows } from '../constants/DesignSystem';
 import { useOpenings } from '../contexts/OpeningsContext';
-
-const SOFFIA_BASE = 'https://soffia.co';
-
-function SourceBadge({ source, C }) {
-  const isAurora = source === 'aurora';
-  return (
-    <View style={[badge.wrap, { backgroundColor: isAurora ? C.primary + '1a' : C.text.tertiary + '18' }]}>
-      <Text style={[badge.text, { color: isAurora ? C.primary : C.text.tertiary }]}>
-        {isAurora ? 'Aurora' : 'PlantãoAtivo'}
-      </Text>
-    </View>
-  );
-}
+import { useShifts } from '../contexts/ShiftsContext';
 
 function OpeningCard({ item, onClaim, C }) {
   const [claiming, setClaiming] = useState(false);
@@ -28,17 +16,11 @@ function OpeningCard({ item, onClaim, C }) {
 
   const fmt = (d) => d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
   const fmtDate = (d) => d.toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: 'short' });
+  const firstSlotId = item.slots?.[0]?.slotId;
 
   const handleClaim = async () => {
-    if (item.source === 'webClient') {
-      const url = item.webClientTransactionId
-        ? `${SOFFIA_BASE}/shifts/${item.webClientTransactionId}`
-        : SOFFIA_BASE;
-      Linking.openURL(url).catch(() => {});
-      return;
-    }
     setClaiming(true);
-    await onClaim(item.id);
+    await onClaim(item.id, firstSlotId);
     setClaiming(false);
   };
 
@@ -55,7 +37,6 @@ function OpeningCard({ item, onClaim, C }) {
           <View style={[card.labelBadge, { backgroundColor: groupColor + '22' }]}>
             <Text style={[card.labelText, { color: groupColor }]}>{item.label}</Text>
           </View>
-          <SourceBadge source={item.source} C={C} />
           {item.originUserId ? (
             <View style={[badge.wrap, { backgroundColor: C.money + '18' }]}>
               <Text style={[badge.text, { color: C.money }]}>Cedido</Text>
@@ -103,19 +84,13 @@ function OpeningCard({ item, onClaim, C }) {
         {/* CTA */}
         {item.availableSlots > 0 && (
           <Pressable
-            style={[card.cta, {
-              backgroundColor: item.source === 'aurora' ? C.primary : C.text.tertiary + '22',
-            }]}
+            style={[card.cta, { backgroundColor: C.primary }]}
             onPress={handleClaim}
             disabled={claiming}
           >
             {claiming
-              ? <ActivityIndicator size="small" color={item.source === 'aurora' ? '#fff' : C.text.secondary} />
-              : (
-                <Text style={[card.ctaText, { color: item.source === 'aurora' ? '#fff' : C.text.secondary }]}>
-                  {item.source === 'aurora' ? 'Quero esse plantão' : 'Assumir via PlantãoAtivo →'}
-                </Text>
-              )
+              ? <ActivityIndicator size="small" color="#fff" />
+              : <Text style={[card.ctaText, { color: '#fff' }]}>Quero esse plantão</Text>
             }
           </Pressable>
         )}
@@ -128,9 +103,18 @@ export default function OpeningsScreen() {
   const C = useColors();
   const insets = useSafeAreaInsets();
   const { openings, loading, error, refresh, claimOpening } = useOpenings();
+  const { addClaimedShiftLocally } = useShifts();
   const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => { refresh(true); }, [refresh]);
+
+  const handleClaim = useCallback(async (openingId, slotId) => {
+    const r = await claimOpening(openingId, slotId);
+    if (r?.success && r?.claimedShift) {
+      await addClaimedShiftLocally?.(r.claimedShift);
+    }
+    return r;
+  }, [claimOpening, addClaimedShiftLocally]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -173,7 +157,7 @@ export default function OpeningsScreen() {
                     {vacancies.length} vaga{vacancies.length !== 1 ? 's' : ''} em aberto
                   </Text>
                   {vacancies.map(item => (
-                    <OpeningCard key={item.id} item={item} onClaim={claimOpening} C={C} />
+                    <OpeningCard key={item.id} item={item} onClaim={handleClaim} C={C} />
                   ))}
                 </>
               )}
@@ -181,7 +165,7 @@ export default function OpeningsScreen() {
                 <>
                   <Text style={[s.sectionLabel, { color: C.text.tertiary, marginTop: Spacing.lg }]}>Preenchidas</Text>
                   {filled.map(item => (
-                    <OpeningCard key={item.id} item={item} onClaim={claimOpening} C={C} />
+                    <OpeningCard key={item.id} item={item} onClaim={handleClaim} C={C} />
                   ))}
                 </>
               )}

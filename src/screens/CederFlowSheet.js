@@ -9,6 +9,7 @@ import { useColors, Typography, Spacing, BorderRadius } from '../constants/Desig
 import { AuthContext } from '../context/AuthContext';
 import { useGroups } from '../contexts/GroupsContext';
 import { useOffers } from '../contexts/OffersContext';
+import { useShifts } from '../contexts/ShiftsContext';
 
 const _initials = (name = '') => name.split(' ').filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase();
 
@@ -19,6 +20,7 @@ export default function CederFlowSheet({ visible, shift, onClose, onDone }) {
   const { user } = useContext(AuthContext);
   const { getGroupMembers } = useGroups();
   const { cedeOpenToGroup, cedeTargeted } = useOffers();
+  const { removeShiftLocally } = useShifts();
 
   const [mode, setMode]       = useState(null); // 'open' | 'targeted'
   const [picked, setPicked]   = useState(null); // member object
@@ -36,6 +38,10 @@ export default function CederFlowSheet({ visible, shift, onClose, onDone }) {
   const handleOpen = async () => {
     setSub(true);
     const r = await cedeOpenToGroup(shift);
+    if (r?.success) {
+      const monthKey = shift?.monthKey || (shift?.startISO || '').slice(0, 7);
+      await removeShiftLocally?.(shift.id, monthKey);
+    }
     setSub(false);
     if (r?.success) { onDone?.('open'); close(); }
   };

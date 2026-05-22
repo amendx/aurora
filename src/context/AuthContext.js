@@ -4,7 +4,7 @@ import { StorageService } from '../utils/StorageService';
 import { runMigration } from '../services/StorageMigration';
 import LocalCache from '../services/LocalCache';
 import FirebaseAdapter from '../services/firebase/FirebaseAdapter';
-import { syncCurrentMonthToFirebase } from '../services/firebase/LoginSyncService';
+import { syncCurrentMonthToFirebase, hydratePastMonthsFromFirebase } from '../services/firebase/LoginSyncService';
 import {
   createAccount,
   loginAuroraUser,
@@ -82,6 +82,10 @@ export const AuthProvider = ({ children }) => {
           _fireMigration(userData?.id);
           _activateFirebase();
           FirebaseAdapter.saveUser(userData?.id, null, userData).catch(() => {});
+
+          // Hydrate immutable past months from Firestore for both user types
+          // so Charts/Reports don't re-fetch on fresh device or after logout.
+          hydratePastMonthsFromFirebase(userData?.id, userData?.source).catch(() => {});
 
           // WebClient-only background tasks — skip for Aurora users who have no WebClient token.
           if (!_isAurora(userData)) {
@@ -164,6 +168,7 @@ export const AuthProvider = ({ children }) => {
           setThemeUserId(userInfo?.id || null);
           _activateFirebase();
           FirebaseAdapter.saveUser(userInfo.id, null, userInfo).catch(() => {});
+          hydratePastMonthsFromFirebase(userInfo.id, 'aurora').catch(() => {});
           Logger.info(`✅ Login concluído — email: ${email} source: aurora`);
           return { success: true };
         }
@@ -230,6 +235,7 @@ export const AuthProvider = ({ children }) => {
       _activateFirebase();
       FirebaseAdapter.saveUser(userInfo.id, apiData, userInfo).catch(() => {});
       syncCurrentMonthToFirebase(userInfo.id).catch(() => {});
+      hydratePastMonthsFromFirebase(userInfo.id, userInfo.source).catch(() => {});
       TodayCoworkersService.compute(userInfo.id, extractedToken, userInfo.id).catch(() => {});
 
       Logger.info(`✅ Login concluído — email: ${email} source: webClient`);
@@ -293,6 +299,7 @@ export const AuthProvider = ({ children }) => {
       setThemeUserId(userInfo.id);
       _activateFirebase();
       FirebaseAdapter.saveUser(userInfo.id, null, userInfo).catch(() => {});
+      hydratePastMonthsFromFirebase(userInfo.id, 'aurora').catch(() => {});
 
       Logger.info(`✅ Login concluído — email: ${userInfo.email} source: aurora (google)`);
       return { success: true };
@@ -320,6 +327,7 @@ export const AuthProvider = ({ children }) => {
       }
 
       await StorageService.clearAll();
+      TodayCoworkersService.clear();
       _deactivateFirebase();
       setThemeUserId(null);
       setUser(null);

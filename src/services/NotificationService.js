@@ -10,6 +10,7 @@
  */
 
 import { Platform } from 'react-native';
+import Constants from 'expo-constants';
 import { collection, onSnapshot, orderBy, query, limit } from 'firebase/firestore';
 import { db } from './firebase/config';
 import FirebaseAdapter from './firebase/FirebaseAdapter';
@@ -59,7 +60,15 @@ const NotificationService = {
         Logger.nav('push: permission not granted');
         return null;
       }
-      const tokenResp = await Notifications.getExpoPushTokenAsync();
+      const projectId =
+        Constants?.expoConfig?.extra?.eas?.projectId ||
+        Constants?.easConfig?.projectId ||
+        null;
+      if (!projectId) {
+        Logger.nav('push: no EAS projectId configured; skipping push token registration');
+        return null;
+      }
+      const tokenResp = await Notifications.getExpoPushTokenAsync({ projectId });
       const token = tokenResp?.data;
       if (!token) return null;
       const deviceId = `${Platform.OS}_${token.slice(-12)}`;

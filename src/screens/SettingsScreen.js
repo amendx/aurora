@@ -94,13 +94,16 @@ const SettingsScreen = ({ navigation }) => {
         <Row icon="person-outline"        label="Perfil"                  hint="Foto, nome, informações"      onPress={() => navigation?.navigate?.('Profile')} />
         <Row icon="people-outline"        label="Grupos"                  hint="Seus grupos e equipes"         onPress={() => navigation?.navigate?.('GroupsScreen')} />
         <Row icon="eye-outline"           label="Visibilidade de equipes" hint="Quem aparece no seu plantão"   onPress={() => navigation?.navigate?.('GroupVisibilityScreen')} />
-        <Row icon="notifications-outline" label="Notificações"            hint="Ofertas, trocas e atualizações" onPress={() => navigation?.navigate?.('NotificationsSettingsScreen')} last />
+        <Row icon="notifications-outline" label="Notificações"            hint="Ofertas, trocas e atualizações" onPress={() => navigation?.navigate?.('NotificationsSettingsScreen')} />
+        <Row icon="swap-horizontal-outline" label="Histórico"              hint="Cessões e trocas, pendentes e passadas" onPress={() => navigation?.navigate?.('Historico')} last />
       </View>
 
       <SL top>Plantões & valores</SL>
       <View style={s.card}>
-        <Row icon="business-outline"      label="Meus hospitais"  hint="Onde você trabalha"                onPress={() => navigation?.navigate?.('HospitalsScreen')} />
-        <Row icon="cash-outline"          label="Valores e bônus" hint="Hora-base, fidelização, FDS" accent onPress={() => navigation?.navigate?.('ConfigScreen')} />
+        <Row icon="business-outline"      label="Meus hospitais"  hint="Valores, fidelização e bônus por hospital" accent onPress={() => navigation?.navigate?.('HospitalsScreen')} />
+        {/* Global "Valores e bônus" (ConfigScreen) intentionally hidden — per-hospital
+            is now the primary path. Re-enable this Row to roll back to the global UI. */}
+        {/* <Row icon="cash-outline"          label="Valores e bônus" hint="Hora-base, fidelização, FDS" onPress={() => navigation?.navigate?.('ConfigScreen')} /> */}
         <Row icon="document-text-outline" label="Relatórios"      hint="Histórico e exportação"            onPress={() => navigation?.navigate?.('Reports')} last />
       </View>
 

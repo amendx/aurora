@@ -18,6 +18,7 @@ import * as SecureStore from 'expo-secure-store';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useShifts } from '../contexts/ShiftsContext';
+import { useOpenings } from '../contexts/OpeningsContext';
 import { useColors, Typography, Spacing, BorderRadius, Shadows } from '../constants/DesignSystem';
 import { getFullShiftConfig, calculateShiftValueSync, roundCurrency, getShiftPeriod, shouldUseWeekendValue } from '../utils/ShiftValueCalculator';
 import ShiftBottomSheet from '../components/ShiftBottomSheet';
@@ -75,8 +76,11 @@ const buildWeekDays = (centerDate) => {
 const DayViewScreen = ({ navigation, initialDate }) => {
   const C = useColors();
   const insets = useSafeAreaInsets();
-  const { daysWithShifts, hoursReport } = useShifts();
+  const { daysWithShifts, hoursReport, restoreShiftLocally } = useShifts();
+  const { myCededOpenings, cancelCedeOpening, refresh: refreshOpenings } = useOpenings();
   const { user } = useContext(AuthContext);
+
+  useEffect(() => { refreshOpenings?.(true); }, [refreshOpenings]);
 
   const today = useMemo(() => new Date(), []);
   const [selectedDate, setSelectedDate] = useState(initialDate || today);
@@ -123,6 +127,17 @@ const DayViewScreen = ({ navigation, initialDate }) => {
 
   const selectedDateStr = toDateStr(selectedDate);
   const dayShifts = shiftsMap[selectedDateStr] || [];
+  const dayCedeBanners = useMemo(
+    () => (myCededOpenings || []).filter(o => (o.dateKey || (o.startISO || '').slice(0, 10)) === selectedDateStr),
+    [myCededOpenings, selectedDateStr],
+  );
+
+  const handleCancelCede = async (opening) => {
+    const r = await cancelCedeOpening(opening.id);
+    if (r?.success && r?.restoredShift) {
+      await restoreShiftLocally?.(r.restoredShift);
+    }
+  };
 
   useEffect(() => {
     if (!fabAnimatedOnce.current) {
@@ -373,7 +388,30 @@ const DayViewScreen = ({ navigation, initialDate }) => {
         overScrollMode="never"
         bounces={Platform.OS === 'ios'}
       >
-        {dayShifts.length === 0 ? (
+        {dayCedeBanners.map(o => {
+          const labelName = LABEL_MAP[o.label?.charAt(0)] || o.label || 'Plantão';
+          return (
+            <View key={o.id} style={[s.cedeBanner, { backgroundColor: C.background.card, borderColor: C.warning + '55' }]}>
+              <View style={[s.cedeBannerStrip, { backgroundColor: C.warning }]} />
+              <View style={{ flex: 1, paddingHorizontal: 12, paddingVertical: 10 }}>
+                <Text style={[s.cedeBannerTitle, { color: C.text.primary }]} numberOfLines={1}>
+                  {labelName} · {o.group?.name || 'Grupo'} · Cedido
+                </Text>
+                <Text style={[s.cedeBannerSub, { color: C.text.tertiary }]} numberOfLines={1}>
+                  Aguardando colega assumir
+                </Text>
+              </View>
+              <Pressable
+                style={[s.cedeBannerBtn, { borderColor: C.warning }]}
+                onPress={() => handleCancelCede(o)}
+                hitSlop={6}
+              >
+                <Text style={[s.cedeBannerBtnText, { color: C.warning }]}>Cancelar</Text>
+              </Pressable>
+            </View>
+          );
+        })}
+        {dayShifts.length === 0 && dayCedeBanners.length === 0 ? (
           <View style={[s.empty, { borderColor: C.border.light }]}>
             <Ionicons name="calendar-outline" size={40} color={C.interactive.inactive} />
             <Text style={[s.emptyTitle, { color: C.text.primary, fontFamily: Typography.fontFamily.semiBold }]}>Nenhum plantão</Text>
@@ -513,6 +551,27 @@ const s = StyleSheet.create({
   shiftValueCol: { alignItems: 'flex-end', gap: 2 },
   shiftValue: { fontSize: 13, fontWeight: '700', fontFamily: Typography.fontFamily.semiBold },
   // ─────────────────────────────────────────────────────────────────────────────
+
+  cedeBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 14,
+    borderWidth: 0.5,
+    marginBottom: 10,
+    overflow: 'hidden',
+    ...Shadows.small,
+  },
+  cedeBannerStrip: { width: 4, alignSelf: 'stretch' },
+  cedeBannerTitle: { fontSize: 14, fontFamily: Typography.fontFamily.semiBold, fontWeight: '700' },
+  cedeBannerSub: { fontSize: 11, marginTop: 2 },
+  cedeBannerBtn: {
+    borderWidth: 1,
+    borderRadius: BorderRadius.pill,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    marginRight: 12,
+  },
+  cedeBannerBtnText: { fontSize: 12, fontWeight: '700' },
 
   empty: {
     borderRadius: BorderRadius.lg,
