@@ -114,13 +114,16 @@ export const OffersProvider = ({ children }) => {
   useEffect(() => { refresh(); }, [refresh]);
 
   // ── Ceder: open to group ──────────────────────────────────────────────────
-  // Creates an opening with restrictedToGroupId + originShiftId; existing
-  // OpeningsScreen will display it to G members. Notifies all group members.
+  // Creates an opening with restrictedToGroupId + originShiftId, then removes
+  // the shift from the holder's Firestore + LocalCache immediately so the
+  // calendar reflects the cede right away. The opening carries a full snapshot
+  // so the holder can cancel and restore the shift before anyone claims.
   const cedeOpenToGroup = useCallback(async (shift) => {
     if (!userId || !shift?.id || !shift?.group?.id) return { success: false };
     const groupId = String(shift.group.id);
     const openingId = _uuid('cede');
     const slotId = _uuid('slot');
+    const monthKey = shift.monthKey || (shift.startISO || '').slice(0, 7);
     const opening = {
       id: openingId,
       source: 'aurora',
@@ -132,7 +135,7 @@ export const OffersProvider = ({ children }) => {
       startISO: shift.startISO || shift.start_date || null,
       endISO: shift.endISO || shift.end_date || null,
       dateKey: shift.date || shift.dateKey || (shift.startISO || '').slice(0, 10),
-      monthKey: shift.monthKey || (shift.startISO || '').slice(0, 7),
+      monthKey,
       totalSlots: 1,
       slots: [{ slotId, status: 'open', claimedByUserId: null, claimedAt: null }],
       estimatedValue: shift.estimatedValue ?? null,
@@ -143,8 +146,24 @@ export const OffersProvider = ({ children }) => {
       restrictedToGroupId: groupId,
       originShiftId: String(shift.id),
       originUserId: String(userId),
+      originShiftSnapshot: (() => {
+        const { originalData: _od, ...clean } = shift || {};
+        return clean;
+      })(),
     };
     await FirebaseAdapter.saveOpening(opening);
+
+    // Remove the shift from the holder immediately. Firestore is source of
+    // truth — LocalCache is patched separately by the caller via ShiftsContext.
+    try {
+      await FirebaseAdapter.removeUserShiftFull(userId, monthKey, shift.id);
+      await Promise.all([
+        LocalCache.deleteManualShift(userId, shift.id, monthKey),
+        LocalCache.deleteRegularShift(userId, shift.id, monthKey),
+      ]);
+    } catch (err) {
+      Logger.error(`[OffersContext] cedeOpenToGroup remove shift: ${err?.message}`);
+    }
 
     // Notify other group members
     try {

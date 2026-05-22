@@ -109,6 +109,7 @@ export function fromFirestore(doc) {
     durationMinutes: durationMinutes(doc.startISO, doc.endISO),
     totalSlots: doc.totalSlots ?? (doc.slots?.length ?? 1),
     availableSlots: available,
+    slots: doc.slots || [],
     group: doc.group || null,
     coworkers: [],
     estimatedValue: doc.estimatedValue ?? null,
@@ -121,5 +122,6 @@ export function fromFirestore(doc) {
     restrictedToGroupId: doc.restrictedToGroupId || null,
     originShiftId: doc.originShiftId || null,
     originUserId: doc.originUserId || null,
+    originShiftSnapshot: doc.originShiftSnapshot || null,
   };
 }

@@ -14,6 +14,7 @@ import { useShifts } from '../contexts/ShiftsContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors, Typography, Spacing, BorderRadius, Shadows } from '../constants/DesignSystem';
 import { calculateShiftValueWithBreakdown, computeShiftValue } from '../utils/ShiftValueCalculator';
+import { getMonthTotalValue } from '../utils/MonthSummaryComputer';
 import { formatMoney } from '../utils/MoneyFormatter';
 import TimeUtils from '../utils/TimeUtils';
 import { AuthContext } from '../context/AuthContext';
@@ -253,7 +254,7 @@ export default function ChartsScreen() {
           const mk = `${year}-${String(month).padStart(2, '0')}`;
           const cached = await LocalCache.getSummary(user.id, mk);
           if (cached && (cached.totalGrossValue || cached.totalShifts)) {
-            totalValue = (cached.totalGrossValue || 0) + (cached.totalLoyaltyValue || 0) + (cached.totalBonusValue || 0);
+            totalValue = getMonthTotalValue(cached) ?? 0;
             totalHours = cached.totalHours || 0;
             count = cached.totalShifts || 0;
             results.push({ label: MONTH_NAMES_SHORT[month - 1], year, month, value: totalValue, hours: totalHours, count });

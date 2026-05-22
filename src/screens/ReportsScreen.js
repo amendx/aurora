@@ -20,6 +20,8 @@ import { formatMoney, formatMoneyCompact } from '../utils/MoneyFormatter';
 import TimeUtils from '../utils/TimeUtils';
 import { AuthContext } from '../context/AuthContext';
 import LocalCache from '../services/LocalCache';
+import { getMonthTotalValue, getMonthTotalHours } from '../utils/MonthSummaryComputer';
+import { buildHybridConfig, isPastMonthKey } from '../utils/HospitalConfigResolver';
 
 // ── Skeleton ──────────────────────────────────────────────────────────────────
 const SkeletonBox = ({ width = '100%', height = 20, style }) => {
@@ -87,6 +89,9 @@ export default function ReportsScreen({ onExportReady } = {}) {
   const [computing, setComputing] = useState(false);
   const [chartData, setChartData] = useState([]);
   const [chartLoading, setChartLoading] = useState(true);
+  // Header reads from the canonical month summary (same source as Home hero,
+  // Calendar hero, Charts bars) — never recompute totals in this screen.
+  const [viewMonthSummary, setViewMonthSummary] = useState(null);
 
   // Refs for debouncing month navigation
   const navigationTimeoutRef = useRef(null);
@@ -154,8 +159,36 @@ export default function ReportsScreen({ onExportReady } = {}) {
   const buildRows = async () => {
     setComputing(true);
     try {
-      const config = await getFullShiftConfig();
-      const fracExtra = config.fractionalExtraHours ?? true;
+      const liveConfig = await getFullShiftConfig();
+      const fracExtra = liveConfig.fractionalExtraHours ?? true;
+
+      // Past-month freeze: bonus + loyalty come from the prior saved summary's
+      // snapshot; hour values + friday-night rule come from the live config.
+      // Current/future months use the live config wholesale.
+      const viewMonthKey = `${viewDate.getFullYear()}-${String(viewDate.getMonth() + 1).padStart(2, '0')}`;
+      let breakdownConfig = liveConfig;
+      if (user?.id && isPastMonthKey(viewMonthKey)) {
+        try {
+          const prior = await LocalCache.getSummary(user.id, viewMonthKey);
+          const snap = prior?.financialConfigSnapshot;
+          if (snap) breakdownConfig = buildHybridConfig(liveConfig, snap);
+        } catch (_) {}
+      }
+
+      // Pre-pass: total planned hours for the month — needed by the legacy
+      // global-loyalty tier filter inside calculateShiftValueWithBreakdown.
+      // Without this, totalMonthlyHours=0 skips every tier with minHours>0,
+      // making the header read R$ X (sem fidelização) while the bar chart
+      // (LocalCache.getSummary) correctly includes it.
+      let totalMonthlyHours = 0;
+      for (const dayData of daysWithShifts) {
+        for (const shift of (dayData.shifts || [])) {
+          const planned = shift.splitHours
+            ? TimeUtils.decimalHoursToMinutes(shift.splitHours.hoursThisMonth)
+            : TimeUtils.getShiftStandardMinutes(shift.label);
+          totalMonthlyHours += planned / 60;
+        }
+      }
 
       const built = [];
       let totalHours = 0;
@@ -228,7 +261,7 @@ export default function ReportsScreen({ onExportReady } = {}) {
           //   Total mês (M+N acima, fid 25%): R$851,50×1.25 + R$2081,25×1.25 = R$3.665,94
           let value = 0;
           try {
-            const bd = await calculateShiftValueWithBreakdown(shift, dateStr, 0);
+            const bd = await calculateShiftValueWithBreakdown(shift, dateStr, totalMonthlyHours, breakdownConfig);
             // totalMinutes = plannedMinutes + extraMinutes (fracExtra rule already applied)
             value = computeShiftValue(bd, totalMinutes);
           } catch (_) {}
@@ -307,19 +340,19 @@ export default function ReportsScreen({ onExportReady } = {}) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows.length]);
 
-  // Load last 3 months of summaries for bar chart
+  // Load last 3 months of summaries for bar chart + the viewed month for header
   useEffect(() => {
     if (!user?.id) return;
     setChartLoading(true);
     const load = async () => {
       const months = [];
+      let viewedSummary = null;
       for (let i = 2; i >= 0; i--) {
         const d = new Date(viewDate.getFullYear(), viewDate.getMonth() - i, 1);
         const mk = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
         const summary = await LocalCache.getSummary(user.id, mk);
-        const val = summary
-          ? (summary.totalGrossValue || 0) + (summary.totalLoyaltyValue || 0) + (summary.totalBonusValue || 0)
-          : 0;
+        if (i === 0) viewedSummary = summary;
+        const val = getMonthTotalValue(summary) ?? 0;
         months.push({
           month: d.toLocaleDateString('pt-BR', { month: 'short' }).replace('.', '').toUpperCase(),
           value: val,
@@ -327,11 +360,12 @@ export default function ReportsScreen({ onExportReady } = {}) {
         });
       }
       setChartData(months);
+      setViewMonthSummary(viewedSummary);
       setChartLoading(false);
     };
     load();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, viewDate.getMonth(), viewDate.getFullYear()]);
+  }, [user?.id, viewDate.getMonth(), viewDate.getFullYear(), daysWithShifts]);
 
   const extraMinutesTotal = rows.reduce((a, r) => a + (r.extraMinutes > 0 ? r.extraMinutes : 0), 0);
   const extraValue = rows.reduce((a, r) => {
@@ -362,12 +396,21 @@ export default function ReportsScreen({ onExportReady } = {}) {
           <View>
             <Text style={s.heroYearLabel}>{MONTH_NAMES[viewDate.getMonth()].toUpperCase()} · {viewDate.getFullYear()}</Text>
             <View style={s.heroValueRow}>
-              <Text style={s.heroValue}>
-                {isLoading ? '—' : formatMoney(totals.value).split(',')[0]}
-              </Text>
-              {!isLoading && (
-                <Text style={s.heroValueCents}>,{formatMoney(totals.value).split(',')[1]}</Text>
-              )}
+              {(() => {
+                // Canonical source: same as bar chart, Home hero, Calendar hero.
+                const headerVal = getMonthTotalValue(viewMonthSummary);
+                const display = headerVal != null ? formatMoney(headerVal) : '—';
+                return (
+                  <>
+                    <Text style={s.heroValue}>
+                      {isLoading || headerVal == null ? '—' : display.split(',')[0]}
+                    </Text>
+                    {!isLoading && headerVal != null && (
+                      <Text style={s.heroValueCents}>,{display.split(',')[1]}</Text>
+                    )}
+                  </>
+                );
+              })()}
             </View>
           </View>
           <View style={s.heroNavBtns}>

@@ -184,3 +184,30 @@ export const computeMonthSummary = (userId, monthKey, daysWithShifts, timeEntrie
     isDirty:                  false,
   };
 };
+
+/**
+ * Canonical "value for a month" — used by Home hero, Calendar hero, Charts bars,
+ * Reports header, and any other UI showing a month total. ALL such totals MUST
+ * go through this so they stay in sync; never re-implement the addition.
+ *
+ * @param {import('../models').MonthSummary | null | undefined} summary
+ * @returns {number | null}  BRL value, or null when summary is missing
+ */
+export const getMonthTotalValue = (summary) => {
+  if (!summary) return null;
+  return (summary.totalGrossValue   || 0)
+       + (summary.totalLoyaltyValue || 0)
+       + (summary.totalBonusValue   || 0);
+};
+
+/**
+ * Canonical "hours for a month" — scheduled minutes converted to decimal hours.
+ * Same single-source-of-truth principle as getMonthTotalValue.
+ *
+ * @param {import('../models').MonthSummary | null | undefined} summary
+ * @returns {number | null}
+ */
+export const getMonthTotalHours = (summary) => {
+  if (!summary) return null;
+  return (summary.totalScheduledMinutes || 0) / 60;
+};

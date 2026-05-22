@@ -1,5 +1,6 @@
 // Utilitário para cálculo de valores de plantão
 import * as SecureStore from 'expo-secure-store';
+import { resolveShiftConfig, resolveLoyaltyPct } from './HospitalConfigResolver';
 
 // Configurações padrão (caso não haja configuração salva)
 const DEFAULT_VALUES = {
@@ -157,29 +158,41 @@ export const computeShiftValue = (bd, totalMinutes) => {
 };
 
 // Função avançada para calcular valor com breakdown detalhado - CORRIGIDA
-export const calculateShiftValueWithBreakdown = async (shift, dateString, totalMonthlyHours = 0) => {
+/**
+ * @param {object}  shift
+ * @param {string}  dateString          "YYYY-MM-DD"
+ * @param {number}  totalMonthlyHours   For legacy global loyalty tier resolution
+ * @param {object}  [configOverride]    If passed, skip getFullShiftConfig() and use
+ *                                       this object directly. Used by past-month
+ *                                       recomputes so frozen bonus/loyalty values
+ *                                       (from a hybrid config) flow through to the
+ *                                       per-shift breakdown.
+ */
+export const calculateShiftValueWithBreakdown = async (shift, dateString, totalMonthlyHours = 0, configOverride = null) => {
   try {
-    const config = await getFullShiftConfig();
-    
+    const config = configOverride || await getFullShiftConfig();
+    // Per-hospital effective config (falls back to global per field).
+    const instId = shift?.group?.institution?.id ?? shift?.group?.institutionId ?? null;
+    const eff = resolveShiftConfig(config, instId);
+
     const isNaturalWeekend = isWeekend(dateString);
-    const useWeekendValue = shouldUseWeekendValue(dateString, shift.label, config.fridayNightAsWeekend);
-    
-    
+    const useWeekendValue = shouldUseWeekendValue(dateString, shift.label, eff.fridayNightAsWeekend);
+
     const period = getShiftPeriod(shift.label);
     const hours = getShiftHours(shift.label);
     const standardMinutes = hours * 60; // NOVA: base em minutos
-    
-    // Valor base - CORRIGIDO: usar base em minutos
+
+    const rates = eff.hourValues || DEFAULT_VALUES;
     let hourlyValue;
     if (useWeekendValue) {
-      hourlyValue = parseFloat(config.hourValues.weekend?.[period]) || DEFAULT_VALUES.weekend[period];
+      hourlyValue = parseFloat(rates.weekend?.[period]) || DEFAULT_VALUES.weekend[period];
     } else {
-      hourlyValue = parseFloat(config.hourValues.weekday?.[period]) || DEFAULT_VALUES.weekday[period];
+      hourlyValue = parseFloat(rates.weekday?.[period]) || DEFAULT_VALUES.weekday[period];
     }
-    
+
     // NOVA LÓGICA: Calcular baseado em minutos padrão
     const baseValue = (standardMinutes / 60) * hourlyValue; // Valor base sem bônus
-    
+
     let breakdown = {
       baseValue,
       hourlyValue,
@@ -187,60 +200,32 @@ export const calculateShiftValueWithBreakdown = async (shift, dateString, totalM
       standardMinutes, // NOVO: adicionar minutos padrão
       weekend: useWeekendValue,
       isNaturalWeekend,
-      isFridayNight: config.fridayNightAsWeekend && isFriday(dateString) && period === 'night',
+      isFridayNight: eff.fridayNightAsWeekend && isFriday(dateString) && period === 'night',
       period,
       loyaltyBonus: 0,
       loyaltyPercentage: 0,
       generalBonus: 0,
       generalBonusPercentage: 0,
+      configSource: eff.source, // 'institution' | 'global' — handy for debugging
       finalValue: baseValue
     };
 
-    // Aplicar fidelização — per-institution (priority) ou global (fallback)
-    const instId = String(shift.group?.institution?.id || '');
-    const instCfg = instId ? config.institutionLoyalty?.[instId] : null;
-    const instEarned = instId ? config.currentInstitutionLoyalty?.[instId] : null;
-
-    if (instCfg) {
-      let loyaltyPct = 0;
-      let loyaltyMinH = 0;
-      if (instCfg.autoFromHours) {
-        if (instEarned) {
-          loyaltyPct = instEarned.percentage || 0;
-          loyaltyMinH = instEarned.minHours || 0;
-        } else {
-          const tier = (instCfg.loyaltyOptions || [])
-            .filter(o => o.minHours <= totalMonthlyHours)
-            .sort((a, b) => b.minHours - a.minHours)[0] || null;
-          loyaltyPct = tier?.percentage || 0;
-          loyaltyMinH = tier?.minHours || 0;
-        }
-      } else {
-        loyaltyPct = instCfg.manualPercentage || 0;
-      }
-      if (loyaltyPct > 0) {
-        breakdown.loyaltyBonus = roundCurrency((baseValue * loyaltyPct) / 100);
-        breakdown.loyaltyPercentage = loyaltyPct;
-        breakdown.loyaltyMinHours = loyaltyMinH;
-      }
-    } else if (config.loyaltyEnabled && config.loyaltyOptions) {
-      // Legacy global loyalty fallback
-      const activeLoyalty = config.loyaltyOptions
-        .filter(o => o.minHours <= totalMonthlyHours)
-        .sort((a, b) => b.minHours - a.minHours)[0] || null;
-      if (activeLoyalty) {
-        breakdown.loyaltyBonus = roundCurrency((baseValue * activeLoyalty.percentage) / 100);
-        breakdown.loyaltyPercentage = activeLoyalty.percentage;
-        breakdown.loyaltyMinHours = activeLoyalty.minHours;
+    // Fidelização — resolver knows about per-institution + legacy global
+    const loyaltyPct = resolveLoyaltyPct(eff, totalMonthlyHours);
+    if (loyaltyPct > 0) {
+      breakdown.loyaltyBonus = roundCurrency((baseValue * loyaltyPct) / 100);
+      breakdown.loyaltyPercentage = loyaltyPct;
+      // Surface tier minHours when the resolver source had one (institution auto-from-hours, or legacy tier match)
+      if (eff.institutionLoyaltyCfg?.autoFromHours && eff.institutionEarnedLoyalty) {
+        breakdown.loyaltyMinHours = eff.institutionEarnedLoyalty.minHours || 0;
       }
     }
 
-    // Aplicar bônus geral se habilitado - CORRIGIDO: com precisão monetária
-    if (config.bonusEnabled && config.bonus && isBonusApplicable(dateString, config.bonus)) {
-      const bonusPercentage = parseFloat(config.bonus.percentage) || 0;
+    // Bônus geral — per-hospital toggle/percentage if set, else global
+    if (eff.bonusEnabled && eff.bonus && isBonusApplicable(dateString, eff.bonus)) {
+      const bonusPercentage = parseFloat(eff.bonus.percentage) || 0;
       breakdown.generalBonus = roundCurrency((baseValue * bonusPercentage) / 100);
       breakdown.generalBonusPercentage = bonusPercentage;
-     
     }
 
     // Valor final — usa a função canônica (mesma fórmula de BottomSheet e Reports)
@@ -340,11 +325,15 @@ export const calculateShiftValueSync = (shift, dateString, savedValues = null) =
 export const calculateShiftFinalValueSync = (shift, dateString, config, totalMonthlyHours = 0, realHoursEntry = null) => {
   if (!config) return calculateShiftValueSync(shift, dateString, null);
 
-  const useWeekendValue = shouldUseWeekendValue(dateString, shift.label, config.fridayNightAsWeekend);
+  // Per-hospital effective config (falls back to global per field).
+  const instId = shift?.group?.institution?.id ?? shift?.group?.institutionId ?? null;
+  const eff = resolveShiftConfig(config, instId);
+
+  const useWeekendValue = shouldUseWeekendValue(dateString, shift.label, eff.fridayNightAsWeekend);
   const period = getShiftPeriod(shift.label);
   const standardHours = getShiftHours(shift.label);
 
-  const rates = config.hourValues || DEFAULT_VALUES;
+  const rates = eff.hourValues || DEFAULT_VALUES;
   let hourlyValue;
   if (useWeekendValue) {
     hourlyValue = parseFloat(rates.weekend?.[period]) || DEFAULT_VALUES.weekend[period];
@@ -368,36 +357,12 @@ export const calculateShiftFinalValueSync = (shift, dateString, config, totalMon
 
   const baseValue = hourlyValue * effectiveHours;
 
-  // Loyalty — per-institution first, then legacy global
-  let loyaltyPct = 0;
-  const instId = String(shift.group?.institution?.id || '');
-  const instCfg = instId ? config.institutionLoyalty?.[instId] : null;
-  const instEarned = instId ? config.currentInstitutionLoyalty?.[instId] : null;
-  if (instCfg) {
-    if (instCfg.autoFromHours) {
-      if (instEarned) {
-        loyaltyPct = instEarned.percentage || 0;
-      } else {
-        const tier = (instCfg.loyaltyOptions || [])
-          .filter(o => o.minHours <= totalMonthlyHours)
-          .sort((a, b) => b.minHours - a.minHours)[0];
-        loyaltyPct = tier?.percentage || 0;
-      }
-    } else {
-      loyaltyPct = instCfg.manualPercentage || 0;
-    }
-  } else if (config.loyaltyEnabled && config.loyaltyOptions) {
-    const activeLoyalty = config.loyaltyOptions
-      .filter(o => o.minHours <= totalMonthlyHours)
-      .sort((a, b) => b.minHours - a.minHours)[0];
-    loyaltyPct = activeLoyalty?.percentage || 0;
-  }
+  const loyaltyPct = resolveLoyaltyPct(eff, totalMonthlyHours);
   const loyaltyBonus = (baseValue * loyaltyPct) / 100;
 
-  // General bonus
   let generalBonus = 0;
-  if (config.bonusEnabled && config.bonus && isBonusApplicable(dateString, config.bonus)) {
-    const bonusPct = parseFloat(config.bonus.percentage) || 0;
+  if (eff.bonusEnabled && eff.bonus && isBonusApplicable(dateString, eff.bonus)) {
+    const bonusPct = parseFloat(eff.bonus.percentage) || 0;
     generalBonus = (baseValue * bonusPct) / 100;
   }
 

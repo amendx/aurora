@@ -45,8 +45,10 @@ import DayViewScreen from './DayViewScreen';
 import HospitalsScreen from './HospitalsScreen';
 import HospitalDetailScreen from './HospitalDetailScreen';
 import OpeningsScreen from './OpeningsScreen';
+import NetworkVacanciesScreen from './NetworkVacanciesScreen';
 import AvisosScreen from './AvisosScreen';
 import NotificationsSettingsScreen from './NotificationsSettingsScreen';
+import HistoricoScreen from './HistoricoScreen';
 import ChartsScreen from './ChartsScreen';
 import TabBar from '../components/TabBar';
 import { useColors, Spacing } from '../constants/DesignSystem';
@@ -82,8 +84,10 @@ const SCREEN_MAP = {
   HospitalsScreen:       'hospitals',
   HospitalDetailScreen:  'hospitalDetail',
   OpeningsScreen:        'openings',
+  NetworkVacanciesScreen: 'networkVacancies',
   AvisosScreen:          'avisos',
   NotificationsSettingsScreen: 'notifsettings',
+  Historico:             'historico',
 };
 
 export default function MainScreen() {
@@ -363,6 +367,10 @@ export default function MainScreen() {
       }
       case 'openings':
         return { title: 'Vagas disponíveis', subtitle: 'Plantões em aberto', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
+      case 'networkVacancies':
+        return { title: 'Vagas da rede', subtitle: 'Próximos 7 dias', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
+      case 'historico':
+        return { title: 'Histórico', subtitle: 'Cessões e trocas', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
       default:
         return { title: '', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
     }
@@ -422,10 +430,14 @@ export default function MainScreen() {
         );
       case 'openings':
         return <OpeningsScreen navigation={{ goBack: handleBackNavigation }} />;
+      case 'networkVacancies':
+        return <NetworkVacanciesScreen navigation={{ goBack: handleBackNavigation }} />;
       case 'avisos':
         return <AvisosScreen navigation={{ goBack: handleBackNavigation }} />;
       case 'notifsettings':
         return <NotificationsSettingsScreen navigation={{ goBack: handleBackNavigation }} />;
+      case 'historico':
+        return <HistoricoScreen navigation={{ goBack: handleBackNavigation }} />;
       default:
         return null;
     }

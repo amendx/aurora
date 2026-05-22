@@ -446,6 +446,46 @@ const FirebaseAdapter = {
     });
   },
 
+  /**
+   * Read full ceder/swap history for a user (everything except pending).
+   * Returns a unified, date-desc list with `__kind` ('offer' | 'swap') for the
+   * Histórico screen. Filters by status client-side to avoid composite indexes.
+   */
+  getHistoryForUser: async (userId) => {
+    if (!db || !userId) return [];
+    try {
+      const { collection, query, where, getDocs } = await import('firebase/firestore');
+      const uid = String(userId);
+      const [offFrom, offTo, swInit, swTarg] = await Promise.all([
+        getDocs(query(collection(db, 'shiftOffers'), where('fromUserId', '==', uid))),
+        getDocs(query(collection(db, 'shiftOffers'), where('toUserId',   '==', uid))),
+        getDocs(query(collection(db, 'shiftSwaps'),  where('initiatorUserId', '==', uid))),
+        getDocs(query(collection(db, 'shiftSwaps'),  where('targetUserId',    '==', uid))),
+      ]);
+      const seen = new Set();
+      const out = [];
+      const add = (kind, d) => {
+        if (seen.has(d.id)) return;
+        seen.add(d.id);
+        const data = d.data();
+        if (data?.status && data.status !== 'pending') out.push({ __kind: kind, id: d.id, ...data });
+      };
+      offFrom.forEach(d => add('offer', d));
+      offTo.forEach(d => add('offer', d));
+      swInit.forEach(d => add('swap', d));
+      swTarg.forEach(d => add('swap', d));
+      out.sort((a, b) => {
+        const ta = a.respondedAt || a.createdAt || '';
+        const tb = b.respondedAt || b.createdAt || '';
+        return tb.localeCompare(ta);
+      });
+      return out;
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] getHistoryForUser: ${err.message}`);
+      return [];
+    }
+  },
+
   getPendingSwapsForUser: async (userId) => {
     if (!db || !userId) return [];
     try {
@@ -464,6 +504,147 @@ const FirebaseAdapter = {
     } catch (err) {
       Logger.warn(`[FirebaseAdapter] getPendingSwapsForUser: ${err.message}`);
       return [];
+    }
+  },
+
+  /**
+   * Hydrate aurora groups + memberships + persons (coworkers) from Firestore.
+   * Aurora users have no PlantaoAPI source for any of these — the data lives
+   * only in users/{uid}/groups, users/{uid}/groupMembers and users/{uid}/persons.
+   *
+   * Returns:
+   *   {
+   *     groups:           Array<Group>,
+   *     membersByGroupId: { [groupId]: Array<{ userId, name, photo, council }> },
+   *     persons:          { [personId]: Person }
+   *   }
+   */
+  fetchAuroraGroupMembers: async (userId) => {
+    if (!db || !userId) return { groups: [], membersByGroupId: {}, persons: {} };
+    const { collection, getDocs } = await import('firebase/firestore');
+    const [grpSnap, memSnap, perSnap] = await Promise.allSettled([
+      getDocs(collection(db, 'users', String(userId), 'groups')),
+      getDocs(collection(db, 'users', String(userId), 'groupMembers')),
+      getDocs(collection(db, 'users', String(userId), 'persons')),
+    ]);
+    const groups = [];
+    if (grpSnap.status === 'fulfilled') {
+      grpSnap.value.forEach(d => groups.push({ id: d.id, ...d.data() }));
+    } else {
+      Logger.warn(`[FirebaseAdapter] fetchAuroraGroupMembers/groups [${userId}]: ${grpSnap.reason?.message}`);
+    }
+    const membersByGroupId = {};
+    if (memSnap.status === 'fulfilled') {
+      memSnap.value.forEach(d => {
+        const data = d.data() || {};
+        if (Array.isArray(data.members)) membersByGroupId[d.id] = data.members;
+      });
+    } else {
+      Logger.warn(`[FirebaseAdapter] fetchAuroraGroupMembers/members [${userId}]: ${memSnap.reason?.message}`);
+    }
+    const persons = {};
+    if (perSnap.status === 'fulfilled') {
+      perSnap.value.forEach(d => { persons[d.id] = { id: d.id, ...d.data() }; });
+    } else {
+      Logger.warn(`[FirebaseAdapter] fetchAuroraGroupMembers/persons [${userId}]: ${perSnap.reason?.message}`);
+    }
+    return { groups, membersByGroupId, persons };
+  },
+
+  /**
+   * Hydrate an aurora user's month from Firestore.
+   * Returns { manualShifts, regularShifts } — manual = self-created, regular =
+   * received via cede/swap or coordinator opening. Both paths are needed because
+   * aurora users have no PlantaoAPI backing; Firestore is the source of truth.
+   *
+   * Paths read:
+   *   users/{uid}/manualShifts/*           ← filtered to monthKey
+   *   users/{uid}/months/{mk}/shifts/*     ← all = regular for aurora users
+   */
+  fetchAuroraMonth: async (userId, monthKey) => {
+    const empty = { manualShifts: [], regularShifts: [], manualAuthoritative: false, regularAuthoritative: false };
+    if (!db || !userId || !monthKey) return empty;
+    const { collection, getDocs } = await import('firebase/firestore');
+    // allSettled — one path failing (e.g. permission gap) must not zero out the other.
+    const [manualRes, regularRes] = await Promise.allSettled([
+      getDocs(collection(db, 'users', String(userId), 'manualShifts')),
+      getDocs(collection(db, 'users', String(userId), 'months', String(monthKey), 'shifts')),
+    ]);
+    const manualShifts = [];
+    const manualAuthoritative = manualRes.status === 'fulfilled';
+    if (manualAuthoritative) {
+      manualRes.value.forEach(d => {
+        const data = d.data();
+        if (data?.monthKey === monthKey) manualShifts.push({ id: d.id, ...data });
+      });
+    } else {
+      Logger.warn(`[FirebaseAdapter] fetchAuroraMonth/manual [${userId}/${monthKey}]: ${manualRes.reason?.message}`);
+    }
+    const regularShifts = [];
+    const regularAuthoritative = regularRes.status === 'fulfilled';
+    if (regularAuthoritative) {
+      regularRes.value.forEach(d => regularShifts.push({ id: d.id, ...d.data() }));
+    } else {
+      Logger.warn(`[FirebaseAdapter] fetchAuroraMonth/regular [${userId}/${monthKey}]: ${regularRes.reason?.message}`);
+    }
+    return { manualShifts, regularShifts, manualAuthoritative, regularAuthoritative };
+  },
+
+  /**
+   * Hydrate a webClient user's past month from Firestore.
+   * Reads month metadata + per-shift docs + summary, then rebuilds the
+   * daysWithShifts structure ShiftsContext expects, plus the cached summary.
+   *
+   * Returns { daysWithShifts, syncedAt, summary, hasData }. `hasData` is true
+   * only when the month metadata doc exists — used by the caller to decide
+   * whether to skip the API fetch entirely.
+   */
+  fetchWebClientMonth: async (userId, monthKey) => {
+    const empty = { daysWithShifts: [], syncedAt: null, summary: null, hasData: false };
+    if (!db || !userId || !monthKey) return empty;
+    try {
+      const { collection, doc: _doc, getDoc, getDocs } = await import('firebase/firestore');
+      const [metaRes, shiftsRes, summaryRes] = await Promise.allSettled([
+        getDoc(_doc(db, 'users', String(userId), 'months', monthKey)),
+        getDocs(collection(db, 'users', String(userId), 'months', monthKey, 'shifts')),
+        getDoc(_doc(db, 'users', String(userId), 'months', monthKey, 'summary', 'current')),
+      ]);
+
+      const metaSnap = metaRes.status === 'fulfilled' ? metaRes.value : null;
+      if (!metaSnap?.exists()) return empty;
+      const meta = metaSnap.data() || {};
+
+      const byDate = {};
+      if (shiftsRes.status === 'fulfilled') {
+        shiftsRes.value.forEach(d => {
+          const data = d.data() || {};
+          const date = data.date;
+          if (!date) return;
+          if (!byDate[date]) {
+            const dt = new Date(date + 'T00:00:00');
+            byDate[date] = { day: dt.getDate(), date, shiftsCount: 0, shifts: [], originalData: null };
+          }
+          byDate[date].shifts.push({ id: d.id, ...data });
+          byDate[date].shiftsCount++;
+        });
+      } else {
+        Logger.warn(`[FirebaseAdapter] fetchWebClientMonth/shifts [${userId}/${monthKey}]: ${shiftsRes.reason?.message}`);
+      }
+      const daysWithShifts = Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
+
+      const summary = summaryRes.status === 'fulfilled' && summaryRes.value.exists()
+        ? summaryRes.value.data()
+        : null;
+
+      return {
+        daysWithShifts,
+        syncedAt: meta.syncedAt || null,
+        summary,
+        hasData: true,
+      };
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] fetchWebClientMonth [${userId}/${monthKey}]: ${err?.message}`);
+      return empty;
     }
   },
 
@@ -501,6 +682,53 @@ const FirebaseAdapter = {
     }
   },
 
+  /**
+   * Remove a shift from BOTH the monthly path and the manualShifts path in one
+   * atomic batch. Used by Ceder, which doesn't know which bucket the shift
+   * originally lived in. delete is a no-op when a doc is absent.
+   */
+  removeUserShiftFull: async (userId, monthKey, shiftId) => {
+    if (!db || !userId || !monthKey || !shiftId) return { success: false };
+    try {
+      const batch = writeBatch(db);
+      batch.delete(_sub(userId, 'months', monthKey, 'shifts', String(shiftId)));
+      batch.delete(_sub(userId, 'manualShifts', String(shiftId)));
+      await batch.commit();
+      return { success: true };
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] removeUserShiftFull: ${err.message}`);
+      return { success: false };
+    }
+  },
+
+  /**
+   * Restore a previously-removed shift (used when the holder cancels a cede
+   * opening before anyone claims). Writes to the monthly path; if the snapshot
+   * was originally manual, also re-writes to the manualShifts path.
+   */
+  restoreUserShift: async (userId, monthKey, shift) => {
+    if (!db || !userId || !monthKey || !shift?.id) return { success: false };
+    try {
+      const batch = writeBatch(db);
+      const now = new Date().toISOString();
+      batch.set(_sub(userId, 'months', monthKey, 'shifts', String(shift.id)), {
+        ..._stripShift(shift),
+        _updatedAt: now,
+      }, { merge: true });
+      if (shift.isManual) {
+        batch.set(_sub(userId, 'manualShifts', String(shift.id)), {
+          ..._stripShift(shift),
+          _updatedAt: now,
+        }, { merge: true });
+      }
+      await batch.commit();
+      return { success: true };
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] restoreUserShift: ${err.message}`);
+      return { success: false };
+    }
+  },
+
   // ── Atomic shift transfer / swap ───────────────────────────────────────────
 
   /**
@@ -515,10 +743,13 @@ const FirebaseAdapter = {
     try {
       const newId = `received_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       const batch = writeBatch(db);
-      const fromRef = _sub(fromUserId, 'months', shift.monthKey, 'shifts', String(shift.id));
-      const toRef   = _sub(toUserId,   'months', shift.monthKey, 'shifts', newId);
+      const fromRef       = _sub(fromUserId, 'months', shift.monthKey, 'shifts', String(shift.id));
+      const fromManualRef = _sub(fromUserId, 'manualShifts', String(shift.id));
+      const toRef         = _sub(toUserId,   'months', shift.monthKey, 'shifts', newId);
       const now = new Date().toISOString();
       batch.delete(fromRef);
+      // Origin may have lived in manualShifts (aurora-created). delete is a no-op when absent.
+      batch.delete(fromManualRef);
       batch.set(toRef, {
         ..._stripShift(shift),
         id: newId,
@@ -551,9 +782,12 @@ const FirebaseAdapter = {
       const batch = writeBatch(db);
       const now = new Date().toISOString();
 
-      // Delete originals
+      // Delete originals from both the monthly path and the manualShifts path
+      // (origin may have been aurora-manual). delete is a no-op when doc absent.
       batch.delete(_sub(uidA, 'months', shiftA.monthKey, 'shifts', String(shiftA.id)));
       batch.delete(_sub(uidB, 'months', shiftB.monthKey, 'shifts', String(shiftB.id)));
+      batch.delete(_sub(uidA, 'manualShifts', String(shiftA.id)));
+      batch.delete(_sub(uidB, 'manualShifts', String(shiftB.id)));
 
       // Shift A → B's calendar
       batch.set(_sub(uidB, 'months', shiftA.monthKey, 'shifts', newIdForB), {

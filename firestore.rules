@@ -66,6 +66,12 @@ service cloud.firestore {
       match /devices/{deviceId} {
         allow read, write: if canAccess(userId);
       }
+      // Manual shifts (aurora-source users) — self-created shifts stored flat
+      // under the user, distinguished from received-via-cede shifts that live
+      // under months/{mk}/shifts.
+      match /manualShifts/{shiftId} {
+        allow read, write: if canAccess(userId);
+      }
       match /months/{monthKey} {
         allow read, write: if canAccess(userId);
 

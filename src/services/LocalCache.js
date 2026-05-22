@@ -46,6 +46,7 @@ const K = {
   financialConfig: (uid)      => `${P}_finconfig_${uid}`,
   migrationVersion:(uid)      => `${P}_migration_v_${uid}`,
   manualShifts:    (uid, mk)  => `${P}_manual_${uid}_${mk}`,
+  regularShifts:   (uid, mk)  => `${P}_regular_${uid}_${mk}`,
   openings:        (uid, mk)  => `${P}_openings_${uid}_${mk}`,
   openingsLastFetch: (uid)    => `${P}_openings_last_fetch_${uid}`,
 };
@@ -425,9 +426,37 @@ const saveManualShift = async (userId, shift) => {
   return _set(K.manualShifts(userId, shift.monthKey), updated);
 };
 
+// Replace the entire manualShifts list for a month. Used when Firestore is
+// authoritative (aurora hydration) so deleted shifts get evicted locally.
+const setManualShifts = (userId, monthKey, shifts) =>
+  _set(K.manualShifts(userId, monthKey), Array.isArray(shifts) ? shifts : []);
+
 const deleteManualShift = async (userId, shiftId, monthKey) => {
   const existing = await getManualShifts(userId, monthKey);
   return _set(K.manualShifts(userId, monthKey), existing.filter(s => s.id !== shiftId));
+};
+
+// Regular shifts for aurora users — shifts they received via cede / swap.
+// Distinguished from manualShifts so the source is preserved (manual = self-created,
+// regular = came from a coordinator opening or another doctor's cede).
+const getRegularShifts = async (userId, monthKey) => {
+  const raw = await _get(K.regularShifts(userId, monthKey));
+  return Array.isArray(raw) ? raw : [];
+};
+
+const saveRegularShifts = (userId, monthKey, shifts) =>
+  _set(K.regularShifts(userId, monthKey), Array.isArray(shifts) ? shifts : []);
+
+const saveRegularShift = async (userId, shift) => {
+  const existing = await getRegularShifts(userId, shift.monthKey);
+  const updated = existing.filter(s => s.id !== shift.id);
+  updated.push(shift);
+  return _set(K.regularShifts(userId, shift.monthKey), updated);
+};
+
+const deleteRegularShift = async (userId, shiftId, monthKey) => {
+  const existing = await getRegularShifts(userId, monthKey);
+  return _set(K.regularShifts(userId, monthKey), existing.filter(s => s.id !== shiftId));
 };
 
 // ── Openings ──────────────────────────────────────────────────────────────────
@@ -504,7 +533,14 @@ const LocalCache = {
   // Manual shifts (aurora-source users)
   getManualShifts,
   saveManualShift,
+  setManualShifts,
   deleteManualShift,
+
+  // Regular shifts (aurora users — received via cede / swap)
+  getRegularShifts,
+  saveRegularShifts,
+  saveRegularShift,
+  deleteRegularShift,
 
   // Openings
   getOpenings,

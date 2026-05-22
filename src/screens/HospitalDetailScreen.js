@@ -19,6 +19,13 @@ const DEFAULT_LOYALTY_TIERS = [
   { minHours: 264, percentage: 30 },
 ];
 
+const DEFAULT_HOUR_VALUES = {
+  weekday: { day: 130, night: 143 },
+  weekend: { day: 170, night: 185 },
+};
+
+const DEFAULT_BONUS = { percentage: 0, startMonth: 1, endMonth: 12 };
+
 export default function HospitalDetailScreen({ navigation, institution: instProp, params }) {
   const inst = instProp || params?.institution;
   const C = useColors();
@@ -29,9 +36,22 @@ export default function HospitalDetailScreen({ navigation, institution: instProp
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  // Loyalty (lives under institutionLoyalty[instId] — pre-existing slot)
   const [autoFromHours, setAutoFromHours] = useState(true);
   const [loyaltyOptions, setLoyaltyOptions] = useState(DEFAULT_LOYALTY_TIERS);
   const [manualPercentage, setManualPercentage] = useState(0);
+
+  // Per-hospital overrides (live under institutionConfig[instId] — new slot)
+  const [overrideHourValues, setOverrideHourValues] = useState(false);
+  const [hourValues, setHourValues] = useState(DEFAULT_HOUR_VALUES);
+
+  const [overrideBonus, setOverrideBonus] = useState(false);
+  const [bonusEnabled, setBonusEnabled] = useState(false);
+  const [bonus, setBonus] = useState(DEFAULT_BONUS);
+
+  const [overrideFridayNight, setOverrideFridayNight] = useState(false);
+  const [fridayNightAsWeekend, setFridayNightAsWeekend] = useState(false);
+
   const [saving, setSaving] = useState(false);
 
   const instId = String(inst?.id || '');
@@ -57,14 +77,48 @@ export default function HospitalDetailScreen({ navigation, institution: instProp
   const loadSavedCfg = async () => {
     try {
       const raw = await SecureStore.getItemAsync('shift_configurations');
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        const cfg = parsed.institutionLoyalty?.[instId];
-        if (cfg) {
-          setAutoFromHours(cfg.autoFromHours ?? true);
-          if (cfg.loyaltyOptions?.length) setLoyaltyOptions(cfg.loyaltyOptions);
-          setManualPercentage(cfg.manualPercentage || 0);
-        }
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+
+      // Loyalty (existing slot)
+      const loyCfg = parsed.institutionLoyalty?.[instId];
+      if (loyCfg) {
+        setAutoFromHours(loyCfg.autoFromHours ?? true);
+        if (loyCfg.loyaltyOptions?.length) setLoyaltyOptions(loyCfg.loyaltyOptions);
+        setManualPercentage(loyCfg.manualPercentage || 0);
+      }
+
+      // Per-hospital overrides (new slot)
+      const inst = parsed.institutionConfig?.[instId];
+      if (inst?.hourValues) {
+        setOverrideHourValues(true);
+        setHourValues({
+          weekday: {
+            day:   parseFloat(inst.hourValues.weekday?.day)   || DEFAULT_HOUR_VALUES.weekday.day,
+            night: parseFloat(inst.hourValues.weekday?.night) || DEFAULT_HOUR_VALUES.weekday.night,
+          },
+          weekend: {
+            day:   parseFloat(inst.hourValues.weekend?.day)   || DEFAULT_HOUR_VALUES.weekend.day,
+            night: parseFloat(inst.hourValues.weekend?.night) || DEFAULT_HOUR_VALUES.weekend.night,
+          },
+        });
+      } else {
+        // Seed editor with global values so toggling "override" gives a sane starting point
+        if (parsed.hourValues) setHourValues(parsed.hourValues);
+      }
+      if (inst && (inst.bonus || inst.bonusEnabled != null)) {
+        setOverrideBonus(true);
+        setBonusEnabled(!!inst.bonusEnabled);
+        if (inst.bonus) setBonus({ ...DEFAULT_BONUS, ...inst.bonus });
+      } else {
+        if (parsed.bonus) setBonus({ ...DEFAULT_BONUS, ...parsed.bonus });
+        if (parsed.bonusEnabled != null) setBonusEnabled(!!parsed.bonusEnabled);
+      }
+      if (inst && inst.fridayNightAsWeekend != null) {
+        setOverrideFridayNight(true);
+        setFridayNightAsWeekend(!!inst.fridayNightAsWeekend);
+      } else if (parsed.fridayNightAsWeekend != null) {
+        setFridayNightAsWeekend(!!parsed.fridayNightAsWeekend);
       }
     } catch (e) {
       Logger.warn('HospitalDetailScreen: erro ao carregar cfg', e?.message);
@@ -76,11 +130,38 @@ export default function HospitalDetailScreen({ navigation, institution: instProp
     try {
       const raw = await SecureStore.getItemAsync('shift_configurations');
       const existing = raw ? JSON.parse(raw) : {};
+
+      // Loyalty (unchanged)
       const institutionLoyalty = existing.institutionLoyalty || {};
       institutionLoyalty[instId] = { autoFromHours, loyaltyOptions, manualPercentage };
+
+      // Per-hospital overrides — only write fields the user enabled.
+      const institutionConfig = { ...(existing.institutionConfig || {}) };
+      const instEntry = { ...(institutionConfig[instId] || {}) };
+      if (overrideHourValues) {
+        instEntry.hourValues = hourValues;
+      } else {
+        delete instEntry.hourValues;
+      }
+      if (overrideBonus) {
+        instEntry.bonusEnabled = bonusEnabled;
+        instEntry.bonus = bonus;
+      } else {
+        delete instEntry.bonusEnabled;
+        delete instEntry.bonus;
+      }
+      if (overrideFridayNight) {
+        instEntry.fridayNightAsWeekend = fridayNightAsWeekend;
+      } else {
+        delete instEntry.fridayNightAsWeekend;
+      }
+      if (Object.keys(instEntry).length > 0) institutionConfig[instId] = instEntry;
+      else delete institutionConfig[instId];
+
       const updated = {
         ...existing,
         institutionLoyalty,
+        institutionConfig,
         loyaltyEnabled: Object.values(institutionLoyalty).some(
           c => c.autoFromHours ? true : (c.manualPercentage || 0) > 0
         ),
@@ -101,6 +182,16 @@ export default function HospitalDetailScreen({ navigation, institution: instProp
       setSaving(false);
     }
   };
+
+  const updateHourValue = (group, period, raw) => {
+    const num = parseFloat(String(raw).replace(',', '.')) || 0;
+    setHourValues(prev => ({
+      ...prev,
+      [group]: { ...prev[group], [period]: num },
+    }));
+  };
+
+  const updateBonusField = (k, v) => setBonus(prev => ({ ...prev, [k]: v }));
 
   const d = detail || inst || {};
 
@@ -197,6 +288,168 @@ export default function HospitalDetailScreen({ navigation, institution: instProp
             </View>
           )}
         </View>
+
+        {/* Valores por hora */}
+        <Text style={[s.sectionLabel, { color: C.text.tertiary }]}>Valores por hora</Text>
+        <View style={[s.card, { backgroundColor: C.background.elevated, borderColor: C.border.light }]}>
+          <View style={s.toggleRow}>
+            <View style={[s.toggleIcon, { backgroundColor: C.accentSoft }]}>
+              <Ico name="cash-outline" size={16} color={C.primary} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[s.toggleLabel, { color: C.text.primary }]}>Usar valores específicos</Text>
+              <Text style={[s.toggleHint, { color: C.text.tertiary }]}>
+                {overrideHourValues ? 'Valores deste hospital sobrescrevem o global' : 'Usando os valores configurados em Configurações'}
+              </Text>
+            </View>
+            <Switch
+              value={overrideHourValues}
+              onValueChange={setOverrideHourValues}
+              trackColor={{ false: C.border.medium, true: C.primary }}
+              thumbColor="#fff"
+            />
+          </View>
+          {overrideHourValues && (
+            <>
+              <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: C.border.light }} />
+              <View style={{ padding: 12, gap: 10 }}>
+                <Text style={[s.subLabel, { color: C.text.tertiary }]}>Semana</Text>
+                <RateRow C={C} label="Manhã / Tarde" hint="07:00 – 19:00"
+                  value={hourValues.weekday.day}
+                  onChangeText={v => updateHourValue('weekday', 'day', v)} />
+                <RateRow C={C} label="Noite" hint="19:00 – 07:00"
+                  value={hourValues.weekday.night}
+                  onChangeText={v => updateHourValue('weekday', 'night', v)} />
+                <Text style={[s.subLabel, { color: C.text.tertiary, marginTop: 6 }]}>Fim de semana</Text>
+                <RateRow C={C} label="Manhã / Tarde" hint="07:00 – 19:00"
+                  value={hourValues.weekend.day}
+                  onChangeText={v => updateHourValue('weekend', 'day', v)} />
+                <RateRow C={C} label="Noite" hint="19:00 – 07:00"
+                  value={hourValues.weekend.night}
+                  onChangeText={v => updateHourValue('weekend', 'night', v)} />
+              </View>
+            </>
+          )}
+        </View>
+
+        {/* Bônus */}
+        <Text style={[s.sectionLabel, { color: C.text.tertiary }]}>Bônus</Text>
+        <View style={[s.card, { backgroundColor: C.background.elevated, borderColor: C.border.light }]}>
+          <View style={s.toggleRow}>
+            <View style={[s.toggleIcon, { backgroundColor: C.accentSoft }]}>
+              <Ico name="sparkles-outline" size={16} color={C.primary} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[s.toggleLabel, { color: C.text.primary }]}>Usar bônus específico</Text>
+              <Text style={[s.toggleHint, { color: C.text.tertiary }]}>
+                {overrideBonus ? 'Bônus deste hospital sobrescreve o global' : 'Usando o bônus geral configurado em Configurações'}
+              </Text>
+            </View>
+            <Switch
+              value={overrideBonus}
+              onValueChange={setOverrideBonus}
+              trackColor={{ false: C.border.medium, true: C.primary }}
+              thumbColor="#fff"
+            />
+          </View>
+          {overrideBonus && (
+            <>
+              <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: C.border.light }} />
+              <View style={s.toggleRow}>
+                <View style={[s.toggleIcon, { backgroundColor: C.accentSoft }]}>
+                  <Ico name="add-circle-outline" size={16} color={C.primary} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={[s.toggleLabel, { color: C.text.primary }]}>Aplicar bônus</Text>
+                  <Text style={[s.toggleHint, { color: C.text.tertiary }]}>
+                    {bonusEnabled ? (
+                      <>
+                        +{bonus.percentage || 0}% nos meses {monthShort(bonus.startMonth)}–{monthShort(bonus.endMonth)}
+                      </>
+                    ) : 'Bônus temporário desativado'}
+                  </Text>
+                </View>
+                <Switch
+                  value={bonusEnabled}
+                  onValueChange={setBonusEnabled}
+                  trackColor={{ false: C.border.medium, true: C.primary }}
+                  thumbColor="#fff"
+                />
+              </View>
+              {bonusEnabled && (
+                <>
+                  <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: C.border.light, marginLeft: 14 }} />
+                  <View style={{ padding: 12, gap: 10 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <Text style={[s.subLabel, { color: C.text.tertiary, marginBottom: 0 }]}>Percentual</Text>
+                      <View style={[s.pill, { backgroundColor: C.background.secondary, borderColor: C.border.light }]}>
+                        <Text style={[s.pillPrefix, { color: C.text.tertiary }]}>+</Text>
+                        <TextInput
+                          style={[s.pillInput, { color: C.text.primary }]}
+                          value={String(bonus.percentage || '')}
+                          onChangeText={v => updateBonusField('percentage', parseFloat(String(v).replace(',', '.')) || 0)}
+                          keyboardType="numeric"
+                          selectTextOnFocus
+                        />
+                        <Text style={[s.pillSuffix, { color: C.text.tertiary }]}>%</Text>
+                      </View>
+                    </View>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <Text style={[s.subLabel, { color: C.text.tertiary, marginBottom: 0 }]}>Mês início</Text>
+                      <MonthPicker C={C} value={bonus.startMonth} onChange={v => updateBonusField('startMonth', v)} />
+                    </View>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <Text style={[s.subLabel, { color: C.text.tertiary, marginBottom: 0 }]}>Mês fim</Text>
+                      <MonthPicker C={C} value={bonus.endMonth} onChange={v => updateBonusField('endMonth', v)} />
+                    </View>
+                  </View>
+                </>
+              )}
+            </>
+          )}
+        </View>
+
+        {/* Sexta-feira à noite */}
+        <Text style={[s.sectionLabel, { color: C.text.tertiary }]}>Regras de fim de semana</Text>
+        <View style={[s.card, { backgroundColor: C.background.elevated, borderColor: C.border.light }]}>
+          <View style={s.toggleRow}>
+            <View style={[s.toggleIcon, { backgroundColor: C.warning + '1a' }]}>
+              <Ico name="partly-sunny-outline" size={16} color={C.warning} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={[s.toggleLabel, { color: C.text.primary }]}>Usar regra específica</Text>
+              <Text style={[s.toggleHint, { color: C.text.tertiary }]}>
+                {overrideFridayNight ? 'Regra deste hospital sobrescreve o global' : 'Usando a regra configurada em Configurações'}
+              </Text>
+            </View>
+            <Switch
+              value={overrideFridayNight}
+              onValueChange={setOverrideFridayNight}
+              trackColor={{ false: C.border.medium, true: C.primary }}
+              thumbColor="#fff"
+            />
+          </View>
+          {overrideFridayNight && (
+            <>
+              <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: C.border.light }} />
+              <View style={s.toggleRow}>
+                <View style={[s.toggleIcon, { backgroundColor: C.warning + '1a' }]}>
+                  <Ico name="moon-outline" size={16} color={C.warning} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={[s.toggleLabel, { color: C.text.primary }]}>Sex. noite conta como FDS</Text>
+                  <Text style={[s.toggleHint, { color: C.text.tertiary }]}>19:00 sex → 07:00 sáb</Text>
+                </View>
+                <Switch
+                  value={fridayNightAsWeekend}
+                  onValueChange={setFridayNightAsWeekend}
+                  trackColor={{ false: C.border.medium, true: C.primary }}
+                  thumbColor="#fff"
+                />
+              </View>
+            </>
+          )}
+        </View>
       </ScrollView>
 
       {/* Save button */}
@@ -211,6 +464,58 @@ export default function HospitalDetailScreen({ navigation, institution: instProp
     </View>
   );
 }
+
+// ── Small composable rows for the new sections ─────────────────────────────
+const MONTH_SHORT = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+
+const monthShort = (v) => {
+  if (v == null) return '—';
+  if (typeof v === 'string' && v.includes('-')) v = parseInt(v.slice(-2), 10);
+  const n = parseInt(v, 10);
+  return n >= 1 && n <= 12 ? MONTH_SHORT[n - 1] : '—';
+};
+
+const RateRow = ({ C, label, hint, value, onChangeText }) => (
+  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+    <View style={{ flex: 1 }}>
+      <Text style={[s.toggleLabel, { color: C.text.primary, fontSize: 13 }]}>{label}</Text>
+      {hint ? <Text style={[s.toggleHint, { color: C.text.tertiary }]}>{hint}</Text> : null}
+    </View>
+    <View style={[s.pill, { backgroundColor: C.background.secondary, borderColor: C.border.light }]}>
+      <Text style={[s.pillPrefix, { color: C.text.tertiary }]}>R$</Text>
+      <TextInput
+        style={[s.pillInput, { color: C.text.primary }]}
+        value={String(value || '')}
+        onChangeText={onChangeText}
+        keyboardType="numeric"
+        selectTextOnFocus
+      />
+      <Text style={[s.pillSuffix, { color: C.text.tertiary }]}>/h</Text>
+    </View>
+  </View>
+);
+
+const MonthPicker = ({ C, value, onChange }) => {
+  const num = (() => {
+    if (value == null) return 1;
+    if (typeof value === 'string' && value.includes('-')) return parseInt(value.slice(-2), 10);
+    const n = parseInt(value, 10);
+    return n >= 1 && n <= 12 ? n : 1;
+  })();
+  const dec = () => onChange(((num - 2 + 12) % 12) + 1);
+  const inc = () => onChange((num % 12) + 1);
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+      <Pressable onPress={dec} hitSlop={10} style={[s.pill, { paddingHorizontal: 8, backgroundColor: C.background.secondary, borderColor: C.border.light }]}>
+        <Ico name="chevron-back" size={14} color={C.text.primary} />
+      </Pressable>
+      <Text style={{ minWidth: 36, textAlign: 'center', color: C.text.primary, fontWeight: '700' }}>{monthShort(num)}</Text>
+      <Pressable onPress={inc} hitSlop={10} style={[s.pill, { paddingHorizontal: 8, backgroundColor: C.background.secondary, borderColor: C.border.light }]}>
+        <Ico name="chevron-forward" size={14} color={C.text.primary} />
+      </Pressable>
+    </View>
+  );
+};
 
 const s = StyleSheet.create({
   root: { flex: 1 },
