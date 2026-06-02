@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback, useContext } from 'react';
 import {
   View, Text, ScrollView, Pressable, ActivityIndicator,
-  RefreshControl, StyleSheet,
+  RefreshControl, StyleSheet, Alert,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useColors, Typography, Spacing, BorderRadius, Shadows } from '../constants/DesignSystem';
 import { useOffers } from '../contexts/OffersContext';
+import { useOpenings } from '../contexts/OpeningsContext';
 import { AuthContext } from '../context/AuthContext';
 import FirebaseAdapter from '../services/firebase/FirebaseAdapter';
 import Logger from '../utils/Logger';
@@ -48,6 +49,8 @@ export default function HistoricoScreen({ navigation }) {
     acceptSwap, rejectSwap, cancelSwap,
   } = useOffers();
 
+  const { myCededOpenings, cancelCedeOpening, refresh: refreshOpenings } = useOpenings();
+
   const [history, setHistory] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -69,13 +72,65 @@ export default function HistoricoScreen({ navigation }) {
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await Promise.all([refresh(), loadHistory()]);
+    await Promise.all([refresh(), loadHistory(), refreshOpenings?.()]);
     setRefreshing(false);
-  }, [refresh, loadHistory]);
+  }, [refresh, loadHistory, refreshOpenings]);
 
+  const cededToGroupActive = (myCededOpenings || []).filter(o => o.status === 'active');
+  // Trocas pendentes saíram pra aba "Trocas" — não contam mais aqui.
   const pendingCount =
-    offersReceived.length + swapsReceived.length + offersSent.length + swapsSent.length;
+    offersReceived.length + offersSent.length + cededToGroupActive.length;
   const empty = pendingCount === 0 && history.length === 0;
+
+  // Confirmação antes de cancelar — evita "tap" acidental destruindo a oferta/troca.
+  const confirmCancelOffer = (offer) => {
+    const sh = offer?.shiftSnapshot || {};
+    const detail = `${_labelName(sh.label)} · ${_fmtDate(sh.startISO)}${sh.group?.name ? ' · ' + sh.group.name : ''}`;
+    Alert.alert(
+      'Cancelar cessão?',
+      `Você vai cancelar a cessão deste plantão:\n\n${detail}\n\nO plantão volta para você.`,
+      [
+        { text: 'Voltar', style: 'cancel' },
+        { text: 'Cancelar cessão', style: 'destructive', onPress: () => cancelOffer(offer) },
+      ],
+    );
+  };
+
+  const confirmCancelCedeOpening = (opening) => {
+    const snap = opening?.originShiftSnapshot || {};
+    const detail = `${_labelName(snap.label || opening.label)} · ${_fmtDate(snap.startISO || opening.startISO)}${opening.group?.name ? ' · ' + opening.group.name : ''}`;
+    Alert.alert(
+      'Cancelar cessão ao grupo?',
+      `Você vai cancelar esta cessão:\n\n${detail}\n\nO plantão volta para você.`,
+      [
+        { text: 'Voltar', style: 'cancel' },
+        {
+          text: 'Cancelar cessão', style: 'destructive',
+          onPress: async () => {
+            const r = await cancelCedeOpening(opening.id);
+            if (!r?.success) {
+              Alert.alert('Erro', 'Não foi possível cancelar a cessão. Tente novamente.');
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  const confirmCancelSwap = (sw) => {
+    const A = sw?.shiftA || {};
+    const B = sw?.shiftB || {};
+    const a = `${_labelName(A.label)} · ${_fmtDate(A.startISO)}`;
+    const b = `${_labelName(B.label)} · ${_fmtDate(B.startISO)}`;
+    Alert.alert(
+      'Cancelar troca?',
+      `Você vai cancelar esta proposta de troca:\n\n${a}\n  ⇄\n${b}\n\n${sw.targetUserName || 'O colega'} não poderá mais aceitar.`,
+      [
+        { text: 'Voltar', style: 'cancel' },
+        { text: 'Cancelar troca', style: 'destructive', onPress: () => cancelSwap(sw) },
+      ],
+    );
+  };
 
   return (
     <View style={[s.root, { backgroundColor: C.background.secondary }]}>
@@ -106,18 +161,8 @@ export default function HistoricoScreen({ navigation }) {
               </>
             )}
 
-            {swapsReceived.length > 0 && (
-              <>
-                <Text style={s.sectionLabelSpaced}>Trocas propostas a você</Text>
-                {swapsReceived.map(sw => (
-                  <PendingSwapCard
-                    key={sw.id} swap={sw} mode="received"
-                    onAccept={() => acceptSwap(sw)} onReject={() => rejectSwap(sw)}
-                    C={C} s={s}
-                  />
-                ))}
-              </>
-            )}
+            {/* Trocas pendentes (recebidas e enviadas) agora vivem na aba "Trocas".
+                O Histórico mantém só cessões pendentes + o histórico fechado. */}
 
             {offersSent.length > 0 && (
               <>
@@ -125,20 +170,22 @@ export default function HistoricoScreen({ navigation }) {
                 {offersSent.map(o => (
                   <PendingOfferCard
                     key={o.id} offer={o} mode="sent"
-                    onCancel={() => cancelOffer(o)}
+                    onCancel={() => confirmCancelOffer(o)}
                     C={C} s={s}
                   />
                 ))}
               </>
             )}
 
-            {swapsSent.length > 0 && (
+
+            {cededToGroupActive.length > 0 && (
               <>
-                <Text style={s.sectionLabelSpaced}>Trocas enviadas (aguardando)</Text>
-                {swapsSent.map(sw => (
-                  <PendingSwapCard
-                    key={sw.id} swap={sw} mode="sent"
-                    onCancel={() => cancelSwap(sw)}
+                <Text style={s.sectionLabelSpaced}>Cessões ao grupo (aguardando)</Text>
+                {cededToGroupActive.map(op => (
+                  <CededToGroupCard
+                    key={op.id}
+                    opening={op}
+                    onCancel={() => confirmCancelCedeOpening(op)}
                     C={C} s={s}
                   />
                 ))}
@@ -159,6 +206,50 @@ export default function HistoricoScreen({ navigation }) {
           </>
         )}
       </ScrollView>
+    </View>
+  );
+}
+
+function CededToGroupCard({ opening, onCancel, C, s }) {
+  const [busy, setBusy] = useState(false);
+  const snap = opening.originShiftSnapshot || {};
+  const label = snap.label || opening.label || 'M';
+  const startISO = snap.startISO || opening.startISO;
+  const groupName = opening.group?.name || snap.group?.name || 'Grupo';
+  const color = opening.group?.color || snap.group?.color || C.primary;
+
+  const handle = async () => { setBusy(true); try { await onCancel(); } finally { setBusy(false); } };
+
+  return (
+    <View style={[s.card, { backgroundColor: C.background.elevated, borderColor: C.border.light }]}>
+      <View style={[s.colorStrip, { backgroundColor: color }]} />
+      <View style={s.cardBody}>
+        <View style={s.cardHeaderRow}>
+          <View style={[s.labelChip, { backgroundColor: color + '22' }]}>
+            <Text style={[s.labelChipText, { color }]}>{label}</Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={[s.cardTitle, { color: C.text.primary }]} numberOfLines={1}>
+              {_labelName(label)} · {_fmtDate(startISO)}
+            </Text>
+            <Text style={[s.cardMeta, { color: C.text.tertiary }]} numberOfLines={1}>
+              Aberta para {groupName}
+            </Text>
+          </View>
+        </View>
+
+        <View style={s.actionsRow}>
+          <Pressable
+            style={[s.actionBtn, { backgroundColor: C.error + '14', borderColor: C.error + '40', flex: 1 }]}
+            onPress={handle}
+            disabled={busy}
+          >
+            {busy
+              ? <ActivityIndicator size="small" color={C.error} />
+              : <Text style={[s.actionBtnText, { color: C.error }]}>Cancelar cessão</Text>}
+          </Pressable>
+        </View>
+      </View>
     </View>
   );
 }

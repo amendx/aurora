@@ -3,7 +3,6 @@ node_modules/
 dist/
 *.log
 npm-debug.log*
-CLAUDE.md
 
 # Environment variables — never commit real secrets
 .env
@@ -33,3 +32,6 @@ design/*
 docs/public/*.html
 docs/assets/*.html
 architech/*
+
+CLAUDE.md
+CLAUDE.md

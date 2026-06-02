@@ -21,9 +21,13 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import { AuthContext } from '../context/AuthContext';
 import { useGroups } from './GroupsContext';
 import FirebaseAdapter from '../services/firebase/FirebaseAdapter';
+import { db } from '../services/firebase/config';
+import { collection, query, where, onSnapshot } from 'firebase/firestore';
 import NotificationService from '../services/NotificationService';
 import LocalCache from '../services/LocalCache';
 import Logger from '../utils/Logger';
+import ActivityLogger from '../utils/ActivityLogger';
+import UserSourceResolver from '../utils/UserSourceResolver';
 
 const OffersContext = createContext();
 
@@ -99,19 +103,85 @@ export const OffersProvider = ({ children }) => {
         } else liveSwaps.push(s);
       });
 
-      setOffersSent(liveOffers.filter(o => String(o.fromUserId) === uid));
-      setOffersReceived(liveOffers.filter(o => String(o.toUserId) === uid));
-      setSwapsSent(liveSwaps.filter(s => String(s.initiatorUserId) === uid));
-      setSwapsReceived(liveSwaps.filter(s => String(s.targetUserId) === uid));
+      const newOffersSent     = liveOffers.filter(o => String(o.fromUserId) === uid);
+      const newOffersReceived = liveOffers.filter(o => String(o.toUserId) === uid);
+      const newSwapsSent      = liveSwaps.filter(s => String(s.initiatorUserId) === uid);
+      const newSwapsReceived  = liveSwaps.filter(s => String(s.targetUserId) === uid);
+      setOffersSent(newOffersSent);
+      setOffersReceived(newOffersReceived);
+      setSwapsSent(newSwapsSent);
+      setSwapsReceived(newSwapsReceived);
+      ActivityLogger.snapshot({
+        selfId: uid, selfName: userName,
+        swapsSent: newSwapsSent, swapsReceived: newSwapsReceived,
+        offersSent: newOffersSent, offersReceived: newOffersReceived,
+      });
     } catch (err) {
       Logger.error(`[OffersContext] refresh: ${err?.message}`);
     } finally {
       setLoading(false);
       fetchingRef.current = false;
     }
-  }, [userId]);
+  }, [userId, userName]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  // ── Realtime listeners (onSnapshot) ───────────────────────────────────────
+  // 4 streams: ofertas recebidas/enviadas + trocas recebidas/enviadas.
+  // Substituem o fetch one-shot — qualquer mudança no Firestore reflete na
+  // UI imediatamente (sem precisar de pull-to-refresh).
+  useEffect(() => {
+    if (!userId || !db) {
+      setOffersSent([]); setOffersReceived([]);
+      setSwapsSent([]); setSwapsReceived([]);
+      return;
+    }
+    const uid = String(userId);
+
+    // Diagnostic — visível no Settings → Minhas ações
+    ActivityLogger.snapshot({
+      selfId: uid, selfName: userName,
+      swapsSent: [], swapsReceived: [], offersSent: [], offersReceived: [],
+    });
+
+    const makeDiagnosticHandler = (setter, kind, label) => (snap) => {
+      const out = [];
+      let expired = 0;
+      let nonPending = 0;
+      snap.forEach(d => {
+        const data = { id: d.id, ...d.data() };
+        if (data.status !== 'pending') { nonPending++; return; }
+        if (_isExpired(data)) {
+          expired++;
+          if (kind === 'offer') FirebaseAdapter.respondOffer(data.id, { status: 'expired' }).catch(() => {});
+          else FirebaseAdapter.respondSwap(data.id, { status: 'expired' }).catch(() => {});
+          return;
+        }
+        out.push(data);
+      });
+      Logger.info(`[OffersContext] ${label}(uid=${uid}) snap=${snap.size} pending=${out.length} expired=${expired} other=${nonPending}`);
+      setter(out);
+    };
+
+    const unsubs = [
+      onSnapshot(query(collection(db, 'shiftOffers'), where('toUserId', '==', uid)),
+        makeDiagnosticHandler(setOffersReceived, 'offer', 'offersReceived'),
+        (err) => Logger.warn(`[OffersContext] FAIL offersReceived(uid=${uid}): ${err?.code || ''} ${err?.message}`)),
+      onSnapshot(query(collection(db, 'shiftOffers'), where('fromUserId', '==', uid)),
+        makeDiagnosticHandler(setOffersSent, 'offer', 'offersSent'),
+        (err) => Logger.warn(`[OffersContext] FAIL offersSent(uid=${uid}): ${err?.code || ''} ${err?.message}`)),
+      onSnapshot(query(collection(db, 'shiftSwaps'), where('targetUserId', '==', uid)),
+        makeDiagnosticHandler(setSwapsReceived, 'swap', 'swapsReceived'),
+        (err) => Logger.warn(`[OffersContext] FAIL swapsReceived(uid=${uid}): ${err?.code || ''} ${err?.message}`)),
+      onSnapshot(query(collection(db, 'shiftSwaps'), where('initiatorUserId', '==', uid)),
+        makeDiagnosticHandler(setSwapsSent, 'swap', 'swapsSent'),
+        (err) => Logger.warn(`[OffersContext] FAIL swapsSent(uid=${uid}): ${err?.code || ''} ${err?.message}`)),
+    ];
+    Logger.info(`[OffersContext] realtime listeners up for uid=${uid}`);
+
+    return () => {
+      unsubs.forEach(u => { try { u(); } catch {} });
+      Logger.info(`[OffersContext] realtime listeners down for uid=${uid}`);
+    };
+  }, [userId]);
 
   // ── Ceder: open to group ──────────────────────────────────────────────────
   // Creates an opening with restrictedToGroupId + originShiftId, then removes
@@ -146,12 +216,15 @@ export const OffersProvider = ({ children }) => {
       restrictedToGroupId: groupId,
       originShiftId: String(shift.id),
       originUserId: String(userId),
+      // Quem cedeu — usado para exibir "Cedido por: X" nas telas de vagas.
+      originUserName: userName || null,
       originShiftSnapshot: (() => {
         const { originalData: _od, ...clean } = shift || {};
         return clean;
       })(),
     };
     await FirebaseAdapter.saveOpening(opening);
+    ActivityLogger.cedeToGroup({ selfName: userName, shift, openingId });
 
     // Remove the shift from the holder immediately. Firestore is source of
     // truth — LocalCache is patched separately by the caller via ShiftsContext.
@@ -200,6 +273,7 @@ export const OffersProvider = ({ children }) => {
       expiresAt: startISO,
     };
     await FirebaseAdapter.createOffer(offer);
+    ActivityLogger.cedeTargeted({ selfName: userName, targetName: toUserName, shift, offerId });
     await NotificationService.notify(toUserId, 'ceder_offered_to_me', {
       title: `${userName} quer ceder um plantão a você`,
       body: `${shift.group?.name || 'Grupo'} · ${_humanShiftLabel(shift)}`,
@@ -211,16 +285,31 @@ export const OffersProvider = ({ children }) => {
 
   // ── Trocar: propose ───────────────────────────────────────────────────────
   const proposeSwap = useCallback(async (myShift, target, theirShift, eligibleGroupIds) => {
-    if (!userId || !target?.id || !myShift?.id || !theirShift?.id) return { success: false };
+    if (!userId || !target?.id || !myShift?.id || !theirShift?.id) {
+      Logger.warn(`[OffersContext] proposeSwap early-return: userId=${userId} target=${target?.id} myShift=${myShift?.id} theirShift=${theirShift?.id}`);
+      return { success: false };
+    }
     const swapId = _uuid('swap');
     const startA = myShift.startISO || myShift.start_date;
     const startB = theirShift.startISO || theirShift.start_date;
     const earlier = (new Date(startA) < new Date(startB)) ? startA : startB;
+
+    // PlantaoAPI uses two different ids for the same person: a slug in /auth/login
+    // and a numeric id in coworker listings. The schedule enrichment already
+    // rewrites assignments to the canonical doc id, but resolve again here as a
+    // last-mile guard in case `target` came from a path that wasn't enriched.
+    const rawTargetId = String(target.id);
+    const resolved = await UserSourceResolver.resolveBatch([rawTargetId]);
+    const canonicalTargetId = resolved.get(rawTargetId)?.canonicalUserId || rawTargetId;
+
     const swap = {
       id: swapId,
       kind: 'swap',
       initiatorUserId: String(userId),
-      targetUserId: String(target.id),
+      initiatorUserName: userName,
+      targetUserId: canonicalTargetId,
+      ...(canonicalTargetId !== rawTargetId ? { targetWebClientUserId: rawTargetId } : {}),
+      targetUserName: target.name || target.full_name || '',
       shiftA: { ...myShift },
       shiftB: { ...theirShift },
       status: 'pending',
@@ -230,12 +319,23 @@ export const OffersProvider = ({ children }) => {
       respondedAt: null,
       expiresAt: earlier,
     };
+    Logger.info(`[OffersContext] proposeSwap → id=${swapId} init=${userId} target=${canonicalTargetId}${canonicalTargetId !== rawTargetId ? ` (raw=${rawTargetId})` : ''} shiftA.id=${myShift.id} shiftB.id=${theirShift.id}`);
     await FirebaseAdapter.createSwap(swap);
-    await NotificationService.notify(target.id, 'swap_proposed_to_me', {
-      title: `${userName} propôs uma troca`,
-      body: `${_humanShiftLabel(myShift)} ⇄ ${_humanShiftLabel(theirShift)}`,
-      payload: { swapId },
+    Logger.info(`[OffersContext] proposeSwap → createSwap awaited (Firestore write done)`);
+    ActivityLogger.swapProposed({
+      selfName: userName,
+      targetName: target.name || target.full_name || '',
+      myShift, theirShift, swapId,
     });
+    try {
+      await NotificationService.notify(canonicalTargetId, 'swap_proposed_to_me', {
+        title: `${userName} propôs uma troca`,
+        body: `${_humanShiftLabel(myShift)} ⇄ ${_humanShiftLabel(theirShift)}`,
+        payload: { swapId },
+      });
+    } catch (err) {
+      Logger.warn(`[OffersContext] proposeSwap notify failed: ${err?.message}`);
+    }
     setSwapsSent(prev => [swap, ...prev]);
     return { success: true, swapId };
   }, [userId, userName]);
@@ -243,10 +343,18 @@ export const OffersProvider = ({ children }) => {
   // ── Offer responses ───────────────────────────────────────────────────────
   const acceptOffer = useCallback(async (offer) => {
     if (!offer?.id || String(offer.toUserId) !== String(userId)) return { success: false };
-    const result = await FirebaseAdapter.transferShift(offer.fromUserId, userId, offer.shiftSnapshot);
+    const result = await FirebaseAdapter.transferShift(offer.fromUserId, userId, offer.shiftSnapshot, {
+      fromUserName: offer.fromUserName || null,
+    });
     if (!result.success) return { success: false };
 
     await FirebaseAdapter.respondOffer(offer.id, { status: 'accepted' });
+    ActivityLogger.offerAccepted({
+      selfName: userName,
+      counterpartName: offer.fromUserName,
+      offerId: offer.id,
+      shift: offer.shiftSnapshot,
+    });
 
     // Mirror into MY local cache as the new received shift
     const newShift = {
@@ -274,6 +382,7 @@ export const OffersProvider = ({ children }) => {
   const rejectOffer = useCallback(async (offer) => {
     if (!offer?.id) return { success: false };
     await FirebaseAdapter.respondOffer(offer.id, { status: 'rejected' });
+    ActivityLogger.offerRejected({ selfName: userName, counterpartName: offer.fromUserName, offerId: offer.id });
     await NotificationService.notify(offer.fromUserId, 'offer_outcome', {
       title: `${userName} recusou seu plantão`,
       body: _humanShiftLabel(offer.shiftSnapshot),
@@ -286,19 +395,22 @@ export const OffersProvider = ({ children }) => {
   const cancelOffer = useCallback(async (offer) => {
     if (!offer?.id) return { success: false };
     await FirebaseAdapter.cancelOffer(offer.id);
+    ActivityLogger.offerCancelled({ selfName: userName, offerId: offer.id });
     setOffersSent(prev => prev.filter(o => o.id !== offer.id));
     return { success: true };
-  }, []);
+  }, [userName]);
 
   // ── Swap responses ───────────────────────────────────────────────────────
   const acceptSwap = useCallback(async (swap) => {
     if (!swap?.id || String(swap.targetUserId) !== String(userId)) return { success: false };
     const result = await FirebaseAdapter.swapShifts(
       swap.initiatorUserId, userId, swap.shiftA, swap.shiftB,
+      { uidAName: swap.initiatorUserName || null, uidBName: swap.targetUserName || userName || null },
     );
     if (!result.success) return { success: false };
 
     await FirebaseAdapter.respondSwap(swap.id, { status: 'accepted' });
+    ActivityLogger.swapAccepted({ selfName: userName, counterpartName: swap.initiatorUserName, swapId: swap.id });
 
     // Mirror MY local cache: drop my shiftB, add shiftA (now received)
     try {
@@ -328,6 +440,7 @@ export const OffersProvider = ({ children }) => {
   const rejectSwap = useCallback(async (swap) => {
     if (!swap?.id) return { success: false };
     await FirebaseAdapter.respondSwap(swap.id, { status: 'rejected' });
+    ActivityLogger.swapRejected({ selfName: userName, counterpartName: swap.initiatorUserName, swapId: swap.id });
     await NotificationService.notify(swap.initiatorUserId, 'offer_outcome', {
       title: `${userName} recusou sua troca`,
       body: `${_humanShiftLabel(swap.shiftA)} ⇄ ${_humanShiftLabel(swap.shiftB)}`,
@@ -340,9 +453,13 @@ export const OffersProvider = ({ children }) => {
   const cancelSwap = useCallback(async (swap) => {
     if (!swap?.id) return { success: false };
     await FirebaseAdapter.cancelSwap(swap.id);
+    ActivityLogger.swapCancelled({
+      selfName: userName, swapId: swap.id,
+      myShift: swap.shiftA, theirShift: swap.shiftB,
+    });
     setSwapsSent(prev => prev.filter(s => s.id !== swap.id));
     return { success: true };
-  }, []);
+  }, [userName]);
 
   // ── Inbox helpers ─────────────────────────────────────────────────────────
   const markInboxRead = useCallback(async (notifId) => {

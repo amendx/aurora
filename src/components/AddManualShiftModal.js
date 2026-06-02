@@ -1,7 +1,7 @@
 import { useState, useContext, useEffect, useMemo } from 'react';
 import {
   View, Text, Modal, Pressable, TextInput, StyleSheet,
-  ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform,
+  ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform, Switch,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -75,6 +75,7 @@ export default function AddManualShiftModal({ visible, onClose, date }) {
   const [endTime, setEndTime] = useState('13:00');
   const [saving, setSaving] = useState(false);
   const [savedValues, setSavedValues] = useState(null);
+  const [isFixedSchedule, setIsFixedSchedule] = useState(false);
 
   useEffect(() => {
     getShiftValues().then(setSavedValues).catch(() => {});
@@ -88,6 +89,7 @@ export default function AddManualShiftModal({ visible, onClose, date }) {
       setCustomHospital(institutions.length === 0 ? (legacyHospitals[0] || '') : '');
       setStartTime(DEFAULT_TIMES[firstAvailable].start);
       setEndTime(DEFAULT_TIMES[firstAvailable].end);
+      setIsFixedSchedule(false);
     }
   }, [visible]);
 
@@ -124,6 +126,7 @@ export default function AddManualShiftModal({ visible, onClose, date }) {
       endTime,
       durationMinutes: duration,
       crossesMidnight,
+      isFixedSchedule,
     });
     setSaving(false);
     onClose();
@@ -229,6 +232,22 @@ export default function AddManualShiftModal({ visible, onClose, date }) {
           </View>
         </View>
 
+        {/* Escala fixa */}
+        <View style={s.fixedRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={s.fieldLabel}>Escala fixa</Text>
+            <Text style={{ fontSize: 11, color: C.text.tertiary, marginTop: -2 }}>
+              Marque se esse plantão faz parte da sua escala recorrente.
+            </Text>
+          </View>
+          <Switch
+            value={isFixedSchedule}
+            onValueChange={setIsFixedSchedule}
+            trackColor={{ false: C.border.medium, true: C.primary }}
+            thumbColor="#fff"
+          />
+        </View>
+
         {/* Summary */}
         {duration !== null && (
           <View style={[s.summary, { backgroundColor: C.background.secondary, borderColor: C.border.light }]}>
@@ -323,6 +342,11 @@ const makeStyles = (C) => StyleSheet.create({
   summaryRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   summaryLabel: { fontSize: 13, fontFamily: Typography.fontFamily.regular },
   summaryValue: { fontSize: 14, fontFamily: Typography.fontFamily.bold },
+
+  fixedRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingVertical: 10, marginBottom: Spacing.md,
+  },
 
   saveBtn: {
     height: 50, borderRadius: BorderRadius.pill,

@@ -198,10 +198,13 @@ export default function ReportsScreen({ onExportReady } = {}) {
         const dateStr = dayData.date; // YYYY-MM-DD
         const dateKey = dateStr;
 
-        // Load registered real hours for this day (extra hours)
+        // Load registered real hours for this day (extra hours).
+        // Chave escopada por uid (fallback à legada).
         let realHoursMap = {};
         try {
-          const saved = await SecureStore.getItemAsync(`real_hours_${dateKey}`);
+          const uid = String(user?.id || '');
+          const saved = (uid && await SecureStore.getItemAsync(`real_hours_${uid}_${dateKey}`))
+            || await SecureStore.getItemAsync(`real_hours_${dateKey}`);
           if (saved) realHoursMap = JSON.parse(saved);
         } catch (_) {}
 

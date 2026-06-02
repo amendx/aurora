@@ -12,6 +12,7 @@ import {
   Easing,
   Dimensions,
   PanResponder,
+  Alert,
 } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import * as SecureStore from 'expo-secure-store';
@@ -19,6 +20,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useShifts } from '../contexts/ShiftsContext';
 import { useOpenings } from '../contexts/OpeningsContext';
+import { useOffers } from '../contexts/OffersContext';
 import { useColors, Typography, Spacing, BorderRadius, Shadows } from '../constants/DesignSystem';
 import { getFullShiftConfig, calculateShiftValueSync, roundCurrency, getShiftPeriod, shouldUseWeekendValue } from '../utils/ShiftValueCalculator';
 import ShiftBottomSheet from '../components/ShiftBottomSheet';
@@ -76,8 +78,9 @@ const buildWeekDays = (centerDate) => {
 const DayViewScreen = ({ navigation, initialDate }) => {
   const C = useColors();
   const insets = useSafeAreaInsets();
-  const { daysWithShifts, hoursReport, restoreShiftLocally } = useShifts();
-  const { myCededOpenings, cancelCedeOpening, refresh: refreshOpenings } = useOpenings();
+  const { daysWithShifts, hoursReport } = useShifts();
+  const { myCededOpenings, refresh: refreshOpenings } = useOpenings();
+  const { swapsSent, swapsReceived, offersSent } = useOffers();
   const { user } = useContext(AuthContext);
 
   useEffect(() => { refreshOpenings?.(true); }, [refreshOpenings]);
@@ -126,18 +129,67 @@ const DayViewScreen = ({ navigation, initialDate }) => {
   }, [daysWithShifts]);
 
   const selectedDateStr = toDateStr(selectedDate);
-  const dayShifts = shiftsMap[selectedDateStr] || [];
-  const dayCedeBanners = useMemo(
-    () => (myCededOpenings || []).filter(o => (o.dateKey || (o.startISO || '').slice(0, 10)) === selectedDateStr),
-    [myCededOpenings, selectedDateStr],
-  );
+  const baseDayShifts = shiftsMap[selectedDateStr] || [];
 
-  const handleCancelCede = async (opening) => {
-    const r = await cancelCedeOpening(opening.id);
-    if (r?.success && r?.restoredShift) {
-      await restoreShiftLocally?.(r.restoredShift);
-    }
-  };
+  // Cede ao grupo remove o plantão do calendário. Reinjetamos como "virtual shift"
+  // marcado com _pendingCede pra renderizar amarelo + permitir cancelar inline.
+  // Adicionalmente anotamos pendências de troca (swap) e cessão direcionada (offer)
+  // nos plantões que continuam visíveis — mesmo padrão visual.
+  const dayShifts = useMemo(() => {
+    const cededToday = (myCededOpenings || []).filter(o => {
+      const k = o.dateKey || (o.startISO || '').slice(0, 10);
+      return k === selectedDateStr && o.status === 'active';
+    });
+    const ceded = cededToday.map(o => {
+      const snap = o.originShiftSnapshot || {};
+      return {
+        ...snap,
+        _pendingCede: o,
+        id: snap.id || `pending_${o.id}`,
+        label: snap.label || o.label,
+        date: snap.date || o.dateKey,
+        startISO: snap.startISO || o.startISO,
+        endISO: snap.endISO || o.endISO,
+        time: snap.time,
+        group: snap.group || o.group,
+        monthKey: snap.monthKey || o.monthKey,
+      };
+    });
+
+    // Index swaps and direct offers by the user's own shift id (shiftA for swaps initiated by me).
+    const sentSwapByShiftId = {};
+    (swapsSent || []).forEach(sw => {
+      if (sw?.status !== 'pending' || !sw.shiftA?.id) return;
+      sentSwapByShiftId[String(sw.shiftA.id)] = sw;
+    });
+    const sentOfferByShiftId = {};
+    (offersSent || []).forEach(o => {
+      if (o?.status !== 'pending' || !o.shiftSnapshot?.id) return;
+      sentOfferByShiftId[String(o.shiftSnapshot.id)] = o;
+    });
+    const recvSwapByShiftId = {};
+    (swapsReceived || []).forEach(sw => {
+      if (sw?.status !== 'pending' || !sw.shiftB?.id) return;
+      recvSwapByShiftId[String(sw.shiftB.id)] = sw;
+    });
+
+    const annotated = baseDayShifts.map(sh => {
+      const id = sh?.id != null ? String(sh.id) : '';
+      const pendingSwap = sentSwapByShiftId[id] || recvSwapByShiftId[id] || null;
+      const pendingOffer = sentOfferByShiftId[id] || null;
+      if (!pendingSwap && !pendingOffer) return sh;
+      return {
+        ...sh,
+        _pendingSwap: pendingSwap || undefined,
+        _pendingSwapRole: pendingSwap
+          ? (sentSwapByShiftId[id] ? 'initiator' : 'target')
+          : undefined,
+        _pendingOffer: pendingOffer || undefined,
+      };
+    });
+
+    return [...annotated, ...ceded];
+  }, [baseDayShifts, myCededOpenings, selectedDateStr, swapsSent, swapsReceived, offersSent]);
 
   useEffect(() => {
     if (!fabAnimatedOnce.current) {
@@ -169,10 +221,16 @@ const DayViewScreen = ({ navigation, initialDate }) => {
   }, [user?.id]);
 
   useEffect(() => {
-    SecureStore.getItemAsync(`real_hours_${selectedDateStr}`)
-      .then(raw => setDayRealHours(raw ? JSON.parse(raw) : {}))
-      .catch(() => setDayRealHours({}));
-  }, [selectedDateStr]);
+    const uid = String(user?.id || '');
+    // Chave escopada por uid (legada sem uid como fallback).
+    (async () => {
+      try {
+        const raw = (uid && await SecureStore.getItemAsync(`real_hours_${uid}_${selectedDateStr}`))
+          || await SecureStore.getItemAsync(`real_hours_${selectedDateStr}`);
+        setDayRealHours(raw ? JSON.parse(raw) : {});
+      } catch { setDayRealHours({}); }
+    })();
+  }, [selectedDateStr, user?.id]);
 
   const resolveGroupColor = (shift) => {
     const raw = groupColors[String(shift.group?.id)] || shift.group?.color;
@@ -186,9 +244,10 @@ const DayViewScreen = ({ navigation, initialDate }) => {
   };
 
   const openShiftDetail = (shift) => {
-    const dayData = (daysWithShifts || []).find(d => d.date === shift.date);
-    const allShifts = dayData?.shifts || [shift];
-    const idx = allShifts.findIndex(s => s.id === shift.id);
+    // Use the annotated dayShifts (with _pendingSwap / _pendingCede / _pendingOffer)
+    // instead of the raw daysWithShifts, so the bottom sheet sees the pending state.
+    const allShifts = dayShifts.length > 0 ? dayShifts : [shift];
+    const idx = allShifts.findIndex(s => String(s.id) === String(shift.id));
     setBsShifts(allShifts);
     setBsDate(new Date(shift.date + 'T00:00:00'));
     setBsInitialIdx(idx >= 0 ? idx : 0);
@@ -255,22 +314,67 @@ const DayViewScreen = ({ navigation, initialDate }) => {
     })();
 
     let coworkers = TodayCoworkersService.getCoworkers(shift.id);
-    if (coworkers.length === 0 && shift?.originalData?.coworkers?.length > 0) {
-      coworkers = shift.originalData.coworkers;
+    if (coworkers.length === 0) {
+      // Same dedup + self-exclusion the detail sheet applies (ShiftBottomSheet._getCoworkersForShift)
+      const selfId = user?.id ? String(user.id) : null;
+      const raw = [
+        ...(shift?.originalData?.coworkers || []),
+        ...(shift?.originalData?.vacancy?.coworkers || []),
+      ];
+      const seen = new Set();
+      coworkers = [];
+      for (const p of raw) {
+        if (!p?.id) continue;
+        const pid = String(p.id);
+        if (seen.has(pid)) continue;
+        if (selfId && pid === selfId) continue;
+        seen.add(pid);
+        coworkers.push(p);
+      }
     }
     const vacancies = TodayCoworkersService.getVacanciesByGroup(shift.id);
     const totalVacancies = vacancies.reduce((acc, v) => acc + (v.available ?? 0), 0);
 
+    const pendingCede = shift._pendingCede;
+    const pendingSwap = shift._pendingSwap;
+    const pendingSwapRole = shift._pendingSwapRole; // 'initiator' | 'target'
+    const pendingOffer = shift._pendingOffer;
+    const isPending = !!(pendingCede || pendingSwap || pendingOffer);
+    const cardBg = isPending ? C.warning + '14' : C.background.card;
+    const cardBorder = isPending ? C.warning + '55' : C.border.light;
+    const accentColor = isPending ? C.warning : groupColor;
+
+    const pendingBadgeText = pendingCede
+      ? 'Cedido'
+      : pendingSwap
+        ? (pendingSwapRole === 'initiator' ? 'Troca pendente' : 'Pediram troca')
+        : pendingOffer ? 'Oferecido' : '';
+    const pendingSubText = pendingCede
+      ? 'Aguardando colega assumir'
+      : pendingSwap
+        ? (pendingSwapRole === 'initiator'
+            ? `Aguardando ${pendingSwap.targetUserName || 'colega'} aceitar`
+            : `${pendingSwap.initiatorUserName || 'Colega'} quer trocar com você`)
+        : pendingOffer ? `Cedido para ${pendingOffer.toUserName || 'colega'}` : '';
+
     return (
       <Pressable
         key={index}
-        style={({ pressed }) => [s.shiftCard, { backgroundColor: C.background.card, borderColor: C.border.light }, pressed && { opacity: 0.85 }]}
+        style={({ pressed }) => [s.shiftCard, { backgroundColor: cardBg, borderColor: cardBorder }, pressed && { opacity: 0.85 }]}
         onPress={() => openShiftDetail(shift)}
       >
-        <View style={[s.shiftAccentBar, { backgroundColor: groupColor }]} />
+        <View style={[s.shiftAccentBar, { backgroundColor: accentColor }]} />
         <View style={s.shiftDateCol}>
-          <Text style={[s.shiftDay, { color: C.text.primary }]}>{d.getDate()}</Text>
-          <Text style={[s.shiftWday, { color: C.text.tertiary }]}>
+          <Text
+            style={[s.shiftDay, { color: C.text.primary }]}
+            numberOfLines={1}
+            adjustsFontSizeToFit
+            minimumFontScale={0.6}
+            allowFontScaling={false}
+          >
+            {d.getDate()}
+          </Text>
+          <Text style={[s.shiftWday, { color: C.text.tertiary }]} numberOfLines={1} allowFontScaling={false}>
             {d.toLocaleDateString('pt-BR', { weekday: 'short' }).replace('.', '')}
           </Text>
         </View>
@@ -282,10 +386,40 @@ const DayViewScreen = ({ navigation, initialDate }) => {
               </Text>
             </View>
             {timeStr ? <Text style={[s.shiftTime, { color: C.text.secondary }]}>{timeStr}</Text> : null}
+            {!isPending && shift.isFixedSchedule && (
+              <View style={{ paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, backgroundColor: C.accentSoft }}>
+                <Text style={{ fontSize: 9.5, fontFamily: Typography.fontFamily.bold, color: C.primary, letterSpacing: 0.4, textTransform: 'uppercase' }}>
+                  Fixa
+                </Text>
+              </View>
+            )}
+            {isPending && (
+              <View style={{ paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, backgroundColor: C.warning + '22' }}>
+                <Text style={{ fontSize: 9.5, fontFamily: Typography.fontFamily.bold, color: C.warning, letterSpacing: 0.4, textTransform: 'uppercase' }}>
+                  {pendingBadgeText}
+                </Text>
+              </View>
+            )}
           </View>
           {shift.group?.institution?.name
             ? <Text style={[s.shiftInstitution, { color: C.text.primary }]} numberOfLines={1}>{shift.group.institution.name}</Text>
             : null}
+          {shift.source === 'received' && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
+              <Ionicons name="enter-outline" size={11} color={C.text.secondary} />
+              <Text style={{ fontSize: 11, color: C.text.secondary }} numberOfLines={1}>
+                Recebido de {shift.originUserName || `Doutor#${String(shift.originUserId || '').slice(0, 6)}`}
+                {shift.isFixedSchedule_origin ? (
+                  <Text style={{ fontStyle: 'italic', color: C.text.tertiary }}> · escala fixa</Text>
+                ) : null}
+              </Text>
+            </View>
+          )}
+          {isPending && (
+            <Text style={{ fontSize: 11.5, color: C.warning, fontFamily: Typography.fontFamily.semiBold, marginTop: 2 }} numberOfLines={1}>
+              {pendingSubText}
+            </Text>
+          )}
           <View style={s.shiftMeta}>
             {shift.group?.name ? (
               <>
@@ -293,30 +427,37 @@ const DayViewScreen = ({ navigation, initialDate }) => {
                 <Text style={[s.shiftGroupName, { color: C.text.tertiary }]} numberOfLines={1}>{shift.group.name}</Text>
               </>
             ) : null}
-            {coworkers.length > 0 && (
-              <View style={s.coworkerStack}>
-                {coworkers.slice(0, 3).map((p, i) => (
-                  <View key={p.id || i} style={[s.coworkerAvatar, { marginLeft: i === 0 ? 6 : -5, borderColor: C.background.card }]}>
-                    {p.photo
-                      ? <Image source={{ uri: p.photo }} style={s.coworkerAvatarImg} />
-                      : <View style={[s.coworkerAvatarFallback, { backgroundColor: C.accentSoft }]}>
-                          <Text style={[s.coworkerAvatarInitial, { color: C.primary }]}>{(p.name || '?').charAt(0).toUpperCase()}</Text>
-                        </View>
-                    }
-                  </View>
-                ))}
-                {coworkers.length > 3 && (
-                  <View style={[s.coworkerAvatar, s.coworkerAvatarOverflow, { marginLeft: -5, backgroundColor: C.border.light, borderColor: C.background.card }]}>
-                    <Text style={[s.coworkerAvatarOverflowText, { color: C.text.secondary }]}>+{coworkers.length - 3}</Text>
-                  </View>
-                )}
-                {totalVacancies > 0 && Array.from({ length: Math.min(totalVacancies, 2) }).map((_, i) => (
-                  <View key={'v' + i} style={[s.coworkerAvatar, s.coworkerAvatarVacancy, { marginLeft: -5, borderColor: C.background.card, backgroundColor: C.warning + '18' }]}>
-                    <Text style={[s.coworkerAvatarInitial, { color: C.warning }]}>+</Text>
-                  </View>
-                ))}
-              </View>
-            )}
+            {(coworkers.length > 0 || totalVacancies > 0) && (() => {
+              // Mirror ShiftBottomSheet team mini-stack: coworker avatars, one vacancy
+              // placeholder, and a single combined overflow chip.
+              const hasV = totalVacancies > 0;
+              const personPreview = coworkers.slice(0, hasV ? 2 : 3);
+              const overflow = (coworkers.length - personPreview.length) + (totalVacancies - (hasV ? 1 : 0));
+              return (
+                <View style={s.coworkerStack}>
+                  {personPreview.map((p, i) => (
+                    <View key={p.id || i} style={[s.coworkerAvatar, { marginLeft: i === 0 ? 6 : -5, borderColor: C.background.card }]}>
+                      {p.photo
+                        ? <Image source={{ uri: p.photo }} style={s.coworkerAvatarImg} />
+                        : <View style={[s.coworkerAvatarFallback, { backgroundColor: C.accentSoft }]}>
+                            <Text style={[s.coworkerAvatarInitial, { color: C.primary }]}>{(p.name || '?').charAt(0).toUpperCase()}</Text>
+                          </View>
+                      }
+                    </View>
+                  ))}
+                  {hasV && (
+                    <View style={[s.coworkerAvatar, s.coworkerAvatarVacancy, { marginLeft: personPreview.length > 0 ? -5 : 6, borderColor: C.background.card, backgroundColor: C.warning + '18' }]}>
+                      <Ionicons name="star-outline" size={10} color={C.warning} />
+                    </View>
+                  )}
+                  {overflow > 0 && (
+                    <View style={[s.coworkerAvatar, s.coworkerAvatarOverflow, { marginLeft: -5, backgroundColor: C.border.light, borderColor: C.background.card }]}>
+                      <Text style={[s.coworkerAvatarOverflowText, { color: C.text.secondary }]}>+{overflow}</Text>
+                    </View>
+                  )}
+                </View>
+              );
+            })()}
           </View>
         </View>
         <View style={s.shiftValueCol}>
@@ -388,30 +529,7 @@ const DayViewScreen = ({ navigation, initialDate }) => {
         overScrollMode="never"
         bounces={Platform.OS === 'ios'}
       >
-        {dayCedeBanners.map(o => {
-          const labelName = LABEL_MAP[o.label?.charAt(0)] || o.label || 'Plantão';
-          return (
-            <View key={o.id} style={[s.cedeBanner, { backgroundColor: C.background.card, borderColor: C.warning + '55' }]}>
-              <View style={[s.cedeBannerStrip, { backgroundColor: C.warning }]} />
-              <View style={{ flex: 1, paddingHorizontal: 12, paddingVertical: 10 }}>
-                <Text style={[s.cedeBannerTitle, { color: C.text.primary }]} numberOfLines={1}>
-                  {labelName} · {o.group?.name || 'Grupo'} · Cedido
-                </Text>
-                <Text style={[s.cedeBannerSub, { color: C.text.tertiary }]} numberOfLines={1}>
-                  Aguardando colega assumir
-                </Text>
-              </View>
-              <Pressable
-                style={[s.cedeBannerBtn, { borderColor: C.warning }]}
-                onPress={() => handleCancelCede(o)}
-                hitSlop={6}
-              >
-                <Text style={[s.cedeBannerBtnText, { color: C.warning }]}>Cancelar</Text>
-              </Pressable>
-            </View>
-          );
-        })}
-        {dayShifts.length === 0 && dayCedeBanners.length === 0 ? (
+        {dayShifts.length === 0 ? (
           <View style={[s.empty, { borderColor: C.border.light }]}>
             <Ionicons name="calendar-outline" size={40} color={C.interactive.inactive} />
             <Text style={[s.emptyTitle, { color: C.text.primary, fontFamily: Typography.fontFamily.semiBold }]}>Nenhum plantão</Text>
@@ -470,8 +588,8 @@ const DayViewScreen = ({ navigation, initialDate }) => {
         onCede={(sh) => { setBsVisible(false); setCedeShift(sh); }}
         onTrocar={(sh) => { setBsVisible(false); setTrocarShift(sh); }}
       />
-      <CederFlowSheet visible={!!cedeShift} shift={cedeShift} onClose={() => setCedeShift(null)} />
-      <TrocarFlowSheet visible={!!trocarShift} shift={trocarShift} onClose={() => setTrocarShift(null)} />
+      {cedeShift && <CederFlowSheet key={`cede-${cedeShift.id}`} visible shift={cedeShift} onClose={() => setCedeShift(null)} />}
+      {trocarShift && <TrocarFlowSheet key={`trocar-${trocarShift.id}`} visible shift={trocarShift} onClose={() => setTrocarShift(null)} />}
 
       <AddManualShiftModal
         visible={addModalVisible}

@@ -304,6 +304,177 @@ const FirebaseAdapter = {
   saveTodayCoworkers: (userId, shiftId, data) =>
     _write(_sub(userId, 'todayCoworkers', String(shiftId)), { ...data }),
 
+  /**
+   * Shadow-write a full month of normalized DaySchedules for a group.
+   * groupSchedules/{groupId}/months/{YYYY-MM}                 ← month metadata
+   * groupSchedules/{groupId}/months/{YYYY-MM}/days/{date}     ← one doc per day
+   *
+   * @param {string} groupId
+   * @param {string} monthKey  "YYYY-MM"
+   * @param {Object} days      { [dateStr]: DaySchedule }
+   * @param {string} [syncedAt]
+   */
+  saveGroupScheduleMonth: async (groupId, monthKey, days, syncedAt) => {
+    if (!db || !groupId || !monthKey || !days) return;
+    const now = new Date().toISOString();
+    const syncTs = syncedAt || now;
+    try {
+      await setDoc(
+        doc(db, 'groupSchedules', String(groupId), 'months', monthKey),
+        { groupId: String(groupId), monthKey, syncedAt: syncTs, _updatedAt: now },
+        { merge: true }
+      );
+      const entries = Object.entries(days);
+      if (entries.length === 0) return;
+      const writes = entries.map(([dateStr, daySchedule]) => ({
+        ref: doc(db, 'groupSchedules', String(groupId), 'months', monthKey, 'days', dateStr),
+        data: { ...daySchedule, syncedAt: syncTs },
+      }));
+      await _writeBatched(writes, `saveGroupScheduleMonth/${groupId}/${monthKey}`);
+    } catch (err) {
+      Logger.warn(`[Firebase] saveGroupScheduleMonth [${groupId}/${monthKey}]: ${err?.message}`);
+    }
+  },
+
+  /**
+   * Aurora-native aggregation: build a group's DaySchedule month directly from
+   * each member's own shift docs. No PlantaoAPI involved. Use this when an
+   * aurora user opens "Meus grupos" and groupSchedules/* has no shadow-write yet.
+   *
+   * Reads:
+   *   users/{currentUserId}/groupMembers/{groupId}    (1 doc — to get memberIds + person info)
+   *   users/{memberId}/months/{monthKey}/shifts/*     (1 collection per member, parallel)
+   *
+   * Returns { [dateStr]: DaySchedule } where DaySchedule.slots[] has assignments
+   * pivoted by (date, label first char). Capacity = filledCount; we don't know
+   * vacancies from this path (Aurora has no native concept of "vacancy slot"
+   * at the moment — that lives on webClient or `openings/`).
+   */
+  aggregateAuroraGroupSchedule: async (group, monthKey, currentUserId) => {
+    if (!db || !group?.id || !monthKey || !currentUserId) return {};
+    const groupId = String(group.id);
+    try {
+      const { collection, doc: _doc, getDoc, getDocs } = await import('firebase/firestore');
+
+      // 1. members of the group (from current user's view)
+      const memSnap = await getDoc(_doc(db, 'users', String(currentUserId), 'groupMembers', groupId));
+      const memData = memSnap.exists() ? memSnap.data() : null;
+      const rawIds = Array.isArray(memData?.memberIds) ? memData.memberIds : [];
+      // include current user even if missing from list
+      const memberIds = [...new Set([...rawIds.map(String), String(currentUserId)])];
+      const personsByUserId = {};
+      for (const m of (memData?.members || [])) {
+        const uid = String(m.id || m.userId || '');
+        if (uid) personsByUserId[uid] = m;
+      }
+
+      if (memberIds.length === 0) return {};
+
+      // 2. each member's shifts for the month, in parallel
+      const days = {};
+      await Promise.all(memberIds.map(async (memberId) => {
+        const shiftsSnap = await getDocs(
+          collection(db, 'users', memberId, 'months', String(monthKey), 'shifts')
+        );
+        shiftsSnap.forEach(d => {
+          const shift = d.data();
+          // Only consider shifts that belong to this group
+          if (String(shift.group?.id) !== groupId) return;
+          const date = shift.date || (shift.startISO || '').slice(0, 10);
+          if (!date) return;
+
+          if (!days[date]) {
+            days[date] = {
+              date,
+              groupId,
+              groupName: group.name || '',
+              groupColor: group.color || '#888888',
+              institution: group.institution || null,
+              slots: [],
+            };
+          }
+
+          const labelChar = (shift.label || '').charAt(0).toUpperCase();
+          let slot = days[date].slots.find(s => s.label === labelChar);
+          if (!slot) {
+            const timeStr = shift.time
+              || (shift.startTime && shift.endTime ? `${shift.startTime} – ${shift.endTime}` : null);
+            slot = {
+              label: labelChar,
+              labelRaw: shift.rawLabel || shift.label || '',
+              time: timeStr,
+              capacity: 0,
+              filledCount: 0,
+              available: 0,
+              vacancyId: null,
+              assignments: [],
+            };
+            days[date].slots.push(slot);
+          }
+
+          const person = personsByUserId[memberId] || {};
+          // council pode vir como objeto {state, id} da PlantaoAPI — coage pra string
+          const councilStr = typeof person.council === 'string'
+            ? person.council
+            : (person.council?.state || person.council?.uf || '');
+          // dedup: se a mesma userId já está nesse slot, não adiciona de novo
+          if (slot.assignments.some(a => String(a.userId) === String(memberId))) return;
+          slot.assignments.push({
+            userId: memberId,
+            source: 'aurora',
+            person: {
+              id: memberId,
+              name: typeof person.name === 'string' ? person.name : (person.full_name || ''),
+              full_name: typeof person.full_name === 'string' ? person.full_name : (person.name || ''),
+              photo: typeof person.photo === 'string' ? person.photo : null,
+              council: councilStr,
+              role: typeof person.role === 'string' ? person.role : '',
+            },
+            shiftId: shift.id != null ? String(shift.id) : d.id,
+            transactionId: null,
+          });
+          slot.filledCount += 1;
+          slot.capacity += 1;
+        });
+      }));
+
+      return days;
+    } catch (err) {
+      Logger.warn(`[Firebase] aggregateAuroraGroupSchedule [${groupId}/${monthKey}]: ${err?.message}`);
+      return {};
+    }
+  },
+
+  /**
+   * Read a month of DaySchedules for a group from Firestore.
+   * Returns { days: { [dateStr]: DaySchedule }, syncedAt, hasData }.
+   * hasData is true only when the month metadata doc exists.
+   */
+  fetchGroupScheduleMonth: async (groupId, monthKey) => {
+    const empty = { days: {}, syncedAt: null, hasData: false };
+    if (!db || !groupId || !monthKey) return empty;
+    try {
+      const { collection, doc: _doc, getDoc, getDocs } = await import('firebase/firestore');
+      const [metaRes, daysRes] = await Promise.allSettled([
+        getDoc(_doc(db, 'groupSchedules', String(groupId), 'months', monthKey)),
+        getDocs(collection(db, 'groupSchedules', String(groupId), 'months', monthKey, 'days')),
+      ]);
+      const metaSnap = metaRes.status === 'fulfilled' ? metaRes.value : null;
+      if (!metaSnap?.exists()) return empty;
+      const meta = metaSnap.data() || {};
+      const days = {};
+      if (daysRes.status === 'fulfilled') {
+        daysRes.value.forEach(d => { days[d.id] = d.data(); });
+      } else {
+        Logger.warn(`[Firebase] fetchGroupScheduleMonth/days [${groupId}/${monthKey}]: ${daysRes.reason?.message}`);
+      }
+      return { days, syncedAt: meta.syncedAt || null, hasData: true };
+    } catch (err) {
+      Logger.warn(`[Firebase] fetchGroupScheduleMonth [${groupId}/${monthKey}]: ${err?.message}`);
+      return empty;
+    }
+  },
+
   saveTimeEntries: (userId, monthKey, entries) => {
     if (!entries) return Promise.resolve();
     const pairs = Object.entries(entries);
@@ -402,24 +573,34 @@ const FirebaseAdapter = {
     });
   },
 
-  /** Query pending offers either sent to OR from a user. */
+  /** Query pending offers either sent to OR from a user.
+   *  Uses single-field where() to avoid Firestore composite-index requirement;
+   *  status is filtered client-side.
+   */
   getPendingOffersForUser: async (userId) => {
     if (!db || !userId) return [];
     try {
       const { collection, query, where, getDocs } = await import('firebase/firestore');
       const uid = String(userId);
       const [snapTo, snapFrom] = await Promise.all([
-        getDocs(query(collection(db, 'shiftOffers'), where('toUserId', '==', uid), where('status', '==', 'pending'))),
-        getDocs(query(collection(db, 'shiftOffers'), where('fromUserId', '==', uid), where('status', '==', 'pending'))),
+        getDocs(query(collection(db, 'shiftOffers'), where('toUserId', '==', uid))),
+        getDocs(query(collection(db, 'shiftOffers'), where('fromUserId', '==', uid))),
       ]);
       const out = [];
       const seen = new Set();
-      const add = (d) => { if (!seen.has(d.id)) { seen.add(d.id); out.push({ id: d.id, ...d.data() }); } };
+      const add = (d) => {
+        if (seen.has(d.id)) return;
+        const data = d.data();
+        if (data?.status !== 'pending') return;
+        seen.add(d.id);
+        out.push({ id: d.id, ...data });
+      };
       snapTo.forEach(add);
       snapFrom.forEach(add);
+      Logger.info(`[FirebaseAdapter] getPendingOffersForUser(${uid}) → ${out.length} pending`);
       return out;
     } catch (err) {
-      Logger.warn(`[FirebaseAdapter] getPendingOffersForUser: ${err.message}`);
+      Logger.warn(`[FirebaseAdapter] getPendingOffersForUser FAILED: ${err.code || ''} ${err.message}`);
       return [];
     }
   },
@@ -492,17 +673,24 @@ const FirebaseAdapter = {
       const { collection, query, where, getDocs } = await import('firebase/firestore');
       const uid = String(userId);
       const [snapTarget, snapInitiator] = await Promise.all([
-        getDocs(query(collection(db, 'shiftSwaps'), where('targetUserId', '==', uid), where('status', '==', 'pending'))),
-        getDocs(query(collection(db, 'shiftSwaps'), where('initiatorUserId', '==', uid), where('status', '==', 'pending'))),
+        getDocs(query(collection(db, 'shiftSwaps'), where('targetUserId', '==', uid))),
+        getDocs(query(collection(db, 'shiftSwaps'), where('initiatorUserId', '==', uid))),
       ]);
       const out = [];
       const seen = new Set();
-      const add = (d) => { if (!seen.has(d.id)) { seen.add(d.id); out.push({ id: d.id, ...d.data() }); } };
+      const add = (d) => {
+        if (seen.has(d.id)) return;
+        const data = d.data();
+        if (data?.status !== 'pending') return;
+        seen.add(d.id);
+        out.push({ id: d.id, ...data });
+      };
       snapTarget.forEach(add);
       snapInitiator.forEach(add);
+      Logger.info(`[FirebaseAdapter] getPendingSwapsForUser(${uid}) → ${out.length} pending swaps`);
       return out;
     } catch (err) {
-      Logger.warn(`[FirebaseAdapter] getPendingSwapsForUser: ${err.message}`);
+      Logger.warn(`[FirebaseAdapter] getPendingSwapsForUser FAILED: ${err.code || ''} ${err.message}`);
       return [];
     }
   },
@@ -653,17 +841,23 @@ const FirebaseAdapter = {
    * Used by Trocar to surface the target's swappable shifts.
    */
   getUserShiftsForMonths: async (userId, monthKeys) => {
-    if (!db || !userId || !monthKeys?.length) return [];
+    if (!db || !userId || !monthKeys?.length) {
+      Logger.warn(`[FirebaseAdapter] getUserShiftsForMonths early-return: db=${!!db} userId=${userId} months=${monthKeys?.length}`);
+      return [];
+    }
     try {
       const { collection, getDocs } = await import('firebase/firestore');
       const out = [];
       for (const mk of monthKeys) {
+        const path = `users/${String(userId)}/months/${String(mk)}/shifts`;
+        const t0 = Date.now();
         const snap = await getDocs(collection(db, 'users', String(userId), 'months', String(mk), 'shifts'));
+        Logger.info(`[FirebaseAdapter] read ${path} → ${snap.size} docs in ${Date.now() - t0}ms`);
         snap.forEach(d => out.push({ id: d.id, monthKey: mk, ...d.data() }));
       }
       return out;
     } catch (err) {
-      Logger.warn(`[FirebaseAdapter] getUserShiftsForMonths: ${err.message}`);
+      Logger.warn(`[FirebaseAdapter] getUserShiftsForMonths(${userId}) FAILED: ${err.code || ''} ${err.message}`);
       return [];
     }
   },
@@ -736,7 +930,7 @@ const FirebaseAdapter = {
    * Uses Firestore writeBatch: delete origin + write destination in one commit.
    * Returns the new shift id (caller mirrors to LocalCache).
    */
-  transferShift: async (fromUserId, toUserId, shift) => {
+  transferShift: async (fromUserId, toUserId, shift, opts = {}) => {
     if (!db || !fromUserId || !toUserId || !shift?.id || !shift?.monthKey) {
       return { success: false, newShiftId: null };
     }
@@ -755,7 +949,12 @@ const FirebaseAdapter = {
         id: newId,
         userId: toUserId,
         source: 'received',
+        // O destinatário não herda a recorrência da escala fixa — apenas registra
+        // que a origem era fixa, pra mostrar isso no card.
+        isFixedSchedule: false,
+        isFixedSchedule_origin: shift?.isFixedSchedule === true,
         originUserId: String(fromUserId),
+        originUserName: opts.fromUserName || shift?.originUserName || null,
         originalShiftId: String(shift.id),
         transferredAt: now,
         _updatedAt: now,
@@ -772,7 +971,7 @@ const FirebaseAdapter = {
    * Atomically swap two shifts between two users.
    * 4 ops in one batch: delete A's, delete B's, write A→B's slot, write B→A's slot.
    */
-  swapShifts: async (uidA, uidB, shiftA, shiftB) => {
+  swapShifts: async (uidA, uidB, shiftA, shiftB, opts = {}) => {
     if (!db || !uidA || !uidB || !shiftA?.id || !shiftB?.id) {
       return { success: false };
     }
@@ -795,7 +994,10 @@ const FirebaseAdapter = {
         id: newIdForB,
         userId: uidB,
         source: 'received',
+        isFixedSchedule: false,
+        isFixedSchedule_origin: shiftA?.isFixedSchedule === true,
         originUserId: String(uidA),
+        originUserName: opts.uidAName || shiftA?.originUserName || null,
         originalShiftId: String(shiftA.id),
         transferredAt: now,
         _updatedAt: now,
@@ -807,7 +1009,10 @@ const FirebaseAdapter = {
         id: newIdForA,
         userId: uidA,
         source: 'received',
+        isFixedSchedule: false,
+        isFixedSchedule_origin: shiftB?.isFixedSchedule === true,
         originUserId: String(uidB),
+        originUserName: opts.uidBName || shiftB?.originUserName || null,
         originalShiftId: String(shiftB.id),
         transferredAt: now,
         _updatedAt: now,
@@ -818,6 +1023,265 @@ const FirebaseAdapter = {
     } catch (err) {
       Logger.warn(`[FirebaseAdapter] swapShifts: ${err.message}`);
       return { success: false };
+    }
+  },
+
+  // [WEBCLIENT-BRIDGE] — remove when webClient is fully retired.
+  /**
+   * Snapshot a webClient user's graph (groups + persons + memberships) into Firestore
+   * so aurora-only mode can read everything without hitting PlantaoAPI. Members are
+   * resolved from coworkers map so the destination has the full Person shape.
+   *
+   * Writes to:
+   *   users/{uid}/groups/{gid}
+   *   users/{uid}/persons/{pid}
+   *   users/{uid}/groupMembers/{gid}  ← shape aurora reads: { memberIds, members }
+   */
+  snapshotWebClientGraph: async (uid, { groups, coworkers, membersByGroupId }) => {
+    if (!db || !uid) return { success: true, groups: 0, persons: 0, memberships: 0 };
+    try {
+      const now = new Date().toISOString();
+      const groupList = Object.values(groups || {});
+      const coworkerMap = coworkers || {};
+      const mbgi = membersByGroupId || {};
+
+      // 1) groups
+      if (groupList.length) {
+        const CHUNK = 400;
+        for (let i = 0; i < groupList.length; i += CHUNK) {
+          const slice = groupList.slice(i, i + CHUNK);
+          const batch = writeBatch(db);
+          for (const g of slice) {
+            if (!g?.id) continue;
+            batch.set(_sub(uid, 'groups', String(g.id)), { ...g, _updatedAt: now }, { merge: true });
+          }
+          await batch.commit();
+        }
+      }
+
+      // 2) persons
+      const personEntries = Object.entries(coworkerMap).filter(([pid]) => pid);
+      if (personEntries.length) {
+        const CHUNK = 400;
+        for (let i = 0; i < personEntries.length; i += CHUNK) {
+          const slice = personEntries.slice(i, i + CHUNK);
+          const batch = writeBatch(db);
+          for (const [pid, p] of slice) {
+            batch.set(_sub(uid, 'persons', String(pid)), { ...p, id: String(pid), _updatedAt: now }, { merge: true });
+          }
+          await batch.commit();
+        }
+      }
+
+      // 3) groupMembers — resolve full person from coworkers map
+      const membershipEntries = Object.entries(mbgi);
+      if (membershipEntries.length) {
+        const CHUNK = 400;
+        for (let i = 0; i < membershipEntries.length; i += CHUNK) {
+          const slice = membershipEntries.slice(i, i + CHUNK);
+          const batch = writeBatch(db);
+          for (const [gid, list] of slice) {
+            const memberIds = [];
+            const members = [];
+            for (const m of (list || [])) {
+              const pid = String(m?.userId || m?.id || '');
+              if (!pid) continue;
+              const person = coworkerMap[pid] || {};
+              memberIds.push(pid);
+              members.push({
+                userId: pid,
+                name: person.name || m.name || '',
+                photo: person.photo || m.photo || null,
+                role: person.role || m.role || 'Médico',
+                council: person.council || m.council || '',
+                memberType: m.memberType || 'member',
+              });
+            }
+            batch.set(_sub(uid, 'groupMembers', String(gid)), {
+              userId: String(uid),
+              groupId: String(gid),
+              memberIds,
+              members,
+              syncedAt: now,
+              _updatedAt: now,
+            }, { merge: true });
+          }
+          await batch.commit();
+        }
+      }
+
+      return {
+        success: true,
+        groups: groupList.length,
+        persons: personEntries.length,
+        memberships: membershipEntries.length,
+      };
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] snapshotWebClientGraph: ${err.message}`);
+      return { success: false, error: err.message };
+    }
+  },
+
+  // [WEBCLIENT-BRIDGE] — remove when webClient is fully retired.
+  /**
+   * Snapshot all webClient-origin shifts of a user into Firestore as source:'aurora',
+   * so the app can stop reading from PlantaoAPI for this user (aurora-only mode).
+   * Idempotent: same shift.id reused; safe to re-run to refresh from latest webClient data.
+   */
+  snapshotWebClientToAurora: async (uid, shifts) => {
+    if (!db || !uid || !Array.isArray(shifts) || shifts.length === 0) {
+      return { success: true, written: 0 };
+    }
+    try {
+      const now = new Date().toISOString();
+      // Firestore batch limit is 500. Chunk if needed.
+      const CHUNK = 400;
+      let written = 0;
+      for (let i = 0; i < shifts.length; i += CHUNK) {
+        const slice = shifts.slice(i, i + CHUNK);
+        const batch = writeBatch(db);
+        for (const sh of slice) {
+          if (!sh?.id || !sh?.monthKey) continue;
+          const ref = _sub(uid, 'months', sh.monthKey, 'shifts', String(sh.id));
+          batch.set(ref, {
+            ..._stripShift(sh),
+            id: String(sh.id),
+            userId: String(uid),
+            source: 'aurora',
+            snapshotFromWebClient: true,
+            _updatedAt: now,
+          }, { merge: true });
+          written++;
+        }
+        await batch.commit();
+      }
+      return { success: true, written };
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] snapshotWebClientToAurora: ${err.message}`);
+      return { success: false, error: err.message };
+    }
+  },
+
+  // ── Swap auctions (Trocar aberto ao grupo) ─────────────────────────────────
+
+  /** swapAuctions/{auctionId} */
+  createSwapAuction: (auction) => {
+    if (!db || !auction?.id) return Promise.resolve();
+    return _write(doc(db, 'swapAuctions', String(auction.id)), { ...auction }, false);
+  },
+
+  cancelSwapAuction: (auctionId) => {
+    if (!db || !auctionId) return Promise.resolve();
+    return _write(doc(db, 'swapAuctions', String(auctionId)), {
+      status: 'cancelled',
+      respondedAt: new Date().toISOString(),
+    });
+  },
+
+  /** swapAuctions/{auctionId}/bids/{bidId} */
+  submitBid: (auctionId, bid) => {
+    if (!db || !auctionId || !bid?.id) return Promise.resolve();
+    return _write(doc(db, 'swapAuctions', String(auctionId), 'bids', String(bid.id)), { ...bid }, false);
+  },
+
+  withdrawBid: (auctionId, bidId) => {
+    if (!db || !auctionId || !bidId) return Promise.resolve();
+    return _write(doc(db, 'swapAuctions', String(auctionId), 'bids', String(bidId)), {
+      status: 'withdrawn',
+      respondedAt: new Date().toISOString(),
+    });
+  },
+
+  /**
+   * Accept a bid: atomically swap shifts between initiator and bidder, mark this
+   * auction as matched, and reject sibling bids.
+   * Returns { success, newIdForInitiator, newIdForBidder } when both shifts have valid ids.
+   */
+  acceptBid: async (auctionId, bidId, initiatorUserId, bidderUserId, shiftA, shiftB) => {
+    if (!db || !auctionId || !bidId || !initiatorUserId || !bidderUserId || !shiftA?.id || !shiftB?.id) {
+      return { success: false };
+    }
+    try {
+      const swapResult = await FirebaseAdapter.swapShifts(initiatorUserId, bidderUserId, shiftA, shiftB);
+      if (!swapResult.success) return { success: false };
+      const now = new Date().toISOString();
+      // Mark auction matched + selected bid accepted (sibling rejection done client-side via listing)
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'swapAuctions', String(auctionId)),
+        { status: 'matched', matchedBidId: String(bidId), _updatedAt: now },
+        { merge: true });
+      batch.set(doc(db, 'swapAuctions', String(auctionId), 'bids', String(bidId)),
+        { status: 'accepted', respondedAt: now, _updatedAt: now },
+        { merge: true });
+      await batch.commit();
+      return { success: true, ...swapResult };
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] acceptBid: ${err.message}`);
+      return { success: false };
+    }
+  },
+
+  /**
+   * List active swap auctions whose preferences.groupIds intersect the given groups.
+   * Filters status==='open' client-side to avoid composite indexes.
+   */
+  getSwapAuctionsForGroups: async (groupIds) => {
+    if (!db || !Array.isArray(groupIds) || groupIds.length === 0) return [];
+    try {
+      const { collection, query, where, getDocs } = await import('firebase/firestore');
+      const ids = [...new Set(groupIds.map(String))];
+      const chunks = [];
+      for (let i = 0; i < ids.length; i += 10) chunks.push(ids.slice(i, i + 10));
+      const seen = new Map();
+      for (const chunk of chunks) {
+        const q = query(
+          collection(db, 'swapAuctions'),
+          where('preferences.groupIds', 'array-contains-any', chunk),
+        );
+        const snap = await getDocs(q);
+        snap.forEach(d => {
+          const data = d.data() || {};
+          if (data.status !== 'open') return;
+          if (!seen.has(d.id)) seen.set(d.id, { id: d.id, ...data });
+        });
+      }
+      return [...seen.values()];
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] getSwapAuctionsForGroups: ${err.message}`);
+      return [];
+    }
+  },
+
+  /** Auctions I initiated. */
+  getMyAuctions: async (userId) => {
+    if (!db || !userId) return [];
+    try {
+      const { collection, query, where, getDocs } = await import('firebase/firestore');
+      const snap = await getDocs(query(
+        collection(db, 'swapAuctions'),
+        where('initiatorUserId', '==', String(userId)),
+      ));
+      const out = [];
+      snap.forEach(d => out.push({ id: d.id, ...d.data() }));
+      return out;
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] getMyAuctions: ${err.message}`);
+      return [];
+    }
+  },
+
+  /** All bids on a specific auction. */
+  getBidsForAuction: async (auctionId) => {
+    if (!db || !auctionId) return [];
+    try {
+      const { collection, getDocs } = await import('firebase/firestore');
+      const snap = await getDocs(collection(db, 'swapAuctions', String(auctionId), 'bids'));
+      const out = [];
+      snap.forEach(d => out.push({ id: d.id, auctionId: String(auctionId), ...d.data() }));
+      return out;
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] getBidsForAuction: ${err.message}`);
+      return [];
     }
   },
 

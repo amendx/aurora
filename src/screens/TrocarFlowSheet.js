@@ -11,13 +11,33 @@ import { useGroups } from '../contexts/GroupsContext';
 import { useOffers } from '../contexts/OffersContext';
 import FirebaseAdapter from '../services/firebase/FirebaseAdapter';
 import { canSwap } from '../utils/SwapEligibility';
+import Logger from '../utils/Logger';
 
 const _initials = (n = '') => n.split(' ').filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase();
 const _labelName = (l) => ({ M: 'Manhã', T: 'Tarde', N: 'Noite', D: 'Noite' }[l] || l || 'Plantão');
-const _fmtDate = (iso) => {
-  if (!iso) return '';
-  const d = new Date(iso);
+
+// Cores por tipo de turno — alinhadas com CalendarScreen / GroupDayTeamScreen.
+const SHIFT_TYPE_COLOR = { M: '#3FA9A7', T: '#97CAFC', N: '#5B6FBF', D: '#5B6FBF' };
+const _shiftColor = (label, fallback) => {
+  const k = String(label || '').charAt(0).toUpperCase();
+  return SHIFT_TYPE_COLOR[k] || fallback;
+};
+const _fmtDate = (input) => {
+  if (!input) return '';
+  // Accept either an ISO timestamp or a plain YYYY-MM-DD date.
+  const raw = /^\d{4}-\d{2}-\d{2}$/.test(input) ? `${input}T12:00:00` : input;
+  const d = new Date(raw);
+  if (isNaN(d.getTime())) return '';
   return d.toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: 'short' });
+};
+
+const _shiftDate = (sh) => sh?.startISO || sh?.date || '';
+
+const _withTimeout = (promise, ms = 8000, fallback = []) => {
+  return Promise.race([
+    promise,
+    new Promise(resolve => setTimeout(() => resolve(fallback), ms)),
+  ]);
 };
 
 const _monthKeysFromNow = (n = 3) => {
@@ -30,7 +50,7 @@ const _monthKeysFromNow = (n = 3) => {
   return out;
 };
 
-export default function TrocarFlowSheet({ visible, shift, onClose, onDone }) {
+export default function TrocarFlowSheet({ visible, shift: initialShift, presetTargetUserId, presetTargetShiftId, onClose, onDone }) {
   const C = useColors();
   const insets = useSafeAreaInsets();
   const s = makeStyles(C);
@@ -38,7 +58,14 @@ export default function TrocarFlowSheet({ visible, shift, onClose, onDone }) {
   const { groupsById, getGroupMembers } = useGroups();
   const { proposeSwap } = useOffers();
 
-  const [step, setStep]               = useState(1);
+  // When the user opens Trocar from a colleague's row in GroupDayTeam we don't
+  // know which of their own shifts to offer yet — step 0 picks it.
+  const needsOwnShiftStep = !initialShift;
+  const initialStep = needsOwnShiftStep ? 0 : 1;
+
+  const [step, setStep]               = useState(initialStep);
+  const [shift, setShift]             = useState(initialShift || null); // the user's own shift to offer
+  const [myShifts, setMyShifts]       = useState(null); // null = loading
   const [pickedColleague, setColl]    = useState(null);
   const [theirShifts, setTheirShifts] = useState(null); // null = loading, [] = none
   const [pickedShift, setPickedShift] = useState(null);
@@ -65,49 +92,183 @@ export default function TrocarFlowSheet({ visible, shift, onClose, onDone }) {
       .sort((a, b) => (a.person.name || '').localeCompare(b.person.name || '', 'pt-BR'));
   }, [user?.id, groupsById, getGroupMembers]);
 
+  // Load user's own upcoming shifts when needed (step 0 / opened without a preselected shift)
+  useEffect(() => {
+    if (!needsOwnShiftStep || !user?.id || !visible) return;
+    setMyShifts(null);
+    let cancelled = false;
+    (async () => {
+      try {
+        const months = _monthKeysFromNow(3);
+        Logger.info(`[TrocarFlowSheet] step0 → loading own shifts for uid=${user.id} months=${months.join(',')}`);
+        const t0 = Date.now();
+        const raw = await _withTimeout(
+          FirebaseAdapter.getUserShiftsForMonths(user.id, months),
+          8000,
+          []
+        );
+        Logger.info(`[TrocarFlowSheet] step0 ← raw=${(raw || []).length} shifts in ${Date.now() - t0}ms`);
+        const todayStr = new Date().toISOString().slice(0, 10);
+        const out = (raw || [])
+          .filter(sh => {
+            const date = sh.date || (sh.startISO || '').slice(0, 10);
+            return date && date >= todayStr;
+          })
+          .sort((a, b) => (a.date || a.startISO || '').localeCompare(b.date || b.startISO || ''));
+        Logger.info(`[TrocarFlowSheet] step0 → filtered to ${out.length} future shifts`);
+        if (!cancelled) setMyShifts(out);
+      } catch (err) {
+        Logger.warn(`[TrocarFlowSheet] load own shifts FAILED: ${err?.message}`);
+        if (!cancelled) setMyShifts([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [needsOwnShiftStep, user?.id, visible]);
+
+  // Apply presetTargetUserId once colleagues list is populated
+  useEffect(() => {
+    if (!presetTargetUserId || pickedColleague || colleagues.length === 0) return;
+    const match = colleagues.find(c => String(c.person.id) === String(presetTargetUserId));
+    Logger.info(`[TrocarFlowSheet] preset target uid=${presetTargetUserId} → ${match ? 'MATCH ' + match.person.name : 'NOT FOUND in ' + colleagues.length + ' colleagues'}`);
+    if (match) {
+      setColl(match);
+      if (shift) setStep(2);
+    }
+  }, [presetTargetUserId, colleagues, pickedColleague, shift]);
+
   // Load target's upcoming shifts when colleague picked
   useEffect(() => {
-    if (!pickedColleague) return;
+    if (!pickedColleague || !shift) return;
     setTheirShifts(null);
+    let cancelled = false;
     (async () => {
-      const months = _monthKeysFromNow(3);
-      const raw = await FirebaseAdapter.getUserShiftsForMonths(pickedColleague.person.id, months);
-      const now = Date.now();
-      // Filter to upcoming + passes initiator-side eligibility
-      const out = raw
-        .filter(sh => sh.startISO && new Date(sh.startISO).getTime() > now)
-        .filter(sh => {
-          const r = canSwap({
-            initiatorGroups: myGroupIds,
-            targetGroups: null,
-            shiftA: shift,
-            shiftB: sh,
-          });
-          return r.ok;
-        })
-        .sort((a, b) => a.startISO.localeCompare(b.startISO));
-      setTheirShifts(out);
+      try {
+        const months = _monthKeysFromNow(3);
+        Logger.info(`[TrocarFlowSheet] step2 → loading target shifts uid=${pickedColleague.person.id} months=${months.join(',')}`);
+        const t0 = Date.now();
+        const raw = await _withTimeout(
+          FirebaseAdapter.getUserShiftsForMonths(pickedColleague.person.id, months),
+          8000,
+          []
+        );
+        Logger.info(`[TrocarFlowSheet] step2 ← raw=${(raw || []).length} shifts in ${Date.now() - t0}ms`);
+        const todayStr = new Date().toISOString().slice(0, 10);
+        // Dedup por (date + label) — defensivo contra histórico de seeds antigos
+        // ou snapshots sobrepostos no Firestore (mesmo dia/turno, ids diferentes).
+        // Mantém o mais recente por _updatedAt; sem timestamp, mantém o primeiro.
+        const _seen = new Map();
+        const deduped = [];
+        for (const sh of (raw || [])) {
+          const date = sh.date || (sh.startISO || '').slice(0, 10);
+          const key = `${date}_${sh.label || ''}_${sh.group?.id || ''}`;
+          const prev = _seen.get(key);
+          if (!prev) {
+            _seen.set(key, sh);
+            deduped.push(sh);
+            continue;
+          }
+          const prevTs = prev._updatedAt ? Date.parse(prev._updatedAt) : 0;
+          const curTs  = sh._updatedAt   ? Date.parse(sh._updatedAt)   : 0;
+          if (curTs > prevTs) {
+            const idx = deduped.indexOf(prev);
+            if (idx >= 0) deduped[idx] = sh;
+            _seen.set(key, sh);
+          }
+        }
+        // Filter to upcoming + passes initiator-side eligibility
+        const out = deduped
+          .filter(sh => {
+            const date = sh.date || (sh.startISO || '').slice(0, 10);
+            return date && date >= todayStr;
+          })
+          .filter(sh => {
+            try {
+              const r = canSwap({
+                initiatorGroups: myGroupIds,
+                targetGroups: null,
+                shiftA: shift,
+                shiftB: sh,
+              });
+              return r.ok;
+            } catch {
+              return false;
+            }
+          })
+          .sort((a, b) => (a.date || a.startISO || '').localeCompare(b.date || b.startISO || ''));
+        Logger.info(`[TrocarFlowSheet] step2 → filtered to ${out.length} eligible target shifts`);
+        if (!cancelled) {
+          if (presetTargetShiftId) {
+            // Hard-lock to the shift the user tapped on in the calendar.
+            // The trocar flow was opened from a specific shift — não faz sentido
+            // permitir mudar pra outro dia. Mostra só esse na lista.
+            const match = out.find(sh => String(sh.id) === String(presetTargetShiftId));
+            if (match) {
+              Logger.info(`[TrocarFlowSheet] step2 → locked to preset shift ${presetTargetShiftId}`);
+              setTheirShifts([match]);
+              setPickedShift(match);
+            } else {
+              Logger.info(`[TrocarFlowSheet] step2 → preset shift ${presetTargetShiftId} NOT in eligible list, falling back to full list`);
+              setTheirShifts(out);
+            }
+          } else {
+            setTheirShifts(out);
+          }
+        }
+      } catch (err) {
+        Logger.warn(`[TrocarFlowSheet] load target shifts FAILED: ${err?.message}`);
+        if (!cancelled) setTheirShifts([]);
+      }
     })();
+    return () => { cancelled = true; };
   }, [pickedColleague, myGroupIds, shift]);
 
-  const reset = () => { setStep(1); setColl(null); setTheirShifts(null); setPickedShift(null); setSub(false); };
+  const reset = () => {
+    setStep(initialStep);
+    setShift(initialShift || null);
+    setMyShifts(null);
+    setColl(null);
+    setTheirShifts(null);
+    setPickedShift(null);
+    setSub(false);
+  };
   const close = () => { reset(); onClose?.(); };
 
   const handleSend = async () => {
     if (!pickedShift || !pickedColleague) return;
+    Logger.info(`[TrocarFlowSheet] handleSend → ${shift?.id} (mine) ⇄ ${pickedShift.id} (theirs, uid=${pickedColleague.person.id})`);
     setSub(true);
-    const eligible = canSwap({
-      initiatorGroups: myGroupIds,
-      targetGroups: null,
-      shiftA: shift,
-      shiftB: pickedShift,
-    });
-    const r = await proposeSwap(shift, pickedColleague.person, pickedShift, eligible.eligibleGroupIds || []);
-    setSub(false);
-    if (r?.success) { onDone?.(); close(); }
+    try {
+      const eligible = canSwap({
+        initiatorGroups: myGroupIds,
+        targetGroups: null,
+        shiftA: shift,
+        shiftB: pickedShift,
+      });
+      Logger.info(`[TrocarFlowSheet] eligible=${eligible.ok} reason=${eligible.reason || '-'} groups=${(eligible.eligibleGroupIds || []).join(',')}`);
+      const r = await _withTimeout(
+        proposeSwap(shift, pickedColleague.person, pickedShift, eligible.eligibleGroupIds || []),
+        10000,
+        { success: false, reason: 'timeout' }
+      );
+      Logger.info(`[TrocarFlowSheet] proposeSwap result: success=${r?.success} reason=${r?.reason || '-'} id=${r?.swapId || '-'}`);
+      if (r?.success) { onDone?.(); close(); }
+    } catch (err) {
+      Logger.warn(`[TrocarFlowSheet] handleSend FAILED: ${err?.message}`);
+    } finally {
+      setSub(false);
+    }
   };
 
-  if (!visible || !shift) return null;
+  if (!visible) return null;
+
+  const totalSteps = needsOwnShiftStep ? 4 : 3;
+  const displayStep = needsOwnShiftStep ? step + 1 : step;
+  const stepTitle = (() => {
+    if (step === 0) return 'Seu plantão';
+    if (step === 1) return 'Escolher colega';
+    if (step === 2) return 'Plantão do colega';
+    return 'Confirmar troca';
+  })();
 
   return (
     <Modal visible transparent animationType="slide" onRequestClose={close}>
@@ -116,11 +277,57 @@ export default function TrocarFlowSheet({ visible, shift, onClose, onDone }) {
         <View style={s.handle} />
         <View style={s.headerRow}>
           <View style={{ flex: 1 }}>
-            <Text style={s.title}>{step === 1 ? 'Escolher colega' : step === 2 ? 'Escolher plantão' : 'Confirmar troca'}</Text>
-            <Text style={s.subtitle}>Passo {step} de 3</Text>
+            <Text style={s.title}>{stepTitle}</Text>
+            <Text style={s.subtitle}>Passo {displayStep} de {totalSteps}</Text>
           </View>
           <Pressable onPress={close} hitSlop={10}><Ionicons name="close" size={22} color={C.text.secondary} /></Pressable>
         </View>
+
+        {/* Plantão travado — identifica qual plantão entra na troca, sem repetir
+            o verbo "oferece" que aparece no step 3 confirmação ("Você dá"). */}
+        {!needsOwnShiftStep && shift && step < 3 && (
+          <View style={{ paddingHorizontal: 18, paddingBottom: 8 }}>
+            <Text style={s.eyebrow}>Seu plantão</Text>
+            <View style={s.summaryCard}>
+              <View style={[s.labelChip, { backgroundColor: _shiftColor(shift.label, C.primary) + '22' }]}>
+                <Text style={[s.labelChipText, { color: _shiftColor(shift.label, C.primary) }]}>{shift.label || 'M'}</Text>
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={s.memberName}>{_labelName(shift.label)} · {_fmtDate(_shiftDate(shift))}</Text>
+                <Text style={s.memberMeta}>{shift.group?.name || shift.group?.institution?.name || ''}</Text>
+              </View>
+              <Ionicons name="lock-closed" size={14} color={C.text.tertiary} />
+            </View>
+          </View>
+        )}
+
+        {step === 0 && (
+          <ScrollView style={{ maxHeight: 460 }} contentContainerStyle={{ paddingHorizontal: 18, paddingBottom: 8 }}>
+            {myShifts === null ? (
+              <ActivityIndicator color={C.primary} style={{ marginTop: 32 }} />
+            ) : myShifts.length === 0 ? (
+              <Text style={s.empty}>Você não tem plantões futuros para oferecer.</Text>
+            ) : myShifts.map(sh => {
+              const sel = shift?.id === sh.id;
+              return (
+                <TouchableOpacity
+                  key={sh.id}
+                  style={[s.shiftRow, sel && { borderColor: C.primary }]}
+                  onPress={() => setShift(sh)}
+                >
+                  <View style={[s.labelChip, { backgroundColor: _shiftColor(sh.label, C.primary) + '22' }]}>
+                    <Text style={[s.labelChipText, { color: _shiftColor(sh.label, C.primary) }]}>{sh.label || 'M'}</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.memberName}>{_labelName(sh.label)} · {_fmtDate(_shiftDate(sh))}</Text>
+                    <Text style={s.memberMeta}>{sh.group?.name || sh.group?.institution?.name || ''}</Text>
+                  </View>
+                  {sel && <Ionicons name="checkmark-circle" size={20} color={C.primary} />}
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        )}
 
         {step === 1 && (
           <ScrollView style={{ maxHeight: 460 }} contentContainerStyle={{ paddingHorizontal: 18, paddingBottom: 8 }}>
@@ -153,6 +360,11 @@ export default function TrocarFlowSheet({ visible, shift, onClose, onDone }) {
 
         {step === 2 && (
           <ScrollView style={{ maxHeight: 460 }} contentContainerStyle={{ paddingHorizontal: 18, paddingBottom: 8 }}>
+            {presetTargetShiftId && pickedShift && (
+              <Text style={[s.subtitle, { marginBottom: 8, marginTop: 0 }]}>
+                Você está trocando por este plantão específico. Para trocar por outro dia, cancele e selecione outro no calendário.
+              </Text>
+            )}
             {theirShifts === null ? (
               <ActivityIndicator color={C.primary} style={{ marginTop: 32 }} />
             ) : theirShifts.length === 0 ? (
@@ -165,12 +377,12 @@ export default function TrocarFlowSheet({ visible, shift, onClose, onDone }) {
                   style={[s.shiftRow, sel && { borderColor: C.primary }]}
                   onPress={() => setPickedShift(sh)}
                 >
-                  <View style={[s.labelChip, { backgroundColor: (sh.group?.color || C.primary) + '22' }]}>
-                    <Text style={[s.labelChipText, { color: sh.group?.color || C.primary }]}>{sh.label || 'M'}</Text>
+                  <View style={[s.labelChip, { backgroundColor: _shiftColor(sh.label, C.primary) + '22' }]}>
+                    <Text style={[s.labelChipText, { color: _shiftColor(sh.label, C.primary) }]}>{sh.label || 'M'}</Text>
                   </View>
                   <View style={{ flex: 1 }}>
-                    <Text style={s.memberName}>{_labelName(sh.label)} · {_fmtDate(sh.startISO)}</Text>
-                    <Text style={s.memberMeta}>{sh.group?.institution?.name || sh.group?.name || ''}</Text>
+                    <Text style={s.memberName}>{_labelName(sh.label)} · {_fmtDate(_shiftDate(sh))}</Text>
+                    <Text style={s.memberMeta}>{sh.group?.name || sh.group?.institution?.name || ''}</Text>
                   </View>
                   {sel && <Ionicons name="checkmark-circle" size={20} color={C.primary} />}
                 </TouchableOpacity>
@@ -191,16 +403,25 @@ export default function TrocarFlowSheet({ visible, shift, onClose, onDone }) {
         )}
 
         <View style={[s.ctaRow, { paddingHorizontal: 18 }]}>
-          {step > 1 ? (
+          {step > initialStep ? (
             <Pressable style={s.secondaryBtn} onPress={() => setStep(step - 1)}>
               <Text style={[s.secondaryBtnText, { color: C.text.secondary }]}>Voltar</Text>
             </Pressable>
           ) : null}
           {step < 3 ? (
             <Pressable
-              style={[s.primaryBtn, { backgroundColor: ((step === 1 && pickedColleague) || (step === 2 && pickedShift)) ? C.primary : C.border.medium, flex: step > 1 ? 2 : 1 }]}
-              onPress={() => { if (step === 1 && pickedColleague) setStep(2); else if (step === 2 && pickedShift) setStep(3); }}
-              disabled={(step === 1 && !pickedColleague) || (step === 2 && !pickedShift)}
+              style={[s.primaryBtn, {
+                backgroundColor:
+                  ((step === 0 && shift) || (step === 1 && pickedColleague) || (step === 2 && pickedShift))
+                    ? C.primary : C.border.medium,
+                flex: step > initialStep ? 2 : 1,
+              }]}
+              onPress={() => {
+                if (step === 0 && shift) setStep(1);
+                else if (step === 1 && pickedColleague) setStep(2);
+                else if (step === 2 && pickedShift) setStep(3);
+              }}
+              disabled={(step === 0 && !shift) || (step === 1 && !pickedColleague) || (step === 2 && !pickedShift)}
             >
               <Text style={s.primaryBtnText}>Continuar</Text>
             </Pressable>
@@ -221,14 +442,15 @@ export default function TrocarFlowSheet({ visible, shift, onClose, onDone }) {
 
 function ShiftSummary({ shift, C, s }) {
   if (!shift) return null;
+  const tColor = _shiftColor(shift.label, C.primary);
   return (
     <View style={s.summaryCard}>
-      <View style={[s.labelChip, { backgroundColor: (shift.group?.color || C.primary) + '22' }]}>
-        <Text style={[s.labelChipText, { color: shift.group?.color || C.primary }]}>{shift.label || 'M'}</Text>
+      <View style={[s.labelChip, { backgroundColor: tColor + '22' }]}>
+        <Text style={[s.labelChipText, { color: tColor }]}>{shift.label || 'M'}</Text>
       </View>
       <View style={{ flex: 1 }}>
-        <Text style={s.memberName}>{_labelName(shift.label)} · {_fmtDate(shift.startISO)}</Text>
-        <Text style={s.memberMeta}>{shift.group?.institution?.name || shift.group?.name || ''}</Text>
+        <Text style={s.memberName}>{_labelName(shift.label)} · {_fmtDate(_shiftDate(shift))}</Text>
+        <Text style={s.memberMeta}>{shift.group?.name || shift.group?.institution?.name || ''}</Text>
       </View>
     </View>
   );

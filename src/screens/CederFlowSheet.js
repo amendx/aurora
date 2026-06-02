@@ -1,7 +1,7 @@
 import { useState, useMemo, useContext } from 'react';
 import {
   View, Text, Modal, Pressable, ScrollView, TouchableOpacity,
-  StyleSheet, Image, ActivityIndicator,
+  StyleSheet, Image, ActivityIndicator, TextInput, Alert,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -12,6 +12,20 @@ import { useOffers } from '../contexts/OffersContext';
 import { useShifts } from '../contexts/ShiftsContext';
 
 const _initials = (name = '') => name.split(' ').filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase();
+const _labelName = (l) => ({ M: 'Manhã', T: 'Tarde', N: 'Noite', D: 'Noite' }[l] || l || 'Plantão');
+const _fmtDate = (iso) => {
+  if (!iso) return '';
+  const raw = /^\d{4}-\d{2}-\d{2}$/.test(iso) ? `${iso}T12:00:00` : iso;
+  const d = new Date(raw);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: 'short' });
+};
+const _shiftSummary = (sh) => {
+  if (!sh) return '';
+  const date = sh.startISO || sh.date;
+  const time = sh.time || '';
+  return `${_labelName(sh.label)} · ${_fmtDate(date)}${time ? ' · ' + time : ''}`;
+};
 
 export default function CederFlowSheet({ visible, shift, onClose, onDone }) {
   const C = useColors();
@@ -25,14 +39,30 @@ export default function CederFlowSheet({ visible, shift, onClose, onDone }) {
   const [mode, setMode]       = useState(null); // 'open' | 'targeted'
   const [picked, setPicked]   = useState(null); // member object
   const [submitting, setSub]  = useState(false);
+  const [query, setQuery]     = useState('');
 
   const groupId = String(shift?.group?.id || '');
   const members = useMemo(() => {
     if (!groupId) return [];
-    return getGroupMembers(groupId).filter(m => String(m.person?.id) !== String(user?.id));
+    return getGroupMembers(groupId)
+      .filter(m => m?.person?.id != null && String(m.person.id) !== String(user?.id))
+      .sort((a, b) => (a.person.name || '').localeCompare(b.person.name || '', 'pt-BR'));
   }, [groupId, getGroupMembers, user?.id]);
 
-  const reset = () => { setMode(null); setPicked(null); setSub(false); };
+  const _councilStr = (c) => (typeof c === 'string' ? c : (c?.state || c?.uf || ''));
+
+  const filteredMembers = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return members;
+    return members.filter(m => {
+      const p = m.person;
+      const name = String(p.name || p.full_name || '').toLowerCase();
+      const council = _councilStr(p.council).toLowerCase();
+      return name.includes(q) || council.includes(q);
+    });
+  }, [members, query]);
+
+  const reset = () => { setMode(null); setPicked(null); setSub(false); setQuery(''); };
   const close = () => { reset(); onClose?.(); };
 
   const handleOpen = async () => {
@@ -43,7 +73,16 @@ export default function CederFlowSheet({ visible, shift, onClose, onDone }) {
       await removeShiftLocally?.(shift.id, monthKey);
     }
     setSub(false);
-    if (r?.success) { onDone?.('open'); close(); }
+    if (r?.success) {
+      onDone?.('open');
+      close();
+      Alert.alert(
+        'Plantão cedido ao grupo',
+        `${_shiftSummary(shift)}\n\nDisponível para ${shift?.group?.name || 'o grupo'}. Você pode cancelar a cessão em Histórico enquanto ninguém pegar.`,
+      );
+    } else {
+      Alert.alert('Erro', 'Não foi possível ceder o plantão. Tente novamente.');
+    }
   };
 
   const handleTargeted = async () => {
@@ -51,7 +90,16 @@ export default function CederFlowSheet({ visible, shift, onClose, onDone }) {
     setSub(true);
     const r = await cedeTargeted(shift, picked.person.id, picked.person.name);
     setSub(false);
-    if (r?.success) { onDone?.('targeted'); close(); }
+    if (r?.success) {
+      onDone?.('targeted');
+      close();
+      Alert.alert(
+        'Cessão enviada',
+        `${_shiftSummary(shift)}\n\nOferecido a ${picked.person.name}. Você pode cancelar em Histórico enquanto ${picked.person.name?.split(' ')[0] || 'ele(a)'} não responder.`,
+      );
+    } else {
+      Alert.alert('Erro', 'Não foi possível enviar a cessão. Tente novamente.');
+    }
   };
 
   if (!visible || !shift) return null;
@@ -118,11 +166,32 @@ export default function CederFlowSheet({ visible, shift, onClose, onDone }) {
         {/* Targeted — pick a member */}
         {mode === 'targeted' && (
           <View style={{ flex: 0, paddingHorizontal: 18 }}>
-            <Text style={s.eyebrow}>{members.length} colegas em {shift.group?.name}</Text>
-            <ScrollView style={{ maxHeight: 360 }} contentContainerStyle={{ paddingBottom: 8 }}>
+            <Text style={s.eyebrow}>
+              {members.length} colegas em {shift.group?.name}
+            </Text>
+            <View style={s.searchBox}>
+              <Ionicons name="search" size={16} color={C.text.tertiary} />
+              <TextInput
+                value={query}
+                onChangeText={setQuery}
+                placeholder="Buscar por nome ou CRM"
+                placeholderTextColor={C.text.tertiary}
+                style={s.searchInput}
+                autoCorrect={false}
+                autoCapitalize="none"
+              />
+              {!!query && (
+                <Pressable hitSlop={8} onPress={() => setQuery('')}>
+                  <Ionicons name="close-circle" size={16} color={C.text.tertiary} />
+                </Pressable>
+              )}
+            </View>
+            <ScrollView style={{ maxHeight: 360 }} contentContainerStyle={{ paddingBottom: 8 }} keyboardShouldPersistTaps="handled">
               {members.length === 0 ? (
                 <Text style={[s.bodyLine, { color: C.text.tertiary }]}>Nenhum colega no grupo ainda.</Text>
-              ) : members.map(m => {
+              ) : filteredMembers.length === 0 ? (
+                <Text style={[s.bodyLine, { color: C.text.tertiary }]}>Nenhum colega encontrado para "{query}".</Text>
+              ) : filteredMembers.map(m => {
                 const p = m.person;
                 const sel = picked?.person?.id === p.id;
                 return (
@@ -139,7 +208,10 @@ export default function CederFlowSheet({ visible, shift, onClose, onDone }) {
                     }
                     <View style={{ flex: 1 }}>
                       <Text style={s.memberName} numberOfLines={1}>{p.name}</Text>
-                      {p.council ? <Text style={s.memberMeta}>{p.council}</Text> : null}
+                      {(() => {
+                        const c = _councilStr(p.council);
+                        return c ? <Text style={s.memberMeta}>{c}</Text> : null;
+                      })()}
                     </View>
                     {sel && <Ionicons name="checkmark-circle" size={20} color={C.primary} />}
                   </TouchableOpacity>
@@ -201,4 +273,22 @@ const makeStyles = (C) => StyleSheet.create({
   avatarInitials: { fontSize: 13, fontWeight: '700', color: C.primary },
   memberName: { fontSize: 14, fontWeight: '600', color: C.text.primary },
   memberMeta: { fontSize: 11, color: C.text.tertiary, marginTop: 1 },
+  searchBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: C.background.secondary,
+    borderWidth: 0.5,
+    borderColor: C.border.light,
+    marginBottom: 10,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 14,
+    color: C.text.primary,
+    paddingVertical: 0,
+  },
 });

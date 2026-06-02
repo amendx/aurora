@@ -271,7 +271,9 @@ export default function ChartsScreen() {
           const dateStr = dayData.date;
           let realHoursMap = {};
           try {
-            const saved = await SecureStore.getItemAsync(`real_hours_${dateStr}`);
+            const uid = String(user?.id || '');
+            const saved = (uid && await SecureStore.getItemAsync(`real_hours_${uid}_${dateStr}`))
+              || await SecureStore.getItemAsync(`real_hours_${dateStr}`);
             if (saved) realHoursMap = JSON.parse(saved);
           } catch (_) {}
           for (let i = 0; i < (dayData.shifts || []).length; i++) {

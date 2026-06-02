@@ -152,7 +152,10 @@ export const GroupsProvider = ({ children }) => {
   // Quando o token chegar: carrega da API em background com delay
   // para não bloquear a experiência inicial (plantões/home)
   useEffect(() => {
-    if (token && user?.source !== 'aurora' && !hasLoadedFromApi) {
+    // [WEBCLIENT-BRIDGE] — the `!user?.auroraOnlyMode` predicate exists só pra
+    // pular o load da PlantaoAPI quando o webClient virou aurora-only. Remova
+    // junto com o resto da bridge quando o webClient for desativado.
+    if (token && user?.source !== 'aurora' && !user?.auroraOnlyMode && !hasLoadedFromApi) {
       Logger.info('🏢 Token disponível, agendando carga de grupos em background...');
       const timer = setTimeout(() => {
         loadGroupsBackground();
@@ -382,7 +385,9 @@ export const GroupsProvider = ({ children }) => {
   // Aurora users: hydrate group memberships + persons from Firestore on login.
   // WebClient users get this from PlantaoAPI daily extraction (extractFromDailyShifts).
   useEffect(() => {
-    if (user?.source !== 'aurora' || !userId) return;
+    // [WEBCLIENT-BRIDGE] — `|| user?.auroraOnlyMode` permite que o webClient
+    // migrado também hidratze grupos do Firestore. Removível com a bridge.
+    if ((user?.source !== 'aurora' && !user?.auroraOnlyMode) || !userId) return;
     let cancelled = false;
     (async () => {
       try {

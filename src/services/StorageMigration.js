@@ -125,10 +125,16 @@ const _migrateTimeEntries = async (userId) => {
   const migratedKeys = [];
 
   for (const dateStr of dates) {
-    const key = `real_hours_${dateStr}`;
+    // Prefer per-user scoped key (current format) over legacy unscoped key.
+    // A migration de outro usuário pode ter deletado a legada — neutralizar
+    // o risco de absorver dados que não eram do usuário atual.
+    const scopedKey = `real_hours_${userId}_${dateStr}`;
+    const legacyKey = `real_hours_${dateStr}`;
     let raw;
+    let key = scopedKey;
     try {
-      raw = await SecureStore.getItemAsync(key);
+      raw = await SecureStore.getItemAsync(scopedKey);
+      if (!raw) { raw = await SecureStore.getItemAsync(legacyKey); key = legacyKey; }
     } catch (_) {
       continue;
     }

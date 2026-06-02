@@ -50,6 +50,9 @@ import AvisosScreen from './AvisosScreen';
 import NotificationsSettingsScreen from './NotificationsSettingsScreen';
 import HistoricoScreen from './HistoricoScreen';
 import ChartsScreen from './ChartsScreen';
+import GroupDayTeamScreen from './GroupDayTeamScreen';
+import TrocasAbertasScreen from './TrocasAbertasScreen';
+import ActivityLogScreen from './ActivityLogScreen';
 import TabBar from '../components/TabBar';
 import { useColors, Spacing } from '../constants/DesignSystem';
 import Logger from '../utils/Logger';
@@ -88,6 +91,9 @@ const SCREEN_MAP = {
   AvisosScreen:          'avisos',
   NotificationsSettingsScreen: 'notifsettings',
   Historico:             'historico',
+  GroupDayTeam:          'groupDayTeam',
+  TrocasAbertas:         'trocasAbertas',
+  ActivityLog:           'activityLog',
 };
 
 export default function MainScreen() {
@@ -119,6 +125,13 @@ export default function MainScreen() {
   const isAnimating        = useRef(false);
   const disableSwipeBack   = useRef(false);
 
+  // Back-stack of overlays *below* the current one. Pushing a sub-screen while
+  // already in an overlay stacks the current frame here so Back pops to it
+  // instead of dismissing straight to the tab. Kept in a ref (not rendered —
+  // only the top frame lives in overlayScreen state) to avoid stale closures
+  // in the swipe-back PanResponder and extra renders.
+  const overlayStackRef    = useRef([]);
+
   // Keep disableSwipeBack in sync with currentScreen
   useEffect(() => {
     disableSwipeBack.current = currentScreen === 'dayView';
@@ -139,6 +152,17 @@ export default function MainScreen() {
           // commit — finish pop from current position
           isAnimating.current = true;
           const finish = () => {
+            // Stacked overlay → snap the previous frame back into view rather
+            // than revealing the tab underneath.
+            if (overlayStackRef.current.length > 0) {
+              const prev = overlayStackRef.current[overlayStackRef.current.length - 1];
+              overlayStackRef.current = overlayStackRef.current.slice(0, -1);
+              setCurrentScreen(prev.name); setScreenParams(prev.params); setOverlayScreen(prev);
+              setGroupsRefreshFn(null); setReportsExportFn(null);
+              slideX.setValue(0); baseParallaxX.setValue(-W * 0.1); overlayOpacity.setValue(1);
+              isAnimating.current = false;
+              return;
+            }
             setOverlayScreen(null); setCurrentScreen(null);
             setScreenParams(null); setGroupsRefreshFn(null);
             setReportsExportFn(null); isAnimating.current = false;
@@ -169,6 +193,8 @@ export default function MainScreen() {
   const pushSubScreen = (screenName, params = null) => {
     // If already in an overlay, do a quick replace crossfade instead of slide
     if (overlayScreen !== null) {
+      // Remember the current overlay so Back returns here, not to the tab.
+      overlayStackRef.current = [...overlayStackRef.current, { name: currentScreen, params: screenParams }];
       overlayOpacity.setValue(0);
       setCurrentScreen(screenName);
       setScreenParams(params);
@@ -239,10 +265,33 @@ export default function MainScreen() {
   // ── Pop: go back from sub-screen ──────────────────────────────────────────────
   const handleBackNavigation = () => {
     if (isAnimating.current) return;
+
+    // Stacked overlay → pop one level (crossfade) instead of dismissing to tab.
+    // Mirrors pushSubScreen's replace transition.
+    if (overlayStackRef.current.length > 0) {
+      const prev = overlayStackRef.current[overlayStackRef.current.length - 1];
+      overlayStackRef.current = overlayStackRef.current.slice(0, -1);
+      Logger.nav(`pop ← ${currentScreen} → ${prev.name}`);
+      overlayOpacity.setValue(0);
+      setCurrentScreen(prev.name);
+      setScreenParams(prev.params);
+      setOverlayScreen(prev);
+      setGroupsRefreshFn(null);
+      setReportsExportFn(null);
+      Animated.timing(overlayOpacity, {
+        toValue: 1,
+        duration: DURATION_REPLACE,
+        easing: EASING_OUT,
+        useNativeDriver: true,
+      }).start();
+      return;
+    }
+
     isAnimating.current = true;
     Logger.nav(`pop ← ${currentScreen || 'overlay'}`);
 
     const finish = () => {
+      overlayStackRef.current = [];
       setOverlayScreen(null);
       setCurrentScreen(null);
       setScreenParams(null);
@@ -295,6 +344,8 @@ export default function MainScreen() {
   // ── Tab switch ────────────────────────────────────────────────────────────────
   const handleTabPress = (tabId) => {
     if (overlayScreen !== null) {
+      // Tapping a tab dismisses all stacked overlays, not just one level.
+      overlayStackRef.current = [];
       handleBackNavigation();
       setCurrentTab(tabId);
       Logger.nav(`tab → ${tabId}`);
@@ -320,6 +371,14 @@ export default function MainScreen() {
 
   const TAB_BACK_LABELS = { home: 'Início', calendar: 'Calendário', settings: 'Configurações' };
 
+  // Back label when Back returns to a stacked overlay (not a tab).
+  const OVERLAY_BACK_LABELS = {
+    openings: 'Vagas', networkVacancies: 'Vagas', groups: 'Grupos',
+    trocasAbertas: 'Trocas', historico: 'Histórico', reports: 'Relatórios',
+    hospitals: 'Hospitais', charts: 'Gráficos', dayView: 'Dia',
+    groupDayTeam: 'Equipe', profile: 'Perfil', config: 'Valores',
+  };
+
   const getTabHeaderData = () => {
     switch (currentTab) {
       case 'home':     return { title: 'Início' };
@@ -330,7 +389,10 @@ export default function MainScreen() {
   };
 
   const getOverlayHeaderData = () => {
-    const backLabel = TAB_BACK_LABELS[currentTab] || 'Voltar';
+    const stackTop = overlayStackRef.current[overlayStackRef.current.length - 1];
+    const backLabel = stackTop
+      ? (OVERLAY_BACK_LABELS[stackTop.name] || 'Voltar')
+      : (TAB_BACK_LABELS[currentTab] || 'Voltar');
     switch (currentScreen) {
       case 'dayView':
         return { title: 'Dia', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
@@ -371,6 +433,12 @@ export default function MainScreen() {
         return { title: 'Vagas da rede', subtitle: 'Próximos 7 dias', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
       case 'historico':
         return { title: 'Histórico', subtitle: 'Cessões e trocas', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
+      case 'groupDayTeam':
+        return { title: 'Equipe do plantão', subtitle: 'Quem está hoje', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
+      case 'trocasAbertas':
+        return { title: 'Trocas abertas', subtitle: 'Negocie plantões com o grupo', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
+      case 'activityLog':
+        return { title: 'Minhas ações', subtitle: 'Log da sessão atual', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
       default:
         return { title: '', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
     }
@@ -431,13 +499,25 @@ export default function MainScreen() {
       case 'openings':
         return <OpeningsScreen navigation={{ goBack: handleBackNavigation }} />;
       case 'networkVacancies':
-        return <NetworkVacanciesScreen navigation={{ goBack: handleBackNavigation }} />;
+        return <NetworkVacanciesScreen navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }} />;
       case 'avisos':
         return <AvisosScreen navigation={{ goBack: handleBackNavigation }} />;
       case 'notifsettings':
         return <NotificationsSettingsScreen navigation={{ goBack: handleBackNavigation }} />;
       case 'historico':
         return <HistoricoScreen navigation={{ goBack: handleBackNavigation }} />;
+      case 'groupDayTeam':
+        return (
+          <GroupDayTeamScreen
+            navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }}
+            date={screen.params?.date}
+            groupIds={screen.params?.groupIds}
+          />
+        );
+      case 'trocasAbertas':
+        return <TrocasAbertasScreen navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }} />;
+      case 'activityLog':
+        return <ActivityLogScreen />;
       default:
         return null;
     }

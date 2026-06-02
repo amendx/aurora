@@ -7,6 +7,7 @@ import {
   Animated,
   Dimensions,
   Image,
+  ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
@@ -24,6 +25,12 @@ import { getMonthTotalValue } from '../utils/MonthSummaryComputer';
 import { getGroupColors } from '../utils/GroupColorConfig';
 import TodayCoworkersService from '../services/TodayCoworkersService';
 import TimeUtils from '../utils/TimeUtils';
+import CalendarModePill from '../components/CalendarModePill';
+import GroupPickerModal from '../components/GroupPickerModal';
+import GroupSummaryCard from '../components/GroupSummaryCard';
+import { useGroups } from '../contexts/GroupsContext';
+import GroupScheduleService from '../services/GroupScheduleService';
+import { getGroupVisibility } from '../utils/GroupVisibilityConfig';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 
@@ -76,7 +83,7 @@ const SkeletonBox = ({ width = '100%', height = 20, style }) => {
 
 const CalendarScreen = ({ navigation }) => {
   useContext(AuthContext);
-  const { user } = useContext(AuthContext);
+  const { user, token } = useContext(AuthContext);
   const {
     daysWithShifts,
     loading,
@@ -87,12 +94,20 @@ const CalendarScreen = ({ navigation }) => {
     refreshMonthSummary,
     monthSummary: contextSummary,
   } = useShifts();
+  const { groups: userGroups } = useGroups();
   const C = useColors();
   const insets = useSafeAreaInsets();
   const s = makeStyles(C);
 
   const userId = user?.id || user?.data?.id || 0;
 
+  const [calendarMode, setCalendarMode] = useState('mine'); // 'mine' | 'groups'
+  // Default: nenhum grupo selecionado ainda — populated quando visibleGroups carregar (1 grupo)
+  const [groupSelection, setGroupSelection] = useState(null); // null | Set<groupId> | 'all'
+  const [groupSchedules, setGroupSchedules] = useState({}); // groupId → { days, syncedAt }
+  const [groupLoading, setGroupLoading] = useState(false);
+  const [enabledGroupIds, setEnabledGroupIds] = useState(null); // null = "no config saved → all visible"
+  const [groupPickerOpen, setGroupPickerOpen] = useState(false);
   const [currentDate, setCurrentDate] = useState(new Date());
   const [isNavigating, setIsNavigating] = useState(false);
   const [bottomSheetVisible, setBottomSheetVisible] = useState(false);
@@ -121,6 +136,13 @@ const CalendarScreen = ({ navigation }) => {
   useEffect(() => {
     if (!userId) return;
     getGroupColors(userId).then(c => setGroupColors(c || {})).catch(() => {});
+  }, [userId]);
+
+  useEffect(() => {
+    if (!userId) return;
+    getGroupVisibility(userId)
+      .then(cfg => setEnabledGroupIds(cfg?.enabledGroupIds ? cfg.enabledGroupIds.map(String) : null))
+      .catch(() => {});
   }, [userId]);
 
   // Load month summary from cache when data or month changes
@@ -198,6 +220,61 @@ const CalendarScreen = ({ navigation }) => {
     navigateToMonth(d);
   }, [currentDate, navigateToMonth]);
 
+  // ── Group mode: derive active groups + load group schedules ───────────────────
+  // Visible groups respect the user's GroupVisibilityConfig (same config used by
+  // "Quem está também" / TodayCoworkersService). null config = all visible.
+  const visibleGroups = useMemo(() => {
+    const list = (userGroups || []).filter(g => g?.id);
+    if (!enabledGroupIds) return list;
+    return list.filter(g => enabledGroupIds.some(id => id === String(g.id)));
+  }, [userGroups, enabledGroupIds]);
+
+  // Quando visibleGroups carrega pela primeira vez, defaulta seleção para o primeiro grupo
+  useEffect(() => {
+    if (groupSelection !== null) return;
+    if (visibleGroups.length === 0) return;
+    setGroupSelection(new Set([String(visibleGroups[0].id)]));
+  }, [visibleGroups, groupSelection]);
+
+  const activeGroups = useMemo(() => {
+    if (groupSelection === 'all') return visibleGroups;
+    if (!(groupSelection instanceof Set) || groupSelection.size === 0) {
+      // ainda não inicializado ou vazio → mostra apenas o primeiro pra evitar carregar tudo
+      return visibleGroups.slice(0, 1);
+    }
+    return visibleGroups.filter(g => groupSelection.has(String(g.id)));
+  }, [visibleGroups, groupSelection]);
+
+  const viewMonthKey = useMemo(
+    () => `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}`,
+    [currentDate]
+  );
+
+  useEffect(() => {
+    if (calendarMode !== 'groups' || activeGroups.length === 0) return;
+    let cancelled = false;
+    setGroupLoading(true);
+    (async () => {
+      try {
+        const result = await GroupScheduleService.getMultipleMonths({
+          groups: activeGroups,
+          monthKey: viewMonthKey,
+          token,
+          userSource: user?.source,
+          currentUserId: userId,
+        });
+        await GroupScheduleService.enrichWithPendingOffers(result, userId);
+        await GroupScheduleService.enrichWithPendingSwaps(result, userId);  // CalendarScreen: Firestore-only (no OffersContext access here)
+        if (!cancelled) setGroupSchedules(result);
+      } catch (err) {
+        Logger.warn(`[CalendarScreen] group load: ${err?.message}`);
+      } finally {
+        if (!cancelled) setGroupLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [calendarMode, viewMonthKey, activeGroups.map(g => g.id).join(','), token, user?.source]);
+
   // ── Calculated data ───────────────────────────────────────────────────────────
   const today = useMemo(() => { const d = new Date(); d.setHours(0,0,0,0); return d; }, []);
 
@@ -228,6 +305,60 @@ const CalendarScreen = ({ navigation }) => {
     });
     return map;
   }, [daysWithShifts, currentDate]);
+
+  // Group mode: dots + vacancy flag per day + pending-offer-for-me flag.
+  // Derives ONLY from groups currently selected (activeGroups). This way the
+  // totalizers reflect the chip selection even if groupSchedules retains data
+  // from a previous selection load (e.g. all groups → one group).
+  const activeGroupIds = useMemo(
+    () => activeGroups.map(g => String(g.id)),
+    [activeGroups]
+  );
+
+  const groupTypesByDay = useMemo(() => {
+    const map = {}; // day → { types: Set, hasVacancy: bool, hasPendingForMe: bool }
+    for (const gid of activeGroupIds) {
+      const days = groupSchedules[gid]?.days || {};
+      for (const [dateStr, schedule] of Object.entries(days)) {
+        const day = Number(dateStr.slice(8, 10));
+        if (!map[day]) map[day] = { types: new Set(), hasVacancy: false, hasPendingForMe: false };
+        for (const slot of (schedule?.slots || [])) {
+          if ((slot.assignments?.length || 0) > 0) map[day].types.add(slot.label);
+          if ((slot.available || 0) > 0) map[day].hasVacancy = true;
+          for (const a of (slot.assignments || [])) {
+            if (a?.pendingOffer?.role === 'recipient') map[day].hasPendingForMe = true;
+          }
+        }
+      }
+    }
+    const out = {};
+    for (const [day, v] of Object.entries(map)) {
+      out[day] = { types: [...v.types], hasVacancy: v.hasVacancy, hasPendingForMe: v.hasPendingForMe };
+    }
+    return out;
+  }, [groupSchedules, activeGroupIds]);
+
+  // Group mode: month totals — cobertura (filled/capacity), vagas + dias com vaga.
+  // Same active-only iteration so chip filter changes the totalizers immediately.
+  const groupTotals = useMemo(() => {
+    let filled = 0;
+    let capacity = 0;
+    let openVacancies = 0;
+    const vacancyDays = new Set();
+    for (const gid of activeGroupIds) {
+      const days = groupSchedules[gid]?.days || {};
+      for (const [dateStr, schedule] of Object.entries(days)) {
+        for (const slot of (schedule?.slots || [])) {
+          filled += slot.filledCount || 0;
+          capacity += slot.capacity || 0;
+          openVacancies += slot.available || 0;
+          if ((slot.available || 0) > 0) vacancyDays.add(dateStr);
+        }
+      }
+    }
+    const coverage = capacity > 0 ? Math.round((filled / capacity) * 100) : null;
+    return { coverage, openVacancies, vacancyDays: vacancyDays.size };
+  }, [groupSchedules, activeGroupIds]);
 
   const stats = useMemo(() => {
     // Extras: sum per-shift positive (actual - planned) using the time entries
@@ -264,8 +395,17 @@ const CalendarScreen = ({ navigation }) => {
     const year = currentDate.getFullYear();
     const month = currentDate.getMonth() + 1;
     const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
-    const dayData = daysWithShifts?.find(d => d.date === dateStr);
     const selectedDate = new Date(year, month - 1, dayNum);
+    if (calendarMode === 'groups') {
+      if (navigation?.navigate) {
+        navigation.navigate('GroupDayTeam', {
+          date: selectedDate,
+          groupIds: activeGroups.map(g => String(g.id)),
+        });
+      }
+      return;
+    }
+    const dayData = daysWithShifts?.find(d => d.date === dateStr);
     if (navigation?.navigate) {
       navigation.navigate('DayView', { date: selectedDate });
     } else if (dayData?.shifts?.length) {
@@ -302,7 +442,9 @@ const CalendarScreen = ({ navigation }) => {
       for (const day of daysWithShifts) {
         if (!day.shifts) continue;
         const dateKey = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-${String(new Date(day.date + 'T00:00:00').getDate()).padStart(2, '0')}`;
-        const saved = await SecureStore.getItemAsync(`real_hours_${dateKey}`);
+        const uid = String(userId || '');
+        const saved = (uid && await SecureStore.getItemAsync(`real_hours_${uid}_${dateKey}`))
+          || await SecureStore.getItemAsync(`real_hours_${dateKey}`);
         if (!saved) continue;
         const realHours = JSON.parse(saved);
         day.shifts.forEach((shift, index) => {
@@ -396,18 +538,27 @@ const CalendarScreen = ({ navigation }) => {
 
     for (let day = 1; day <= daysInMonth; day++) {
       const isToday = day === todayDay;
-      const types = shiftTypesByDay[day] || [];
+      const inGroupMode = calendarMode === 'groups';
+      const groupEntry = inGroupMode ? (groupTypesByDay[day] || null) : null;
+      const types = inGroupMode ? (groupEntry?.types || []) : (shiftTypesByDay[day] || []);
       const hasShifts = types.length > 0;
+      const hasVacancy = inGroupMode && !!groupEntry?.hasVacancy;
+      const hasPendingForMe = inGroupMode && !!groupEntry?.hasPendingForMe;
       const colIndex = (firstDayOfWeek + day - 1) % 7;
       const isWeekend = colIndex === 0 || colIndex === 6;
+      const showSkeleton = (inGroupMode ? groupLoading : (loading || isNavigating));
 
       let cellBg = null;
       if (isToday) {
         cellBg = C.primary;
-      } else if (types.length >= 2) {
+      } else if (inGroupMode && hasVacancy) {
+        cellBg = C.warningSoft;
+      } else if (!inGroupMode && types.length >= 2) {
         cellBg = C.primary + '24';
-      } else if (types.length === 1) {
+      } else if (!inGroupMode && types.length === 1) {
         cellBg = (SHIFT_TYPE_COLOR[types[0]] || C.primary) + '20';
+      } else if (inGroupMode && hasShifts) {
+        cellBg = C.primary + '14';
       }
 
       cells.push(
@@ -420,7 +571,7 @@ const CalendarScreen = ({ navigation }) => {
             pressed && { opacity: 0.7 },
           ]}
         >
-          {loading || isNavigating
+          {showSkeleton
             ? <SkeletonBox width={22} height={14} style={{ borderRadius: 4 }} />
             : (
               <>
@@ -432,12 +583,18 @@ const CalendarScreen = ({ navigation }) => {
                 ]}>
                   {day}
                 </Text>
-                {hasShifts && (
+                {!inGroupMode && hasShifts && (
                   <View style={s.dayCellDots}>
                     {types.slice(0, 3).map((k, di) => (
                       <View key={di} style={[s.dot, { backgroundColor: isToday ? 'rgba(255,255,255,0.7)' : (SHIFT_TYPE_COLOR[k] || C.primary) }]} />
                     ))}
                   </View>
+                )}
+                {inGroupMode && hasVacancy && !isToday && (
+                  <View style={[s.vacancyBadge, { backgroundColor: C.warning }]} />
+                )}
+                {inGroupMode && hasPendingForMe && !isToday && (
+                  <View style={[s.pendingBadge, { backgroundColor: C.primary }]} />
                 )}
               </>
             )
@@ -621,20 +778,59 @@ const CalendarScreen = ({ navigation }) => {
         showsVerticalScrollIndicator={false}
       >
         {renderMonthHeader()}
+        <CalendarModePill mode={calendarMode} onChange={setCalendarMode} />
+        {calendarMode === 'groups' && (
+          <View style={s.groupPickerWrap}>
+            <Pressable
+              style={({ pressed }) => [s.groupPickerBtn, pressed && { opacity: 0.85 }]}
+              onPress={() => setGroupPickerOpen(true)}
+            >
+              <Ionicons name="people-outline" size={16} color={C.text.primary} />
+              <View style={{ flex: 1 }}>
+                <Text style={s.groupPickerLabel} numberOfLines={1}>
+                  {activeGroups[0]?.name || 'Selecione um grupo'}
+                </Text>
+                {!!activeGroups[0]?.institution?.name && (
+                  <Text style={s.groupPickerSub} numberOfLines={1}>
+                    {activeGroups[0].institution.name}
+                  </Text>
+                )}
+              </View>
+              <Ionicons name="chevron-down" size={16} color={C.text.tertiary} />
+            </Pressable>
+          </View>
+        )}
         {renderWeekdayRow()}
         {renderDayGrid()}
         {renderLegend()}
 
-        {renderSectionLabel('Resumo do mês', true)}
-        <View style={s.sectionPad}>
-          {renderSummaryCard()}
-        </View>
-
-        {nextShifts.length > 0 && (
+        {calendarMode === 'mine' ? (
           <>
-            {renderSectionLabel('Próximo', true)}
-            <View style={[s.sectionPad, { gap: 10 }]}>
-              {nextShifts.map((shift, i) => <View key={shift.id ?? i}>{renderNextShiftCard(shift)}</View>)}
+            {renderSectionLabel('Resumo do mês', true)}
+            <View style={s.sectionPad}>
+              {renderSummaryCard()}
+            </View>
+
+            {nextShifts.length > 0 && (
+              <>
+                {renderSectionLabel('Próximo', true)}
+                <View style={[s.sectionPad, { gap: 10 }]}>
+                  {nextShifts.map((shift, i) => <View key={shift.id ?? i}>{renderNextShiftCard(shift)}</View>)}
+                </View>
+              </>
+            )}
+          </>
+        ) : (
+          <>
+            {renderSectionLabel('Resumo dos grupos', true)}
+            <View style={s.sectionPad}>
+              <GroupSummaryCard
+                groups={activeGroups}
+                coverage={groupTotals.coverage}
+                openVacancies={groupTotals.openVacancies}
+                vacancyDays={groupTotals.vacancyDays}
+                loading={groupLoading}
+              />
             </View>
           </>
         )}
@@ -651,8 +847,15 @@ const CalendarScreen = ({ navigation }) => {
         onCede={(sh) => { setBottomSheetVisible(false); setCedeShift(sh); }}
         onTrocar={(sh) => { setBottomSheetVisible(false); setTrocarShift(sh); }}
       />
-      <CederFlowSheet visible={!!cedeShift} shift={cedeShift} onClose={() => setCedeShift(null)} />
-      <TrocarFlowSheet visible={!!trocarShift} shift={trocarShift} onClose={() => setTrocarShift(null)} />
+      {cedeShift && <CederFlowSheet key={`cede-${cedeShift.id}`} visible shift={cedeShift} onClose={() => setCedeShift(null)} />}
+      {trocarShift && <TrocarFlowSheet key={`trocar-${trocarShift.id}`} visible shift={trocarShift} onClose={() => setTrocarShift(null)} />}
+      <GroupPickerModal
+        visible={groupPickerOpen}
+        groups={visibleGroups}
+        selection={groupSelection}
+        onClose={() => setGroupPickerOpen(false)}
+        onConfirm={(next) => setGroupSelection(next)}
+      />
     </>
   );
 };
@@ -759,6 +962,69 @@ const makeStyles = (C) => {
       width: 4,
       height: 4,
       borderRadius: 2,
+    },
+    groupPickerWrap: {
+      paddingHorizontal: Spacing.screen,
+      paddingBottom: Spacing.sm,
+    },
+    groupPickerBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      paddingHorizontal: 14,
+      paddingVertical: 11,
+      borderRadius: 12,
+      backgroundColor: C.background.card,
+      borderWidth: 0.5,
+      borderColor: C.border.light,
+      ...Shadows.small,
+    },
+    groupPickerLabel: {
+      fontSize: 13,
+      fontFamily: Typography.fontFamily.bold,
+      color: C.text.primary,
+    },
+    groupPickerSub: {
+      fontSize: 11,
+      fontFamily: Typography.fontFamily.regular,
+      color: C.text.tertiary,
+      marginTop: 1,
+    },
+    loadingBanner: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      paddingHorizontal: Spacing.screen,
+      paddingVertical: 10,
+      marginHorizontal: Spacing.screen,
+      marginBottom: 8,
+      borderRadius: 10,
+      backgroundColor: C.background.secondary,
+      borderWidth: 0.5,
+      borderColor: C.border.light,
+    },
+    loadingBannerText: {
+      fontSize: 12,
+      fontFamily: Typography.fontFamily.semiBold,
+      color: C.text.secondary,
+      letterSpacing: 0.2,
+    },
+    vacancyBadge: {
+      position: 'absolute',
+      top: 4,
+      right: 4,
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+    },
+    pendingBadge: {
+      position: 'absolute',
+      bottom: 4,
+      right: 4,
+      width: 6,
+      height: 6,
+      borderRadius: 3,
     },
     // ── Legend ────────────────────────────────────────────────────────────────
     legend: {
