@@ -94,6 +94,125 @@ export function fromWebClient(item) {
 }
 
 /**
+ * webClient dynamic_schedule (from GET /groups/{gid}/calendar/daily/{date})
+ * → normalized DaySchedule with slots[] containing assignments + openings.
+ *
+ * Input shape (what PlantaoAPI returns under response.data):
+ *   {
+ *     dynamic_schedule: [
+ *       {
+ *         label: "T - 13h00 às 19h00",
+ *         vacancy: { id, slots: 2 } | null,
+ *         shifts: [{ id, user: { id, name, photo, council, ... }, transaction: { public_id, ... } }]
+ *       }, ...
+ *     ]
+ *   }
+ *
+ * Returns:
+ *   {
+ *     date, groupId, groupName, groupColor, institution: { id, name },
+ *     slots: [
+ *       {
+ *         label: "M" | "T" | "N",
+ *         labelRaw,                // original "T - 13h00 às 19h00"
+ *         time: "13h00 às 19h00",  // extracted suffix, or null
+ *         capacity,                // filled + openings
+ *         filledCount,
+ *         available,               // open positions
+ *         vacancyId,               // for "Pegar plantão" CTA
+ *         assignments: [
+ *           {
+ *             userId,              // person id as string ("123" — webClient numeric or aurora uid)
+ *             source: 'webClient', // resolver upgrades to 'aurora' later
+ *             person: { id, name, full_name, photo, council, role },
+ *             shiftId,             // PlantaoAPI shift id
+ *             transactionId,       // PlantaoAPI public_id
+ *           }
+ *         ],
+ *       }
+ *     ]
+ *   }
+ *
+ * Returns null if `dynamicSchedule` is missing or not an array.
+ */
+export function normalizeGroupDaySchedule(dateStr, group, dynamicSchedule) {
+  if (!Array.isArray(dynamicSchedule)) return null;
+  const g = normalizeGroup(group) || {
+    id: group?.id ? String(group.id) : null,
+    name: group?.name || '',
+    color: '#888888',
+    institution: { id: null, name: '', city: '', uf: '' },
+  };
+
+  const slots = dynamicSchedule.map(slot => {
+    const labelRaw = slot?.label || '';
+    const labelChar = labelRaw.charAt(0).toUpperCase();
+    const label = ['M', 'T', 'N', 'D'].includes(labelChar) ? labelChar : labelChar;
+    // Extract time after " - " or " – ". Tolerates dash variants.
+    let time = null;
+    const dashMatch = labelRaw.match(/\s[-–]\s(.+)$/);
+    if (dashMatch) time = dashMatch[1].trim();
+
+    const rawShifts = Array.isArray(slot?.shifts) ? slot.shifts : [];
+    const seenIds = new Set();
+    const assignments = rawShifts
+      .map(sh => {
+        if (!sh?.user?.id) return null;
+        const u = sh.user;
+        const id = String(u.id);
+        if (seenIds.has(id)) return null;
+        seenIds.add(id);
+        const councilStr = typeof u.council === 'string'
+          ? u.council
+          : (u.council?.state || u.council?.uf || '');
+        const transactionId = (sh.transaction?.public_id && typeof sh.transaction.public_id === 'string')
+          ? sh.transaction.public_id
+          : (typeof sh.transaction?.id === 'string' ? sh.transaction.id : null);
+        return {
+          userId: id,
+          source: 'webClient',
+          person: {
+            id,
+            name: typeof u.name === 'string' ? u.name : (u.full_name || ''),
+            full_name: typeof u.full_name === 'string' ? u.full_name : (u.name || ''),
+            photo: typeof u.photo === 'string' ? u.photo : null,
+            council: councilStr,
+            role: typeof u.role === 'string' ? u.role : '',
+          },
+          shiftId: sh.id != null ? String(sh.id) : null,
+          transactionId,
+        };
+      })
+      .filter(Boolean);
+
+    const available = slot?.vacancy?.slots ?? 0;
+    const vacancyId = slot?.vacancy?.id ?? null;
+    const filledCount = assignments.length;
+    const capacity = filledCount + available;
+
+    return {
+      label,
+      labelRaw,
+      time,
+      capacity,
+      filledCount,
+      available,
+      vacancyId,
+      assignments,
+    };
+  });
+
+  return {
+    date: dateStr,
+    groupId: g.id,
+    groupName: g.name,
+    groupColor: g.color,
+    institution: g.institution,
+    slots,
+  };
+}
+
+/**
  * Aurora Firestore opening doc → Opening
  */
 export function fromFirestore(doc) {
@@ -122,6 +241,7 @@ export function fromFirestore(doc) {
     restrictedToGroupId: doc.restrictedToGroupId || null,
     originShiftId: doc.originShiftId || null,
     originUserId: doc.originUserId || null,
+    originUserName: doc.originUserName || null,
     originShiftSnapshot: doc.originShiftSnapshot || null,
   };
 }

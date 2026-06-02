@@ -73,13 +73,20 @@ service cloud.firestore {
         allow read, write: if canAccess(userId);
       }
       match /months/{monthKey} {
-        allow read, write: if canAccess(userId);
+        // Month metadata: read open (Trocar precisa ler plantões de outros usuários
+        // do mesmo grupo); escrita restrita ao dono ou webClient anônimo.
+        allow read: if request.auth != null || request.auth == null;
+        allow write: if canAccess(userId);
 
         match /summary/{doc} {
           allow read, write: if canAccess(userId);
         }
+        // Shifts: leitura ampla para suportar swap/cede cross-user; escrita só
+        // o dono ou webClient anônimo (que ainda escreve para qualquer userId
+        // até o bridge de custom tokens).
         match /shifts/{shiftId} {
-          allow read, write: if canAccess(userId);
+          allow read: if request.auth != null || request.auth == null;
+          allow write: if canAccess(userId);
         }
         match /timeEntries/{shiftId} {
           allow read, write: if canAccess(userId);
@@ -142,6 +149,37 @@ service cloud.firestore {
     // Doctor A proposes swapping shiftA (theirs) for shiftB (target's).
     match /shiftSwaps/{swapId} {
       allow read, create, update, delete: if request.auth != null || request.auth == null;
+    }
+
+    // ── Swap auctions (Trocar aberto ao grupo) ───────────────────────────────
+    // Iniciador publica uma proposta de troca com preferências; membros do grupo
+    // fazem lances oferecendo um plantão deles compatível; o iniciador aceita um
+    // e a troca é efetivada. Mesmo modelo de permissão dos demais (até bridge
+    // de custom tokens). Leitura: ampla para qualquer membro do grupo descobrir.
+    match /swapAuctions/{auctionId} {
+      allow read, create, update, delete: if request.auth != null || request.auth == null;
+
+      match /bids/{bidId} {
+        allow read, create, update, delete: if request.auth != null || request.auth == null;
+      }
+    }
+
+    // ── Group schedules (Meus Grupos calendar view) ──────────────────────────
+    // Per-group, per-month normalized DaySchedule docs aggregating all members'
+    // assignments + vacancies. Written by client shadow-write after a webClient
+    // PlantaoAPI fetch; read by any member of the group. Same auth-or-fallback
+    // model used elsewhere until the custom token bridge lands.
+    match /groupSchedules/{groupId} {
+      allow read: if request.auth != null || request.auth == null;
+      allow write: if request.auth != null || request.auth == null;
+
+      match /months/{monthKey} {
+        allow read, write: if request.auth != null || request.auth == null;
+
+        match /days/{dateStr} {
+          allow read, write: if request.auth != null || request.auth == null;
+        }
+      }
     }
 
     // ── Deny everything else ─────────────────────────────────────────────────

@@ -7,6 +7,7 @@ import {
   RefreshControl,
   Animated,
   Image,
+  Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -74,8 +75,25 @@ const parseShiftTime = (timeStr) => {
 const HomeScreen = ({ navigation }) => {
   const { user } = useContext(AuthContext);
   const ctx = useShifts();
-  const { loading, loadedFor, loadMonthlyShifts, monthSummary: contextSummary, getMonthCache } = ctx;
-  const { unreadCount: avisosUnread, offersReceived, swapsReceived } = useOffers();
+  const { loading, loadedFor, loadMonthlyShifts, refreshShifts, monthSummary: contextSummary, getMonthCache } = ctx;
+  const { unreadCount: avisosUnread, offersReceived, swapsReceived, swapsSent, offersSent } = useOffers();
+
+  // Mapa de plantões com estado pendente — pra colorir/etiquetar o card condensado.
+  // Cobre: troca que iniciei (shiftA.id), troca proposta a mim (shiftB.id), cessão direcionada que enviei (shiftSnapshot.id).
+  // Cessão ao grupo já remove o shift do calendário, não precisa tratar aqui.
+  const pendingByShiftId = React.useMemo(() => {
+    const map = {};
+    (swapsSent || []).forEach(sw => {
+      if (sw?.status === 'pending' && sw.shiftA?.id) map[String(sw.shiftA.id)] = { kind: 'swap', role: 'initiator', counterparty: sw.targetUserName };
+    });
+    (swapsReceived || []).forEach(sw => {
+      if (sw?.status === 'pending' && sw.shiftB?.id) map[String(sw.shiftB.id)] = { kind: 'swap', role: 'target', counterparty: sw.initiatorUserName };
+    });
+    (offersSent || []).forEach(o => {
+      if (o?.status === 'pending' && o.shiftSnapshot?.id) map[String(o.shiftSnapshot.id)] = { kind: 'offer', role: 'sender', counterparty: o.toUserName };
+    });
+    return map;
+  }, [swapsSent, swapsReceived, offersSent]);
   const pendingActionable = offersReceived.length + swapsReceived.length;
   const badgeCount = Math.max(avisosUnread, pendingActionable);
 
@@ -111,9 +129,13 @@ const HomeScreen = ({ navigation }) => {
     getShiftValues().then(v => setSavedValues(v)).catch(() => {});
     getFullShiftConfig().then(cfg => setLoyaltyConfig(cfg)).catch(() => {});
 
+    // RESET antes de buscar — evita vazamento entre sessões (logout aurora →
+    // login webClient mantinha summary do anterior se o novo não tinha cache).
+    setCachedSummary(null);
+    setPrevSummary(null);
     const now = new Date();
     const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    LocalCache.getSummary(userId, monthKey).then(s => s && setCachedSummary(s)).catch(() => {});
+    LocalCache.getSummary(userId, monthKey).then(s => { if (s) setCachedSummary(s); }).catch(() => {});
 
     const prevDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const prevKey = `${prevDate.getFullYear()}-${String(prevDate.getMonth() + 1).padStart(2, '0')}`;
@@ -138,7 +160,12 @@ const HomeScreen = ({ navigation }) => {
   const handleRefresh = async () => {
     setRefreshing(true);
     const now = new Date();
-    await loadMonthlyShifts(now.getMonth() + 1, now.getFullYear(), true);
+    // refreshShifts: aurora = Firestore-only; webClient = monthly + só dias que mudaram.
+    if (refreshShifts) {
+      await refreshShifts(now.getMonth() + 1, now.getFullYear());
+    } else {
+      await loadMonthlyShifts(now.getMonth() + 1, now.getFullYear(), true);
+    }
     setRefreshing(false);
   };
 
@@ -169,6 +196,7 @@ const HomeScreen = ({ navigation }) => {
     .slice(0, 5);
 
   const openShiftBottomSheet = (shift) => {
+    // ShiftBottomSheet anota internamente via useOffers — só passa shifts crus.
     const dayData = (daysWithShifts || []).find(d => d.date === shift.date);
     setBsShifts(dayData?.shifts || [shift]);
     setBsDate(new Date(shift.date + 'T00:00:00'));
@@ -216,7 +244,7 @@ const HomeScreen = ({ navigation }) => {
                 </View>
               )}
             </Pressable>
-            <Pressable style={s.avatarWrap} onPress={() => navigation?.navigate?.('profile')}>
+            <Pressable style={s.avatarWrap} onPress={() => navigation?.navigate?.('Profile')}>
               {user?.photo ? (
                 <Image source={{ uri: user.photo }} style={s.avatarImg} />
               ) : (
@@ -314,6 +342,14 @@ const HomeScreen = ({ navigation }) => {
     const typeKey = shiftTypeKey(shift);
     const badgeColor = SHIFT_TYPE_COLOR[typeKey] || C.primary;
 
+    const pending = pendingByShiftId[String(shift.id)];
+    const accentColor = pending ? C.warning : groupColor;
+    const pendingTag = pending
+      ? (pending.kind === 'swap'
+          ? (pending.role === 'initiator' ? 'Em troca' : 'Pediram troca')
+          : 'Oferecido')
+      : null;
+
     const shiftMonthKey = (shift.date || '').slice(0, 7);
     const realEntry = timeEntriesByMonth?.[shiftMonthKey]?.[shift.id] || null;
     const monthlyHours = hoursReport?.standardHours || ((monthSummary?.totalScheduledMinutes || 0) / 60) || 0;
@@ -331,11 +367,15 @@ const HomeScreen = ({ navigation }) => {
     return (
       <Pressable
         key={index}
-        style={({ pressed }) => [s.shiftCard, pressed && { opacity: 0.85 }]}
+        style={({ pressed }) => [
+          s.shiftCard,
+          pending && { borderColor: C.warning + '55', borderWidth: 1 },
+          pressed && { opacity: 0.85 },
+        ]}
         onPress={() => openShiftBottomSheet(shift)}
       >
-        {/* Left accent bar — group color */}
-        <View style={[s.shiftAccentBar, { backgroundColor: groupColor }]} />
+        {/* Left accent bar — group color (ou amarelo se pendente) */}
+        <View style={[s.shiftAccentBar, { backgroundColor: accentColor }]} />
 
         {/* Date column */}
         <View style={s.shiftDateCol}>
@@ -347,11 +387,18 @@ const HomeScreen = ({ navigation }) => {
 
         {/* Info column */}
         <View style={s.shiftInfoCol}>
-          {/* Type badge + time */}
+          {/* Type badge + time + tag pendente */}
           <View style={s.shiftTopRow}>
             <View style={[s.shiftTypeBadge, { backgroundColor: badgeColor + '1f' }]}>
               <Text style={[s.shiftTypeBadgeText, { color: badgeColor }]}>{shiftLabel(shift)}</Text>
             </View>
+            {pendingTag && (
+              <View style={{ paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4, backgroundColor: C.warning + '22' }}>
+                <Text style={{ fontSize: 8.5, fontFamily: Typography.fontFamily.bold, color: C.warning, letterSpacing: 0.4, textTransform: 'uppercase' }}>
+                  {pendingTag}
+                </Text>
+              </View>
+            )}
             {timeStr ? (
               <Text style={s.shiftTime}>{timeStr}</Text>
             ) : null}
@@ -433,8 +480,10 @@ const HomeScreen = ({ navigation }) => {
     <View style={s.actionsGrid}>
       {renderActionTile({ icon: 'bar-chart',     label: 'Gráficos',   iconColor: C.primary,       iconBg: C.accentSoft,           onPress: () => navigation?.navigate?.('ChartsScreen') })}
       {renderActionTile({ icon: 'document-text', label: 'Relatórios', iconColor: C.money,         iconBg: C.moneySoft,            onPress: () => navigation?.navigate?.('Reports') })}
-      {renderActionTile({ icon: 'medkit',        label: 'Vagas',      iconColor: C.money,         iconBg: C.moneySoft,            onPress: () => navigation?.navigate?.(user?.source === 'aurora' ? 'OpeningsScreen' : 'NetworkVacanciesScreen') })}
-      {/* {renderActionTile({ icon: 'people',        label: 'Grupos',     iconColor: C.text.tertiary, iconBg: C.background.secondary, disabled: true })} */}
+      {/* [WEBCLIENT-BRIDGE] `|| user?.auroraOnlyMode` rotea o webClient migrado pro Openings aurora. */}
+      {renderActionTile({ icon: 'medkit',        label: 'Vagas',      iconColor: C.money,         iconBg: C.moneySoft,            onPress: () => navigation?.navigate?.((user?.source === 'aurora' || user?.auroraOnlyMode) ? 'OpeningsScreen' : 'NetworkVacanciesScreen') })}
+      {renderActionTile({ icon: 'swap-horizontal', label: 'Trocas',    iconColor: C.primary,       iconBg: C.accentSoft,           onPress: () => navigation?.navigate?.('TrocasAbertas') })}
+      {renderActionTile({ icon: 'time-outline',    label: 'Histórico',  iconColor: C.primary,       iconBg: C.accentSoft,           onPress: () => navigation?.navigate?.('Historico') })}
     </View>
   );
 
@@ -499,8 +548,8 @@ const HomeScreen = ({ navigation }) => {
         onCede={(sh) => { setBsVisible(false); setCedeShift(sh); }}
         onTrocar={(sh) => { setBsVisible(false); setTrocarShift(sh); }}
       />
-      <CederFlowSheet visible={!!cedeShift} shift={cedeShift} onClose={() => setCedeShift(null)} />
-      <TrocarFlowSheet visible={!!trocarShift} shift={trocarShift} onClose={() => setTrocarShift(null)} />
+      {cedeShift && <CederFlowSheet key={`cede-${cedeShift.id}`} visible shift={cedeShift} onClose={() => setCedeShift(null)} />}
+      {trocarShift && <TrocarFlowSheet key={`trocar-${trocarShift.id}`} visible shift={trocarShift} onClose={() => setTrocarShift(null)} />}
     </>
   );
 };

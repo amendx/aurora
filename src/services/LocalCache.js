@@ -42,6 +42,7 @@ const K = {
   groups:          (uid)      => `${P}_groups_${uid}`,
   groupMembers:    (uid, gid) => `${P}_grpmbr_${uid}_${gid}`,
   groupDaily:      (gid, dt)  => `${P}_grpdaily_${gid}_${dt}`,
+  groupSchedule:   (gid, mk)  => `${P}_grpsched_${gid}_${mk}`,
   persons:         (uid)      => `${P}_persons_${uid}`,
   financialConfig: (uid)      => `${P}_finconfig_${uid}`,
   migrationVersion:(uid)      => `${P}_migration_v_${uid}`,
@@ -250,6 +251,30 @@ const saveGroupDaily = (groupId, dateStr, dynamicSchedule) =>
     fetchedAt: new Date().toISOString(),
   });
 
+// ── Group Schedules (Meus Grupos calendar view) ───────────────────────────────
+// Per group, per month. Stores normalized DaySchedule[] (see OpeningNormalizer.normalizeGroupDaySchedule).
+// Wrapped in { syncedAt, days: { [dateStr]: DaySchedule } } so isMonthStale rules apply identically to user shifts.
+
+/**
+ * @param {string} groupId
+ * @param {string} monthKey  "YYYY-MM"
+ * @returns {Promise<{ syncedAt: string, days: Object }|null>}
+ */
+const getGroupSchedule = (groupId, monthKey) => _get(K.groupSchedule(groupId, monthKey));
+
+/**
+ * @param {string} groupId
+ * @param {string} monthKey  "YYYY-MM"
+ * @param {Object} days   - map { [dateStr]: DaySchedule }
+ * @param {string} [syncedAt] - ISO timestamp (defaults to now)
+ */
+const saveGroupSchedule = async (groupId, monthKey, days, syncedAt) => {
+  const ts = syncedAt || new Date().toISOString();
+  const result = await _set(K.groupSchedule(groupId, monthKey), { syncedAt: ts, days });
+  if (_fb) _fb.saveGroupScheduleMonth(groupId, monthKey, days, ts).catch(() => {});
+  return result;
+};
+
 // ── Group Members ─────────────────────────────────────────────────────────────
 
 /**
@@ -391,6 +416,21 @@ const setMigrationVersion = (userId, version) => _set(K.migrationVersion(userId)
  *   aurora_migration_v_{userId}     — re-running migration wastes time and is safe
  *                                     but unnecessary; preserve across logouts.
  */
+/**
+ * Wipe only this user's time entries (aurora_te_{uid}_*). Used to recover from
+ * the pre-fix bug where unscoped real_hours_ SecureStore keys leaked another
+ * user's entries into this user's LocalCache during migration.
+ */
+const clearTimeEntries = async (userId) => {
+  const allKeys = await AsyncStorage.getAllKeys();
+  const teKeys = allKeys.filter(k => k.startsWith(`${P}_te_${userId}_`));
+  if (teKeys.length > 0) {
+    await AsyncStorage.multiRemove(teKeys);
+    Logger.info(`LocalCache: cleared ${teKeys.length} time-entry keys for user ${userId}`);
+  }
+  return teKeys.length;
+};
+
 const clearUser = async (userId) => {
   const allKeys = await AsyncStorage.getAllKeys();
   // Keys that embed userId in the middle (e.g. aurora_shifts_{uid}_{mk})
@@ -518,6 +558,10 @@ const LocalCache = {
   getGroupDaily,
   saveGroupDaily,
 
+  // Group schedule (Meus Grupos: per groupId × monthKey)
+  getGroupSchedule,
+  saveGroupSchedule,
+
   // Group members
   getGroupMembers,
   saveGroupMembers,
@@ -553,6 +597,7 @@ const LocalCache = {
 
   // Utilities
   clearUser,
+  clearTimeEntries,
 
   // Staleness
   isMonthStale,

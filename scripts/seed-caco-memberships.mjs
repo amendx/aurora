@@ -28,6 +28,9 @@ const app = initializeApp({
 const db = getFirestore(app);
 
 const CACO   = 'ozQ81bIxlFfjqx8zCjEtJB9v3Dt1';
+// Raquel é webClient. Canonical id no Firestore = slug 'OV8BOzQo_JD-' (apiData.id
+// em /auth/login). O numérico '70917' usado em coworker listings resolve para
+// esse doc via users/OV8BOzQo_JD-.webClientUserId.
 const RAQUEL = 'OV8BOzQo_JD-';
 
 // Pull raquel's profile so we can mint a Person doc for her under caco's view.

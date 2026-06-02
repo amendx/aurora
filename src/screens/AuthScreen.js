@@ -16,6 +16,8 @@ import {
   Animated,
   Dimensions,
   useColorScheme,
+  Keyboard,
+  TouchableWithoutFeedback,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -55,7 +57,7 @@ const CRM_STATES = [
 const HEADINGS = [
   'Que bom ter você de volta',
   'Já estava ficando com saudade',
-  'Quanto tempo!',
+  'Quanto tempo, hein!',
   'Oi sumido(a) 👀',
   'Olha quem apareceu!',
   'Finalmente! A gente tava preocupado',
@@ -63,7 +65,7 @@ const HEADINGS = [
   'Vai um plantãozinho aí?',
   'Descansou? Tá na hora de trabalhar 😅',
   'Mais um plantão? Você é forte demais',
-  'Bem-vindo(a) de volta, herói(ína)',
+  'Bem-vindo(a) de volta, guerreiro(a)',
 ];
 
 function Orb({ x, y, size, color, delay }) {
@@ -281,7 +283,20 @@ export default function AuthScreen() {
         <KeyboardAvoidingView
           style={s.cardBody}
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          keyboardVerticalOffset={0}
         >
+          <ScrollView
+            // paddingBottom generoso (≈ altura do teclado iOS/Android) garante
+            // que SEMPRE há espaço pra rolar e revelar o botão, em qualquer
+            // tamanho de fonte (Dynamic Type / Android font scale).
+            contentContainerStyle={{ flexGrow: 1, paddingBottom: 280 }}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+            showsVerticalScrollIndicator={false}
+            bounces={true}
+            alwaysBounceVertical={true}
+            automaticallyAdjustKeyboardInsets={false}
+          >
           <Animated.View style={[s.cardContent, { opacity: contentOpacity }]}>
             {mode === 'login' ? (
               <LoginContent
@@ -321,6 +336,7 @@ export default function AuthScreen() {
               />
             )}
           </Animated.View>
+          </ScrollView>
         </KeyboardAvoidingView>
       </Animated.View>
 
@@ -348,6 +364,7 @@ export default function AuthScreen() {
 }
 
 function LoginContent({ heading, email, setEmail, password, setPassword, isPasswordVisible, setPasswordVisible, isLoading, isGoogleLoading, isEmailValid, canSubmit, handleLogin, handleGooglePress, onShowSignup, C, s }) {
+  const passwordRef = useRef(null);
   return (
     <View style={s.cardScroll}>
       <Text style={s.heading}>{heading}</Text>
@@ -366,6 +383,9 @@ function LoginContent({ heading, email, setEmail, password, setPassword, isPassw
             autoCapitalize="none"
             autoCorrect={false}
             autoComplete="email"
+            returnKeyType="next"
+            onSubmitEditing={() => passwordRef.current?.focus()}
+            blurOnSubmit={false}
           />
           {isEmailValid && <Ionicons name="checkmark-circle" size={18} color={C.primary} />}
         </View>
@@ -380,6 +400,7 @@ function LoginContent({ heading, email, setEmail, password, setPassword, isPassw
         </View>
         <View style={[s.fieldRow, password.length > 0 && s.fieldRowActive]}>
           <TextInput
+            ref={passwordRef}
             style={s.fieldInput}
             value={password}
             onChangeText={setPassword}
@@ -389,6 +410,8 @@ function LoginContent({ heading, email, setEmail, password, setPassword, isPassw
             autoCapitalize="none"
             autoCorrect={false}
             autoComplete="password"
+            returnKeyType="go"
+            onSubmitEditing={() => { if (canSubmit) handleLogin(); else Keyboard.dismiss(); }}
           />
           <Pressable onPress={() => setPasswordVisible(!isPasswordVisible)} hitSlop={8}>
             <Ionicons name={isPasswordVisible ? 'eye-outline' : 'eye-off-outline'} size={18} color={C.text.tertiary} />
@@ -613,7 +636,10 @@ const makeStyles = (C) => StyleSheet.create({
     flex: 1,
     backgroundColor: C.background.card,
   },
-  cardContent: { flex: 1 },
+  // Sem flex:1 — deixa o conteúdo ter altura natural pra que o ScrollView
+  // consiga rolar quando o teclado encolhe o viewport (independente do tamanho
+  // de fonte do sistema, iOS/Android Dynamic Type).
+  cardContent: {},
   cardScroll: { paddingHorizontal: 24, paddingTop: 8, paddingBottom: 16 },
 
   backRow: {

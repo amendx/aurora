@@ -40,6 +40,26 @@ const _deactivateFirebase = () => LocalCache.setFirebaseAdapter(null);
 
 const _isAurora = (userData) => userData?.source === 'aurora';
 
+// Reads persistent user-level flags from Firestore — these survive logout
+// (AsyncStorage gets cleared) so they must be re-hydrated from the cloud
+// on every login. Returns {} if Firestore unavailable or doc absent.
+const _loadFirestoreUserFlags = async (uid) => {
+  if (!db || !uid) return {};
+  try {
+    const { doc, getDoc } = await import('firebase/firestore');
+    const snap = await getDoc(doc(db, 'users', String(uid)));
+    if (!snap.exists()) return {};
+    const d = snap.data() || {};
+    return {
+      showOnboarding: d.showOnboarding,
+      auroraOnlyMode: d.auroraOnlyMode,
+      auroraSnapshotAt: d.auroraSnapshotAt,
+    };
+  } catch {
+    return {};
+  }
+};
+
 const AuthContext = createContext({});
 
 export const AuthProvider = ({ children }) => {
@@ -154,11 +174,14 @@ export const AuthProvider = ({ children }) => {
           const { userInfo: rawAuroraInfo, idToken } = aurora;
           const prevUserData = await StorageService.getUserData();
           const isFirstLogin = !prevUserData || prevUserData.id !== rawAuroraInfo.id;
+          const fsFlags = await _loadFirestoreUserFlags(rawAuroraInfo.id);
           const userInfo = {
             ...rawAuroraInfo,
-            showOnboarding: isFirstLogin
-              ? true
-              : (rawAuroraInfo.showOnboarding ?? prevUserData?.showOnboarding ?? false),
+            showOnboarding: fsFlags.showOnboarding != null
+              ? fsFlags.showOnboarding
+              : (isFirstLogin ? true : (rawAuroraInfo.showOnboarding ?? prevUserData?.showOnboarding ?? false)),
+            auroraOnlyMode: fsFlags.auroraOnlyMode === true,
+            auroraSnapshotAt: fsFlags.auroraSnapshotAt || null,
           };
           await StorageService.saveToken(idToken);
           await StorageService.saveUserData(userInfo);
@@ -209,10 +232,12 @@ export const AuthProvider = ({ children }) => {
       }
 
       const prevUserData = await StorageService.getUserData();
-      const isFirstLogin = !prevUserData || prevUserData.id !== (apiData.id || apiData.user_id);
+      const wcUid = apiData.id || apiData.user_id;
+      const isFirstLogin = !prevUserData || prevUserData.id !== wcUid;
+      const fsFlags = await _loadFirestoreUserFlags(wcUid);
 
       const userInfo = {
-        id: apiData.id || apiData.user_id,
+        id: wcUid,
         name: apiData.name || apiData.full_name || apiData.username || email,
         email: apiData.email || email,
         username: apiData.username || '',
@@ -221,7 +246,11 @@ export const AuthProvider = ({ children }) => {
         council: apiData.council || { id: '', state: '' },
         phone: apiData.phone || '',
         is_premium: apiData.is_premium || false,
-        showOnboarding: isFirstLogin ? true : (prevUserData?.showOnboarding ?? false),
+        showOnboarding: fsFlags.showOnboarding != null
+          ? fsFlags.showOnboarding
+          : (isFirstLogin ? true : (prevUserData?.showOnboarding ?? false)),
+        auroraOnlyMode: fsFlags.auroraOnlyMode === true,
+        auroraSnapshotAt: fsFlags.auroraSnapshotAt || null,
         // source intentionally absent — treated as 'webClient' everywhere
       };
 
@@ -283,11 +312,14 @@ export const AuthProvider = ({ children }) => {
 
       const prevUserData = await StorageService.getUserData();
       const isFirstLogin = !prevUserData || prevUserData.id !== rawUserInfo.id;
+      const fsFlags = await _loadFirestoreUserFlags(rawUserInfo.id);
       const userInfo = {
         ...rawUserInfo,
-        showOnboarding: isFirstLogin
-          ? true
-          : (rawUserInfo.showOnboarding ?? prevUserData?.showOnboarding ?? false),
+        showOnboarding: fsFlags.showOnboarding != null
+          ? fsFlags.showOnboarding
+          : (isFirstLogin ? true : (rawUserInfo.showOnboarding ?? prevUserData?.showOnboarding ?? false)),
+        auroraOnlyMode: fsFlags.auroraOnlyMode === true,
+        auroraSnapshotAt: fsFlags.auroraSnapshotAt || null,
       };
 
       await StorageService.saveToken(idToken);
@@ -384,6 +416,34 @@ export const AuthProvider = ({ children }) => {
     setUser(updated);
   };
 
+  // [WEBCLIENT-BRIDGE] — remove when webClient is fully retired.
+  // Toggles "aurora-only" mode for webClient users. When true, ShiftsContext
+  // reads only from Firestore (snapshot). When false, reads from PlantaoAPI.
+  // Persists to Firestore so it survives logout (AsyncStorage gets cleared).
+  const setAuroraOnlyMode = async (enabled, snapshotAt = null) => {
+    if (!user) return { success: false };
+    const updated = {
+      ...user,
+      auroraOnlyMode: !!enabled,
+      ...(snapshotAt ? { auroraSnapshotAt: snapshotAt } : {}),
+    };
+    await StorageService.saveUserData(updated).catch(() => {});
+    setUser(updated);
+    try {
+      const { doc, setDoc } = await import('firebase/firestore');
+      if (db && user.id) {
+        await setDoc(doc(db, 'users', String(user.id)), {
+          auroraOnlyMode: !!enabled,
+          ...(snapshotAt ? { auroraSnapshotAt: snapshotAt } : {}),
+        }, { merge: true });
+      }
+      return { success: true };
+    } catch (err) {
+      Logger.warn('setAuroraOnlyMode firestore write failed:', err?.message);
+      return { success: false, error: err?.message };
+    }
+  };
+
   const value = {
     isAuthenticated,
     user,
@@ -396,6 +456,7 @@ export const AuthProvider = ({ children }) => {
     updatePhoto,
     completeOnboarding,
     updateUser,
+    setAuroraOnlyMode,
   };
 
   return (

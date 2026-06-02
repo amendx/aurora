@@ -28,6 +28,9 @@ import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
+import { useOffers } from '../contexts/OffersContext';
+import { useOpenings } from '../contexts/OpeningsContext';
+import { useShifts } from '../contexts/ShiftsContext';
 import { calculateShiftValueWithBreakdown, calculateShiftValue, getFullShiftConfig, computeShiftValue } from '../utils/ShiftValueCalculator';
 import { formatMoney, formatMoneyCompact, formatHourlyRate } from '../utils/MoneyFormatter';
 import HoursEditModal from './HoursEditModal';
@@ -37,7 +40,6 @@ import { AuthContext } from '../context/AuthContext';
 import { getGroupVisibility } from '../utils/GroupVisibilityConfig';
 import { getGroupColors } from '../utils/GroupColorConfig';
 import TodayCoworkersService from '../services/TodayCoworkersService';
-import { useShifts } from '../contexts/ShiftsContext';
 
 // ── CoworkerAvatar ─────────────────────────────────────────────────────────────
 // Small circular avatar with photo or initials fallback.
@@ -128,10 +130,18 @@ const { height: SCREEN_HEIGHT, width: SCREEN_WIDTH } = Dimensions.get('window');
 const BOTTOM_SHEET_MAX_HEIGHT = SCREEN_HEIGHT * 0.82;
 const BOTTOM_SHEET_MIN_HEIGHT = 0;
 
+const _labelName = (l) => ({ M: 'Manhã', T: 'Tarde', N: 'Noite', D: 'Noite' }[l?.charAt?.(0)] || l || 'Plantão');
+const _fmtShift = (sh) => {
+  if (!sh) return '';
+  const iso = sh.startISO || sh.date;
+  const date = iso ? new Date(iso).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: 'short' }) : '';
+  return `${_labelName(sh.label)}${date ? ' · ' + date : ''}`;
+};
+
 const ShiftBottomSheet = ({
   isVisible,
   onClose,
-  shifts,
+  shifts: rawShifts,
   selectedDate,
   initialShiftIndex = 0,
   calculateShiftValue,
@@ -139,10 +149,80 @@ const ShiftBottomSheet = ({
   onNavigateToGroup,
   onCede,
   onTrocar,
+  // Os 3 abaixo são opcionais — se não passados, o sheet usa fallback interno
+  // que pega de OffersContext/OpeningsContext direto (centraliza a lógica).
+  onCancelCede,
+  onCancelSwap,
+  onCancelOffer,
 }) => {
   const C = useColors();
   const s = makeStyles(C);
   const insets = useSafeAreaInsets();
+
+  // ── Centralização: o sheet conhece estado pendente + cancela direto ──
+  // Anota cada shift com _pendingSwap/_pendingOffer baseado em OffersContext,
+  // e provê fallback de cancelamento (com Alert.alert) caso o caller não
+  // passe os props onCancel*. Assim Home e DayView só passam shifts crus.
+  const { swapsSent, swapsReceived, offersSent, cancelSwap, cancelOffer } = useOffers();
+  const { cancelCedeOpening } = useOpenings();
+  const { restoreShiftLocally } = useShifts();
+
+  const shifts = React.useMemo(() => {
+    if (!Array.isArray(rawShifts)) return rawShifts;
+    return rawShifts.map(sh => {
+      if (!sh?.id) return sh;
+      const id = String(sh.id);
+      // já anotado externamente (ex.: DayView _pendingCede virtual shift)? mantém.
+      if (sh._pendingCede || sh._pendingSwap || sh._pendingOffer) return sh;
+      const sentSwap = (swapsSent || []).find(sw => sw?.status === 'pending' && String(sw.shiftA?.id) === id);
+      if (sentSwap) return { ...sh, _pendingSwap: sentSwap, _pendingSwapRole: 'initiator' };
+      const recvSwap = (swapsReceived || []).find(sw => sw?.status === 'pending' && String(sw.shiftB?.id) === id);
+      if (recvSwap) return { ...sh, _pendingSwap: recvSwap, _pendingSwapRole: 'target' };
+      const sentOffer = (offersSent || []).find(o => o?.status === 'pending' && String(o.shiftSnapshot?.id) === id);
+      if (sentOffer) return { ...sh, _pendingOffer: sentOffer };
+      return sh;
+    });
+  }, [rawShifts, swapsSent, swapsReceived, offersSent]);
+
+  // Fallback handlers internos — usados quando o caller não passa props.
+  const _handleCancelCedeInternal = (opening) => {
+    Alert.alert(
+      'Cancelar cessão ao grupo?',
+      `${_fmtShift(opening?.originShiftSnapshot || opening)}${opening.group?.name ? ' · ' + opening.group.name : ''}\n\nO plantão volta para você.`,
+      [
+        { text: 'Voltar', style: 'cancel' },
+        { text: 'Cancelar cessão', style: 'destructive', onPress: async () => {
+          const r = await cancelCedeOpening(opening.id);
+          if (r?.success && r.restoredShift) restoreShiftLocally?.(r.restoredShift);
+        } },
+      ],
+    );
+  };
+  const _handleCancelSwapInternal = (swap) => {
+    Alert.alert(
+      'Cancelar troca?',
+      `${_fmtShift(swap?.shiftA)}\n  ⇄\n${_fmtShift(swap?.shiftB)}\n\n${swap?.targetUserName || 'O colega'} não poderá mais aceitar.`,
+      [
+        { text: 'Voltar', style: 'cancel' },
+        { text: 'Cancelar troca', style: 'destructive', onPress: () => cancelSwap(swap) },
+      ],
+    );
+  };
+  const _handleCancelOfferInternal = (offer) => {
+    Alert.alert(
+      'Cancelar cessão?',
+      `${_fmtShift(offer?.shiftSnapshot)}${offer?.shiftSnapshot?.group?.name ? ' · ' + offer.shiftSnapshot.group.name : ''}\n\nO plantão volta para você.`,
+      [
+        { text: 'Voltar', style: 'cancel' },
+        { text: 'Cancelar cessão', style: 'destructive', onPress: () => cancelOffer(offer) },
+      ],
+    );
+  };
+
+  // Resolve qual handler usar — prop externo (override) ou interno.
+  const handleCancelCede  = onCancelCede  || _handleCancelCedeInternal;
+  const handleCancelSwap  = onCancelSwap  || _handleCancelSwapInternal;
+  const handleCancelOffer = onCancelOffer || _handleCancelOfferInternal;
 
   const translateY = useRef(new Animated.Value(BOTTOM_SHEET_MAX_HEIGHT)).current;
   const backdropOpacity = useRef(new Animated.Value(0)).current;
@@ -185,7 +265,12 @@ const ShiftBottomSheet = ({
         }
 
         const dateKey = date.toISOString().split('T')[0];
-        const savedHours = await SecureStore.getItemAsync(`real_hours_${dateKey}`);
+        const uid = String(user?.id || '');
+        // Chave escopada por uid. Sem isso, horas reais vazavam entre sessões
+        // (ex.: caco salvava, raquel logava → migration herdava caco como dela).
+        // Fallback à chave legada (sem uid) só pra entradas anteriores ao fix.
+        const savedHours = (uid && await SecureStore.getItemAsync(`real_hours_${uid}_${dateKey}`))
+          || await SecureStore.getItemAsync(`real_hours_${dateKey}`);
 
         if (savedHours) {
           setRealHours(JSON.parse(savedHours));
@@ -222,7 +307,12 @@ const ShiftBottomSheet = ({
       }
 
       const dateKey = date.toISOString().split('T')[0];
-      await SecureStore.setItemAsync(`real_hours_${dateKey}`, JSON.stringify(newRealHours));
+      const uid = String(user?.id || '');
+      // Escopo por uid evita o vazamento cross-session. persistTimeEntries no
+      // ShiftsContext (via onHoursChanged) grava em LocalCache também escopado.
+      if (uid) {
+        await SecureStore.setItemAsync(`real_hours_${uid}_${dateKey}`, JSON.stringify(newRealHours));
+      }
       setRealHours(newRealHours);
 
       if (onHoursChanged) {
@@ -847,19 +937,146 @@ const ShiftBottomSheet = ({
           </View>
         </View>
 
-        {/* Received-shift attribution */}
-        {shift?.source === 'received' && (shift?.originUserName || shift?.originUserId) ? (
-          <>
-            <View style={s.hairlineRow} />
-            <View style={s.infoRow}>
-              <Ionicons name="enter-outline" size={15} color={C.text.secondary} />
-              <Text style={s.infoRowLabel}>Recebido de</Text>
-              <Text style={s.infoRowValue} numberOfLines={1}>
-                {shift.originUserName || `Doutor#${String(shift.originUserId).slice(0, 6)}`}
-              </Text>
-            </View>
-          </>
-        ) : null}
+        {/* Status pendente — quando há cessão/troca/oferta pendente, mostra
+            em destaque amarelo aqui no detalhe, espelhando o card colorido. */}
+        {(() => {
+          if (shift?._pendingCede) {
+            return (
+              <>
+                <View style={s.hairlineRow} />
+                <View style={[s.infoRow, { backgroundColor: C.warning + '14' }]}>
+                  <Ionicons name="hourglass-outline" size={15} color={C.warning} />
+                  <Text style={[s.infoRowLabel, { color: C.warning }]}>Status</Text>
+                  <Text style={[s.infoRowValue, { color: C.warning, fontFamily: Typography.fontFamily.bold }]} numberOfLines={2}>
+                    Cedido ao grupo · aguardando colega assumir
+                  </Text>
+                </View>
+              </>
+            );
+          }
+          if (shift?._pendingSwap) {
+            const isInit = shift._pendingSwapRole === 'initiator';
+            const A = shift._pendingSwap.shiftA || {};
+            const B = shift._pendingSwap.shiftB || {};
+            const myShift = isInit ? A : B;
+            const theirShift = isInit ? B : A;
+            const counterpartyName = isInit
+              ? (shift._pendingSwap.targetUserName || 'colega')
+              : (shift._pendingSwap.initiatorUserName || 'colega');
+            const lbl = (sh) => {
+              const labelChar = sh?.label?.charAt(0) || 'M';
+              const labelName = ({ M: 'Manhã', T: 'Tarde', N: 'Noite', D: 'Noite' }[labelChar] || labelChar);
+              const iso = sh?.startISO || sh?.date;
+              const date = iso ? new Date(iso).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: 'short' }) : '';
+              return `${labelName}${date ? ' · ' + date : ''}`;
+            };
+            return (
+              <>
+                <View style={s.hairlineRow} />
+                <View style={[s.infoRow, { backgroundColor: C.warning + '14', alignItems: 'flex-start' }]}>
+                  <Ionicons name="swap-horizontal" size={15} color={C.warning} style={{ marginTop: 2 }} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={[s.infoRowLabel, { color: C.warning }]}>
+                      {isInit ? 'Troca pendente com' : 'Pediram troca'}
+                    </Text>
+                    <Text style={[s.infoRowValue, { color: C.warning, fontFamily: Typography.fontFamily.bold, textAlign: 'left' }]} numberOfLines={2}>
+                      {counterpartyName}
+                    </Text>
+                    <Text style={{ fontSize: 11.5, color: C.text.secondary, marginTop: 4 }} numberOfLines={1}>
+                      Você dá: {lbl(myShift)}
+                    </Text>
+                    <Text style={{ fontSize: 11.5, color: C.text.secondary }} numberOfLines={1}>
+                      Recebe: {lbl(theirShift)}
+                    </Text>
+                  </View>
+                </View>
+              </>
+            );
+          }
+          if (shift?._pendingOffer) {
+            return (
+              <>
+                <View style={s.hairlineRow} />
+                <View style={[s.infoRow, { backgroundColor: C.warning + '14' }]}>
+                  <Ionicons name="paper-plane-outline" size={15} color={C.warning} />
+                  <Text style={[s.infoRowLabel, { color: C.warning }]}>Status</Text>
+                  <Text style={[s.infoRowValue, { color: C.warning, fontFamily: Typography.fontFamily.bold }]} numberOfLines={2}>
+                    Oferecido a {shift._pendingOffer.toUserName || 'colega'} · aguardando resposta
+                  </Text>
+                </View>
+              </>
+            );
+          }
+          return null;
+        })()}
+
+        {/* Origem do plantão — mostra info contextual só quando o plantão NÃO é
+            uma escala fixa. Mapeamento:
+              - source 'received'        → Recebido de <Nome>
+              - source 'aurora_opening'  → Origem: Vaga aberta (capturada)
+              - isManual === true        → Origem: Plantão manual
+              - source 'aurora' default  → (nada — é escala fixa)
+              - source 'webClient'/default→ (nada — vem do plantaoapi normalmente) */}
+        {(() => {
+          if (shift?.source === 'received' && (shift?.originUserName || shift?.originUserId)) {
+            return (
+              <>
+                <View style={s.hairlineRow} />
+                <View style={s.infoRow}>
+                  <Ionicons name="enter-outline" size={15} color={C.text.secondary} />
+                  <Text style={s.infoRowLabel}>Recebido de</Text>
+                  <Text style={s.infoRowValue} numberOfLines={1}>
+                    {shift.originUserName || `Doutor#${String(shift.originUserId).slice(0, 6)}`}
+                  </Text>
+                </View>
+                {shift?.isFixedSchedule_origin && (
+                  <View style={s.infoRow}>
+                    <Ionicons name="repeat-outline" size={15} color={C.text.secondary} />
+                    <Text style={s.infoRowLabel}>Origem</Text>
+                    <Text style={s.infoRowValue} numberOfLines={1}>Escala fixa</Text>
+                  </View>
+                )}
+              </>
+            );
+          }
+          if (shift?.isFixedSchedule) {
+            return (
+              <>
+                <View style={s.hairlineRow} />
+                <View style={s.infoRow}>
+                  <Ionicons name="repeat-outline" size={15} color={C.text.secondary} />
+                  <Text style={s.infoRowLabel}>Tipo</Text>
+                  <Text style={s.infoRowValue} numberOfLines={1}>Escala fixa</Text>
+                </View>
+              </>
+            );
+          }
+          if (shift?.source === 'aurora_opening') {
+            return (
+              <>
+                <View style={s.hairlineRow} />
+                <View style={s.infoRow}>
+                  <Ionicons name="megaphone-outline" size={15} color={C.text.secondary} />
+                  <Text style={s.infoRowLabel}>Origem</Text>
+                  <Text style={s.infoRowValue} numberOfLines={1}>Vaga aberta</Text>
+                </View>
+              </>
+            );
+          }
+          if (shift?.isManual) {
+            return (
+              <>
+                <View style={s.hairlineRow} />
+                <View style={s.infoRow}>
+                  <Ionicons name="create-outline" size={15} color={C.text.secondary} />
+                  <Text style={s.infoRowLabel}>Origem</Text>
+                  <Text style={s.infoRowValue} numberOfLines={1}>Plantão manual</Text>
+                </View>
+              </>
+            );
+          }
+          return null;
+        })()}
          {/* Horas registradas — A2 design */}
         {hasRegisteredHours ? (
           <>
@@ -1137,6 +1354,48 @@ const ShiftBottomSheet = ({
           <View style={{ marginBottom: 14 + insets.bottom }}>
             {(() => {
               const sh = shifts[currentShiftIdx];
+              // Estados pendentes substituem o par Ceder/Trocar por um único
+              // botão de Cancelar (amarelo/destrutivo). Cobre: cessão ao grupo,
+              // troca pendente que eu iniciei, e cessão direcionada que eu enviei.
+              if (sh?._pendingCede) {
+                return (
+                  <View style={s.transferActionsRow}>
+                    <TouchableOpacity
+                      style={[s.transferActionBtn, { borderColor: C.warning + '55', backgroundColor: C.warning + '14', flex: 1 }]}
+                      onPress={() => { onClose?.(); handleCancelCede(sh._pendingCede); }}
+                    >
+                      <Ionicons name="close-circle-outline" size={15} color={C.warning} />
+                      <Text style={[s.transferActionText, { color: C.warning }]}>Cancelar cessão</Text>
+                    </TouchableOpacity>
+                  </View>
+                );
+              }
+              if (sh?._pendingSwap && sh?._pendingSwapRole === 'initiator') {
+                return (
+                  <View style={s.transferActionsRow}>
+                    <TouchableOpacity
+                      style={[s.transferActionBtn, { borderColor: C.warning + '55', backgroundColor: C.warning + '14', flex: 1 }]}
+                      onPress={() => { onClose?.(); handleCancelSwap(sh._pendingSwap); }}
+                    >
+                      <Ionicons name="close-circle-outline" size={15} color={C.warning} />
+                      <Text style={[s.transferActionText, { color: C.warning }]}>Cancelar troca</Text>
+                    </TouchableOpacity>
+                  </View>
+                );
+              }
+              if (sh?._pendingOffer) {
+                return (
+                  <View style={s.transferActionsRow}>
+                    <TouchableOpacity
+                      style={[s.transferActionBtn, { borderColor: C.warning + '55', backgroundColor: C.warning + '14', flex: 1 }]}
+                      onPress={() => { onClose?.(); handleCancelOffer(sh._pendingOffer); }}
+                    >
+                      <Ionicons name="close-circle-outline" size={15} color={C.warning} />
+                      <Text style={[s.transferActionText, { color: C.warning }]}>Cancelar cessão</Text>
+                    </TouchableOpacity>
+                  </View>
+                );
+              }
               const startTs = sh?.startISO ? new Date(sh.startISO).getTime() : 0;
               const isAuroraOwned = sh?.isManual
                 || ['aurora', 'aurora_opening', 'received'].includes(sh?.source);
@@ -1155,25 +1414,32 @@ const ShiftBottomSheet = ({
                 </View>
               );
             })()}
-            <View style={s.ctaRow}>
-              {getHoursSummary(shifts[currentShiftIdx], currentShiftIdx) === null ? (
-                <TouchableOpacity style={[s.ctaButton, { flex: 1 }]} onPress={() => openHoursEditor(currentShiftIdx)}>
-                  <Ionicons name="add" size={18} color="#fff" />
-                  <Text style={s.ctaText}>Registrar horas</Text>
-                </TouchableOpacity>
-              ) : (
-                <>
-                  <TouchableOpacity style={[s.ctaButtonSecondary, { flex: 1 }]} onPress={() => confirmClearHours(currentShiftIdx)}>
-                    <Ionicons name="trash-outline" size={16} color={C.error} />
-                    <Text style={[s.ctaText, { color: C.error }]}>Apagar</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={[s.ctaButton, { flex: 2 }]} onPress={() => openHoursEditor(currentShiftIdx)}>
-                    <Ionicons name="create-outline" size={18} color="#fff" />
-                    <Text style={s.ctaText}>Editar horas</Text>
-                  </TouchableOpacity>
-                </>
-              )}
-            </View>
+            {(() => {
+              const sh = shifts[currentShiftIdx];
+              const isPending = !!(sh?._pendingCede || sh?._pendingSwap || sh?._pendingOffer);
+              if (isPending) return null;
+              return (
+                <View style={s.ctaRow}>
+                  {getHoursSummary(sh, currentShiftIdx) === null ? (
+                    <TouchableOpacity style={[s.ctaButton, { flex: 1 }]} onPress={() => openHoursEditor(currentShiftIdx)}>
+                      <Ionicons name="add" size={18} color="#fff" />
+                      <Text style={s.ctaText}>Registrar horas</Text>
+                    </TouchableOpacity>
+                  ) : (
+                    <>
+                      <TouchableOpacity style={[s.ctaButtonSecondary, { flex: 1 }]} onPress={() => confirmClearHours(currentShiftIdx)}>
+                        <Ionicons name="trash-outline" size={16} color={C.error} />
+                        <Text style={[s.ctaText, { color: C.error }]}>Apagar</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={[s.ctaButton, { flex: 2 }]} onPress={() => openHoursEditor(currentShiftIdx)}>
+                        <Ionicons name="create-outline" size={18} color="#fff" />
+                        <Text style={s.ctaText}>Editar horas</Text>
+                      </TouchableOpacity>
+                    </>
+                  )}
+                </View>
+              );
+            })()}
             {shifts[currentShiftIdx]?.isManual ? (
               <TouchableOpacity style={s.deleteShiftBtn} onPress={() => setDeleteConfirmVisible(true)}>
                 <Ionicons name="trash-outline" size={14} color={C.error} />

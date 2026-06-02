@@ -89,6 +89,8 @@
  * @property {boolean} is_premium
  * @property {'webClient'|'aurora'} [source]  absent = legacy WebClient user
  * @property {boolean} [showOnboarding]  true on first login/signup, false after onboarding completes
+ * @property {boolean} [auroraOnlyMode]  webClient users who opted in to read from Firestore snapshot only
+ * @property {string|null} [auroraSnapshotAt]  ISO timestamp of last snapshot from PlantaoAPI
  */
 
 export {};

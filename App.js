@@ -9,6 +9,7 @@ import { ShiftsProvider } from './src/contexts/ShiftsContext';
 import { GroupsProvider } from './src/contexts/GroupsContext';
 import { OpeningsProvider } from './src/contexts/OpeningsContext';
 import { OffersProvider } from './src/contexts/OffersContext';
+import { SwapAuctionsProvider } from './src/contexts/SwapAuctionsContext';
 import { ThemeProvider } from './src/contexts/ThemeContext';
 import AuthScreen from './src/screens/AuthScreen';
 import MainScreen from './src/screens/MainScreen';
@@ -68,8 +69,10 @@ export default function App() {
           <GroupsProvider>
             <OpeningsProvider>
               <OffersProvider>
-                <RootNavigator />
-                <DebugApiCounter />
+                <SwapAuctionsProvider>
+                  <RootNavigator />
+                  <DebugApiCounter />
+                </SwapAuctionsProvider>
               </OffersProvider>
             </OpeningsProvider>
           </GroupsProvider>
