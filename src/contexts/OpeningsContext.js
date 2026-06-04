@@ -1,13 +1,21 @@
-import React, { createContext, useContext, useState, useCallback, useRef } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { AuthContext } from '../context/AuthContext';
 import { useGroups } from './GroupsContext';
 import LocalCache from '../services/LocalCache';
 import FirebaseAdapter from '../services/firebase/FirebaseAdapter';
+import { db } from '../services/firebase/config';
+import { collection, query, where, onSnapshot } from '../services/firebase/fdb';
 import { fromFirestore } from '../utils/OpeningNormalizer';
 import NotificationService from '../services/NotificationService';
 import Logger from '../utils/Logger';
+import { makeLogEntry, appendLog, TRANSFER_LOG_TYPES } from '../utils/shiftTransferLog';
 
 const OpeningsContext = createContext();
+
+// Vaga FIXA de escala (admin_fixed): médicos demonstram interesse e o escalista
+// decide remotamente. Vaga AVULSA (admin_temp) é "primeiro a pegar leva" — vai
+// pelo claim normal, não por interesse. Cessão (cede) também é claim.
+export const isInterestVaga = (o) => o?.kind === 'admin_fixed';
 
 export const useOpenings = () => {
   const ctx = useContext(OpeningsContext);
@@ -28,6 +36,102 @@ export const OpeningsProvider = ({ children }) => {
 
   const _groupIds = () => Object.values(groups || {}).map(g => g.public_id || String(g.id)).filter(Boolean);
 
+  // groupIdsKey — string estável; previne resubscription do listener quando o
+  // `groups` muda de referência sem mudar o conteúdo (ver project_context_value_loops).
+  const groupIdsRef = useRef([]);
+  const groupIdsKey = useMemo(() => {
+    const ids = _groupIds();
+    groupIdsRef.current = ids;
+    return ids.slice().sort().join(',');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groups]);
+
+  // ── Realtime listeners (onSnapshot) ───────────────────────────────────────
+  // Substituem o `refresh` one-shot como fonte primária — quando uma vaga é
+  // criada/atualizada/cancelada (no aurora-web ou no próprio app), o usuário
+  // vê em ~ms. `refresh()` permanece como escape hatch (pull-to-refresh).
+  //
+  // Subscreve 2+ streams: 1 por chunk de até 10 groupIds (Firestore `in` limita)
+  // + 1 pra `originUserId == userId`. Buckets compartilhados (allDocs Map) são
+  // mesclados via debounce de 100ms num flush único pra evitar setState em rajada.
+  useEffect(() => {
+    if (!userId || !db) {
+      setOpenings([]); setMyCededOpenings([]);
+      return;
+    }
+    const groupIds = groupIdsRef.current;
+    const allDocs = new Map();         // openingId → raw doc (status='active' apenas)
+    let flushTimer = null;
+
+    const flush = () => {
+      const claimable = [];
+      const mine = [];
+      const seen = new Set();
+      for (const raw of allDocs.values()) {
+        const o = fromFirestore(raw);
+        if (!o?.id || seen.has(o.id)) continue;
+        seen.add(o.id);
+        if (o.originUserId && String(o.originUserId) === String(userId)) {
+          if (o.claimable) mine.push(o);
+        } else {
+          if (o.restrictedToGroupId && !groupIds.includes(String(o.restrictedToGroupId))) continue;
+          if (o.claimable) claimable.push(o);
+        }
+      }
+      claimable.sort((a, b) => (a.startISO || '').localeCompare(b.startISO || ''));
+      mine.sort((a, b) => (a.startISO || '').localeCompare(b.startISO || ''));
+      setOpenings(claimable);
+      setMyCededOpenings(mine);
+    };
+    const scheduleFlush = () => {
+      if (flushTimer) clearTimeout(flushTimer);
+      flushTimer = setTimeout(flush, 100);
+    };
+
+    const handler = (label) => (snap) => {
+      snap.docChanges().forEach(ch => {
+        const data = { id: ch.doc.id, ...ch.doc.data() };
+        if (ch.type === 'removed' || data.status !== 'active') {
+          allDocs.delete(ch.doc.id);
+        } else {
+          allDocs.set(ch.doc.id, data);
+        }
+      });
+      Logger.debug(`[OpeningsContext] ${label} snap size=${snap.size} totalBucket=${allDocs.size}`);
+      scheduleFlush();
+    };
+    const errHandler = (label) => (err) => {
+      Logger.warn(`[OpeningsContext] FAIL ${label}: ${err?.code || ''} ${err?.message}`);
+    };
+
+    const unsubs = [];
+    // Chunk de 10 (limite do operador `in` do Firestore)
+    for (let i = 0; i < groupIds.length; i += 10) {
+      const chunk = groupIds.slice(i, i + 10);
+      const q = query(
+        collection(db, 'openings'),
+        where('group.id', 'in', chunk),
+        where('status', '==', 'active'),
+      );
+      unsubs.push(onSnapshot(q, handler(`group[${i / 10}]`), errHandler(`group[${i / 10}]`)));
+    }
+    // Minhas cessões (qualquer grupo)
+    unsubs.push(onSnapshot(
+      query(
+        collection(db, 'openings'),
+        where('originUserId', '==', String(userId)),
+        where('status', '==', 'active'),
+      ),
+      handler('mine'),
+      errHandler('mine'),
+    ));
+
+    return () => {
+      if (flushTimer) clearTimeout(flushTimer);
+      unsubs.forEach(u => { try { u && u(); } catch {} });
+    };
+  }, [userId, groupIdsKey]);
+
   const refresh = useCallback(async (force = false) => {
     if (!userId || fetchingRef.current) return;
     const stale = await LocalCache.isOpeningsStale(userId);
@@ -45,25 +149,37 @@ export const OpeningsProvider = ({ children }) => {
       const claimable = [];
       const mine = [];
       const seen = new Set();
-
-      // Aurora pool: openings in Firestore, scoped to the user's groups.
       const groupIds = _groupIds();
-      if (groupIds.length) {
-        const docs = await FirebaseAdapter.getOpeningsForGroups(groupIds);
-        docs.forEach(d => {
-          const o = fromFirestore(d);
-          if (!o?.id || seen.has(o.id)) return;
-          seen.add(o.id);
-          // Own active cedes go to mine (separately surfaced for cancel UX).
-          if (o.originUserId && String(o.originUserId) === String(userId)) {
-            if (o.claimable) mine.push(o);
-            return;
-          }
-          // Enforce restrictedToGroupId scoping client-side as a defense in depth.
-          if (o.restrictedToGroupId && !groupIds.includes(String(o.restrictedToGroupId))) return;
-          claimable.push(o);
-        });
-      }
+
+      // Duas queries em paralelo:
+      //   1) Openings em meus grupos atuais — pra mostrar como vagas.
+      //   2) Openings que EU criei (qualquer grupo) — pra "minhas cessões",
+      //      mesmo se o grupo não está mais em groupIds (ex.: cedi um plantão
+      //      snapshotado de grupo webClient e depois entrei em aurora-only).
+      const [groupDocs, mineDocs] = await Promise.all([
+        groupIds.length
+          ? FirebaseAdapter.getOpeningsForGroups(groupIds)
+          : Promise.resolve([]),
+        FirebaseAdapter.getMyOpenings(userId),
+      ]);
+
+      // Minhas primeiro — entram em `mine` independente do grupo.
+      mineDocs.forEach(d => {
+        const o = fromFirestore(d);
+        if (!o?.id || seen.has(o.id)) return;
+        seen.add(o.id);
+        if (o.claimable) mine.push(o);
+      });
+
+      // Openings de colegas — vão pra `claimable` se ainda restritas ao grupo.
+      groupDocs.forEach(d => {
+        const o = fromFirestore(d);
+        if (!o?.id || seen.has(o.id)) return;
+        seen.add(o.id);
+        if (o.originUserId && String(o.originUserId) === String(userId)) return; // já em mine
+        if (o.restrictedToGroupId && !groupIds.includes(String(o.restrictedToGroupId))) return;
+        claimable.push(o);
+      });
 
       claimable.sort((a, b) => a.startISO.localeCompare(b.startISO));
       mine.sort((a, b) => a.startISO.localeCompare(b.startISO));
@@ -89,6 +205,9 @@ export const OpeningsProvider = ({ children }) => {
   const claimOpening = useCallback(async (openingId, slotId) => {
     const opening = openings.find(o => o.id === openingId);
     if (!opening || !opening.claimable) return { success: false, reason: 'not_claimable' };
+    // Vaga de escala (admin) não é "primeiro a pegar": o médico demonstra
+    // interesse e o escalista escolhe remotamente. Sem claim direto.
+    if (isInterestVaga(opening)) return { success: false, reason: 'interest_only' };
 
     try {
       await FirebaseAdapter.claimSlot(openingId, slotId, userId);
@@ -106,6 +225,16 @@ export const OpeningsProvider = ({ children }) => {
       // so the claimant gets the full shift shape (time string, etc.).
       const snapshot = opening.originShiftSnapshot || {};
       const newShiftId = `received_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      const nowIso = new Date().toISOString();
+      const transferLog = appendLog(snapshot?.transferLog, makeLogEntry({
+        type: TRANSFER_LOG_TYPES.CEDE,
+        fromUserId: opening.originUserId,
+        fromUserName: opening.originUserName || null,
+        toUserId: userId,
+        toUserName: user?.name || null,
+        actorUserId: userId,
+        openingId,
+      }));
       const shift = {
         ...snapshot,
         id: newShiftId,
@@ -113,6 +242,7 @@ export const OpeningsProvider = ({ children }) => {
         source: 'received',
         openingId,
         originUserId: opening.originUserId || null,
+        originUserName: opening.originUserName || null,
         originalShiftId: opening.originShiftId || null,
         label: opening.label || snapshot.label,
         startISO: opening.startISO || snapshot.startISO,
@@ -123,7 +253,10 @@ export const OpeningsProvider = ({ children }) => {
         group: opening.group || snapshot.group,
         estimatedValue: opening.estimatedValue ?? snapshot.estimatedValue ?? null,
         coworkers: [],
-        transferredAt: new Date().toISOString(),
+        transferredAt: nowIso,
+        transferLog,
+        cededAt: nowIso,
+        currentHolderUserId: String(userId),
         isManual: false,
       };
 
@@ -149,6 +282,57 @@ export const OpeningsProvider = ({ children }) => {
       return { success: false, reason: err?.message };
     }
   }, [openings, userId]);
+
+  /**
+   * Demonstrar interesse numa vaga de escala (admin). O escalista escolhe
+   * remotamente entre os interessados — não há claim direto aqui.
+   */
+  const registerInterest = useCallback(async (openingId, person) => {
+    const interest = {
+      userId: String(userId),
+      name: person?.name || person?.full_name || 'Colega',
+      council: person?.council || '',
+      photo: person?.photo || null,
+      at: new Date().toISOString(),
+    };
+    try {
+      await FirebaseAdapter.addOpeningInterest(openingId, interest);
+      setOpenings(prev => prev.map(o => {
+        if (o.id !== openingId) return o;
+        if ((o.interests || []).some(i => String(i.userId) === String(userId))) return o;
+        return { ...o, interests: [...(o.interests || []), interest] };
+      }));
+      // Avisa quem abriu a vaga (escalista) que há um interessado.
+      const opening = openings.find(o => o.id === openingId);
+      const creatorId = opening?.createdBy || opening?.originUserId;
+      if (creatorId) {
+        NotificationService.notify(creatorId, 'ceder_in_my_group', {
+          title: 'Novo interessado na vaga',
+          body: `${interest.name} quer ${opening.group?.name || 'o plantão'}`,
+          payload: { openingId },
+        }).catch(() => {});
+      }
+      return { success: true };
+    } catch (err) {
+      Logger.error(`[OpeningsContext] registerInterest: ${err?.message}`);
+      return { success: false };
+    }
+  }, [openings, userId]);
+
+  const withdrawInterest = useCallback(async (openingId) => {
+    try {
+      await FirebaseAdapter.removeOpeningInterest(openingId, userId);
+      setOpenings(prev => prev.map(o =>
+        o.id === openingId
+          ? { ...o, interests: (o.interests || []).filter(i => String(i.userId) !== String(userId)) }
+          : o
+      ));
+      return { success: true };
+    } catch (err) {
+      Logger.error(`[OpeningsContext] withdrawInterest: ${err?.message}`);
+      return { success: false };
+    }
+  }, [userId]);
 
   /**
    * Cancel a cede-backed opening that THIS user created, and restore the
@@ -183,7 +367,7 @@ export const OpeningsProvider = ({ children }) => {
   }, [openings, myCededOpenings, userId]);
 
   return (
-    <OpeningsContext.Provider value={{ openings, myCededOpenings, loading, error, refresh, claimOpening, cancelCedeOpening }}>
+    <OpeningsContext.Provider value={{ openings, myCededOpenings, loading, error, refresh, claimOpening, cancelCedeOpening, registerInterest, withdrawInterest }}>
       {children}
     </OpeningsContext.Provider>
   );

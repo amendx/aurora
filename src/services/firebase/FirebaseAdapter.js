@@ -25,9 +25,10 @@
  *   users/{userId}/months/{YYYY-MM}/timeEntries/{shiftId}   { ...TimeEntry }
  */
 
-import { doc, setDoc, writeBatch } from 'firebase/firestore';
+import { doc, setDoc, writeBatch } from './fdb';
 import { db } from './config';
 import Logger from '../../utils/Logger';
+import { makeLogEntry, appendLog, TRANSFER_LOG_TYPES } from '../../utils/shiftTransferLog';
 
 // ── Document reference helpers ────────────────────────────────────────────────
 
@@ -301,6 +302,11 @@ const FirebaseAdapter = {
   saveGroupColors: (userId, payload) =>
     _write(_sub(userId, 'settings', 'groupColors'), { ...payload }),
 
+  // Aura (IA do Aurora): persiste disponibilidade (bloqueios/folgas/regras).
+  /** users/{userId}/settings/availability */
+  saveAvailabilityConfig: (userId, config) =>
+    _write(_sub(userId, 'settings', 'availability'), { ...config }),
+
   saveTodayCoworkers: (userId, shiftId, data) =>
     _write(_sub(userId, 'todayCoworkers', String(shiftId)), { ...data }),
 
@@ -354,19 +360,24 @@ const FirebaseAdapter = {
     if (!db || !group?.id || !monthKey || !currentUserId) return {};
     const groupId = String(group.id);
     try {
-      const { collection, doc: _doc, getDoc, getDocs } = await import('firebase/firestore');
+      const { collection, doc: _doc, getDoc, getDocs } = await import('./fdb');
 
       // 1. members of the group (from current user's view)
       const memSnap = await getDoc(_doc(db, 'users', String(currentUserId), 'groupMembers', groupId));
       const memData = memSnap.exists() ? memSnap.data() : null;
-      const rawIds = Array.isArray(memData?.memberIds) ? memData.memberIds : [];
-      // include current user even if missing from list
-      const memberIds = [...new Set([...rawIds.map(String), String(currentUserId)])];
       const personsByUserId = {};
       for (const m of (memData?.members || [])) {
         const uid = String(m.id || m.userId || '');
         if (uid) personsByUserId[uid] = m;
       }
+      // Drop admin/manager (canHaveShifts=false): nunca recebem escala — pular
+      // a leitura paralela evita 1 round-trip por admin sem retorno.
+      const rawIds = Array.isArray(memData?.memberIds) ? memData.memberIds : [];
+      const memberIds = [...new Set([...rawIds.map(String), String(currentUserId)])]
+        .filter(uid => {
+          const p = personsByUserId[uid];
+          return !p || (p.memberType !== 'manager' && p.canHaveShifts !== false);
+        });
 
       if (memberIds.length === 0) return {};
 
@@ -454,7 +465,7 @@ const FirebaseAdapter = {
     const empty = { days: {}, syncedAt: null, hasData: false };
     if (!db || !groupId || !monthKey) return empty;
     try {
-      const { collection, doc: _doc, getDoc, getDocs } = await import('firebase/firestore');
+      const { collection, doc: _doc, getDoc, getDocs } = await import('./fdb');
       const [metaRes, daysRes] = await Promise.allSettled([
         getDoc(_doc(db, 'groupSchedules', String(groupId), 'months', monthKey)),
         getDocs(collection(db, 'groupSchedules', String(groupId), 'months', monthKey, 'days')),
@@ -504,18 +515,69 @@ const FirebaseAdapter = {
   },
 
   /**
-   * Atomically claim a slot in an Aurora opening.
-   * Uses setDoc with merge on the specific slot document path.
-   * openings/{openingId}/slots/{slotId}
+   * Claim a slot in an Aurora opening by flipping it inside the parent doc's
+   * `slots` array (read-modify-write), then recomputing availableSlots/claimable/
+   * status. This is what makes the opening leave the Vagas + "vagas criadas"
+   * lists once full — they filter on the parent's status == 'active' / claimable.
+   * Slots live on the parent doc (openings/{id}.slots[]), NOT in a subcollection.
+   * Mirrors the web `assignInterest` Cloud Function.
    */
-  claimSlot: (openingId, slotId, userId) => {
+  claimSlot: async (openingId, slotId, userId) => {
     if (!db || !openingId || !slotId || !userId) return Promise.resolve();
-    const ref = doc(db, 'openings', String(openingId), 'slots', String(slotId));
-    return _write(ref, {
-      status: 'claimed',
-      claimedByUserId: String(userId),
-      claimedAt: new Date().toISOString(),
-    });
+    try {
+      const { getDoc } = await import('./fdb');
+      const ref = doc(db, 'openings', String(openingId));
+      const snap = await getDoc(ref);
+      if (!snap.exists()) return;
+      const data = snap.data() || {};
+      const nowIso = new Date().toISOString();
+      const slots = (Array.isArray(data.slots) ? data.slots : []).map(s =>
+        String(s.slotId) === String(slotId) && s.status === 'open'
+          ? { ...s, status: 'claimed', claimedByUserId: String(userId), claimedAt: nowIso }
+          : s,
+      );
+      const available = slots.filter(s => s.status === 'open').length;
+      return _write(ref, {
+        slots,
+        availableSlots: available,
+        claimable: available > 0,
+        // Don't resurrect a cancelled vaga; close it when no open slots remain.
+        status: data.status === 'cancelled' ? 'cancelled' : (available > 0 ? 'active' : 'claimed'),
+        updatedAt: nowIso,
+      });
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] claimSlot: ${err.message}`);
+    }
+  },
+
+  /**
+   * Vaga de escala: registra/remove interesse de um médico numa opening.
+   * Interests vivem no array `interests` do doc da opening; o escalista
+   * escolhe remotamente entre os interessados.
+   */
+  addOpeningInterest: async (openingId, interest) => {
+    if (!db || !openingId || !interest?.userId) return Promise.resolve();
+    try {
+      const { arrayUnion } = await import('./fdb');
+      const ref = doc(db, 'openings', String(openingId));
+      return _write(ref, { interests: arrayUnion(interest), updatedAt: new Date().toISOString() });
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] addOpeningInterest: ${err.message}`);
+    }
+  },
+
+  removeOpeningInterest: async (openingId, userId) => {
+    if (!db || !openingId || !userId) return Promise.resolve();
+    try {
+      const { getDoc } = await import('./fdb');
+      const ref = doc(db, 'openings', String(openingId));
+      const snap = await getDoc(ref);
+      const list = (snap.exists() ? snap.data()?.interests : []) || [];
+      const next = list.filter(i => String(i.userId) !== String(userId));
+      return _write(ref, { interests: next, updatedAt: new Date().toISOString() });
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] removeOpeningInterest: ${err.message}`);
+    }
   },
 
   /**
@@ -526,7 +588,7 @@ const FirebaseAdapter = {
   getOpeningsForGroups: async (groupIds) => {
     if (!db || !groupIds?.length) return [];
     try {
-      const { collection, query, where, getDocs } = await import('firebase/firestore');
+      const { collection, query, where, getDocs } = await import('./fdb');
       const chunks = [];
       for (let i = 0; i < groupIds.length; i += 10) {
         chunks.push(groupIds.slice(i, i + 10));
@@ -544,6 +606,29 @@ const FirebaseAdapter = {
       return results;
     } catch (err) {
       Logger.warn(`[FirebaseAdapter] getOpeningsForGroups: ${err.message}`);
+      return [];
+    }
+  },
+
+  // Cessões que EU criei — query por originUserId, sem filtro de grupo.
+  // Necessário porque o user pode ter cedido um plantão de grupo webClient
+  // que não está mais em groupIds dele (modo aurora-only). Sem essa query
+  // separada, ele não veria as próprias cessões pra cancelar.
+  getMyOpenings: async (userId) => {
+    if (!db || !userId) return [];
+    try {
+      const { collection, query, where, getDocs } = await import('./fdb');
+      const q = query(
+        collection(db, 'openings'),
+        where('originUserId', '==', String(userId)),
+        where('status', '==', 'active'),
+      );
+      const snap = await getDocs(q);
+      const results = [];
+      snap.forEach(d => results.push({ id: d.id, ...d.data() }));
+      return results;
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] getMyOpenings: ${err.message}`);
       return [];
     }
   },
@@ -580,7 +665,7 @@ const FirebaseAdapter = {
   getPendingOffersForUser: async (userId) => {
     if (!db || !userId) return [];
     try {
-      const { collection, query, where, getDocs } = await import('firebase/firestore');
+      const { collection, query, where, getDocs } = await import('./fdb');
       const uid = String(userId);
       const [snapTo, snapFrom] = await Promise.all([
         getDocs(query(collection(db, 'shiftOffers'), where('toUserId', '==', uid))),
@@ -635,7 +720,7 @@ const FirebaseAdapter = {
   getHistoryForUser: async (userId) => {
     if (!db || !userId) return [];
     try {
-      const { collection, query, where, getDocs } = await import('firebase/firestore');
+      const { collection, query, where, getDocs } = await import('./fdb');
       const uid = String(userId);
       const [offFrom, offTo, swInit, swTarg] = await Promise.all([
         getDocs(query(collection(db, 'shiftOffers'), where('fromUserId', '==', uid))),
@@ -670,7 +755,7 @@ const FirebaseAdapter = {
   getPendingSwapsForUser: async (userId) => {
     if (!db || !userId) return [];
     try {
-      const { collection, query, where, getDocs } = await import('firebase/firestore');
+      const { collection, query, where, getDocs } = await import('./fdb');
       const uid = String(userId);
       const [snapTarget, snapInitiator] = await Promise.all([
         getDocs(query(collection(db, 'shiftSwaps'), where('targetUserId', '==', uid))),
@@ -696,6 +781,35 @@ const FirebaseAdapter = {
   },
 
   /**
+   * Bulk check: pra cada uid recebido, retorna Set<string> com os que são
+   * aurora-capable (source==='aurora' OU auroraOnlyMode===true em users/{uid}).
+   * Usado pelo TrocarFlowSheet pra desabilitar colegas que ainda não migraram —
+   * trocas exigem que o target consiga ler shiftSwaps do Firestore.
+   */
+  getAuroraCapableUsers: async (uids) => {
+    if (!db || !Array.isArray(uids) || uids.length === 0) return new Set();
+    try {
+      const { doc, getDoc } = await import('./fdb');
+      const unique = Array.from(new Set(uids.map(u => String(u)).filter(Boolean)));
+      const results = await Promise.all(
+        unique.map(uid =>
+          getDoc(doc(db, 'users', uid))
+            .then(snap => {
+              if (!snap.exists()) return null;
+              const data = snap.data() || {};
+              return (data.source === 'aurora' || data.auroraOnlyMode === true) ? uid : null;
+            })
+            .catch(() => null)
+        )
+      );
+      return new Set(results.filter(Boolean));
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] getAuroraCapableUsers: ${err.message}`);
+      return new Set();
+    }
+  },
+
+  /**
    * Hydrate aurora groups + memberships + persons (coworkers) from Firestore.
    * Aurora users have no PlantaoAPI source for any of these — the data lives
    * only in users/{uid}/groups, users/{uid}/groupMembers and users/{uid}/persons.
@@ -709,7 +823,7 @@ const FirebaseAdapter = {
    */
   fetchAuroraGroupMembers: async (userId) => {
     if (!db || !userId) return { groups: [], membersByGroupId: {}, persons: {} };
-    const { collection, getDocs } = await import('firebase/firestore');
+    const { collection, getDocs } = await import('./fdb');
     const [grpSnap, memSnap, perSnap] = await Promise.allSettled([
       getDocs(collection(db, 'users', String(userId), 'groups')),
       getDocs(collection(db, 'users', String(userId), 'groupMembers')),
@@ -752,7 +866,7 @@ const FirebaseAdapter = {
   fetchAuroraMonth: async (userId, monthKey) => {
     const empty = { manualShifts: [], regularShifts: [], manualAuthoritative: false, regularAuthoritative: false };
     if (!db || !userId || !monthKey) return empty;
-    const { collection, getDocs } = await import('firebase/firestore');
+    const { collection, getDocs } = await import('./fdb');
     // allSettled — one path failing (e.g. permission gap) must not zero out the other.
     const [manualRes, regularRes] = await Promise.allSettled([
       getDocs(collection(db, 'users', String(userId), 'manualShifts')),
@@ -791,7 +905,7 @@ const FirebaseAdapter = {
     const empty = { daysWithShifts: [], syncedAt: null, summary: null, hasData: false };
     if (!db || !userId || !monthKey) return empty;
     try {
-      const { collection, doc: _doc, getDoc, getDocs } = await import('firebase/firestore');
+      const { collection, doc: _doc, getDoc, getDocs } = await import('./fdb');
       const [metaRes, shiftsRes, summaryRes] = await Promise.allSettled([
         getDoc(_doc(db, 'users', String(userId), 'months', monthKey)),
         getDocs(collection(db, 'users', String(userId), 'months', monthKey, 'shifts')),
@@ -846,7 +960,7 @@ const FirebaseAdapter = {
       return [];
     }
     try {
-      const { collection, getDocs } = await import('firebase/firestore');
+      const { collection, getDocs } = await import('./fdb');
       const out = [];
       for (const mk of monthKeys) {
         const path = `users/${String(userId)}/months/${String(mk)}/shifts`;
@@ -869,7 +983,7 @@ const FirebaseAdapter = {
   deleteUserShift: async (userId, monthKey, shiftId) => {
     if (!db || !userId || !monthKey || !shiftId) return Promise.resolve();
     try {
-      const { deleteDoc } = await import('firebase/firestore');
+      const { deleteDoc } = await import('./fdb');
       await deleteDoc(_sub(userId, 'months', monthKey, 'shifts', String(shiftId)));
     } catch (err) {
       Logger.warn(`[FirebaseAdapter] deleteUserShift: ${err.message}`);
@@ -944,19 +1058,36 @@ const FirebaseAdapter = {
       batch.delete(fromRef);
       // Origin may have lived in manualShifts (aurora-created). delete is a no-op when absent.
       batch.delete(fromManualRef);
+      // Escalista vs Efetivo (ver Glossário em models/index.js):
+      //  - Plantão FIXO: escalistaUserId NÃO muda (dono original da escala).
+      //    Só o currentHolderUserId vai pro destinatário (= toUserId).
+      //  - Plantão NÃO-fixo: ambos (escalista + currentHolder) vão pro destinatário.
+      const isFixed = shift?.isFixedSchedule === true;
+      const originalEscalista = shift?.escalistaUserId || String(fromUserId);
+      const nextLog = appendLog(shift?.transferLog, makeLogEntry({
+        type: TRANSFER_LOG_TYPES.CEDE,
+        fromUserId, fromUserName: opts.fromUserName || shift?.originUserName || null,
+        toUserId,   toUserName:   opts.toUserName || null,
+        actorUserId: opts.actorUserId || toUserId,
+        openingId: opts.openingId,
+      }));
       batch.set(toRef, {
         ..._stripShift(shift),
         id: newId,
         userId: toUserId,
+        currentHolderUserId: String(toUserId),
+        escalistaUserId: isFixed ? originalEscalista : String(toUserId),
         source: 'received',
-        // O destinatário não herda a recorrência da escala fixa — apenas registra
-        // que a origem era fixa, pra mostrar isso no card.
+        // Destinatário não herda a flag isFixedSchedule do shift transferido
+        // (só o escalista original "é" fixo). Registra que a ORIGEM era fixa.
         isFixedSchedule: false,
-        isFixedSchedule_origin: shift?.isFixedSchedule === true,
+        isFixedSchedule_origin: isFixed,
         originUserId: String(fromUserId),
         originUserName: opts.fromUserName || shift?.originUserName || null,
         originalShiftId: String(shift.id),
         transferredAt: now,
+        transferLog: nextLog,
+        cededAt: now,
         _updatedAt: now,
       });
       await batch.commit();
@@ -988,18 +1119,42 @@ const FirebaseAdapter = {
       batch.delete(_sub(uidA, 'manualShifts', String(shiftA.id)));
       batch.delete(_sub(uidB, 'manualShifts', String(shiftB.id)));
 
+      // Escalista vs Efetivo — mesma regra do transferShift, agora dos 2 lados.
+      const isFixedA = shiftA?.isFixedSchedule === true;
+      const isFixedB = shiftB?.isFixedSchedule === true;
+      const escA = shiftA?.escalistaUserId || String(uidA);
+      const escB = shiftB?.escalistaUserId || String(uidB);
+
+      const logA = appendLog(shiftA?.transferLog, makeLogEntry({
+        type: TRANSFER_LOG_TYPES.SWAP,
+        fromUserId: uidA, fromUserName: opts.uidAName || shiftA?.originUserName || null,
+        toUserId: uidB,   toUserName:   opts.uidBName || null,
+        actorUserId: opts.actorUserId || uidB,
+      }));
+      const logB = appendLog(shiftB?.transferLog, makeLogEntry({
+        type: TRANSFER_LOG_TYPES.SWAP,
+        fromUserId: uidB, fromUserName: opts.uidBName || shiftB?.originUserName || null,
+        toUserId: uidA,   toUserName:   opts.uidAName || null,
+        actorUserId: opts.actorUserId || uidB,
+      }));
+
       // Shift A → B's calendar
       batch.set(_sub(uidB, 'months', shiftA.monthKey, 'shifts', newIdForB), {
         ..._stripShift(shiftA),
         id: newIdForB,
         userId: uidB,
+        currentHolderUserId: String(uidB),
+        // FIXO: escalista original mantido. NÃO-fixo: escalista vira o destinatário.
+        escalistaUserId: isFixedA ? escA : String(uidB),
         source: 'received',
         isFixedSchedule: false,
-        isFixedSchedule_origin: shiftA?.isFixedSchedule === true,
+        isFixedSchedule_origin: isFixedA,
         originUserId: String(uidA),
         originUserName: opts.uidAName || shiftA?.originUserName || null,
         originalShiftId: String(shiftA.id),
         transferredAt: now,
+        transferLog: logA,
+        cededAt: now,
         _updatedAt: now,
       });
 
@@ -1008,13 +1163,17 @@ const FirebaseAdapter = {
         ..._stripShift(shiftB),
         id: newIdForA,
         userId: uidA,
+        currentHolderUserId: String(uidA),
+        escalistaUserId: isFixedB ? escB : String(uidA),
         source: 'received',
         isFixedSchedule: false,
-        isFixedSchedule_origin: shiftB?.isFixedSchedule === true,
+        isFixedSchedule_origin: isFixedB,
         originUserId: String(uidB),
         originUserName: opts.uidBName || shiftB?.originUserName || null,
         originalShiftId: String(shiftB.id),
         transferredAt: now,
+        transferLog: logB,
+        cededAt: now,
         _updatedAt: now,
       });
 
@@ -1026,16 +1185,77 @@ const FirebaseAdapter = {
     }
   },
 
+  /**
+   * Devolve um shift recebido pro originUserId. Atómico:
+   *   - delete do currentHolder (months + manualShifts)
+   *   - write no originUser side (months + manualShifts) com source='aurora',
+   *     origin* limpos, currentHolderUserId=originUser, isManual=true,
+   *     transferLog herda + entry 'devolução', cededAt=null (sem nova janela).
+   *
+   * Permitido só dentro da janela de 2h pós-aceitação — caller verifica.
+   */
+  devolveShift: async (currentHolderUserId, shift, opts = {}) => {
+    if (!db || !currentHolderUserId || !shift?.id || !shift?.monthKey || !shift?.originUserId) {
+      return { success: false, newShiftId: null };
+    }
+    try {
+      const originUserId = String(shift.originUserId);
+      const newId = `devolvido_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      const now = new Date().toISOString();
+      const batch = writeBatch(db);
+
+      // Remove do currentHolder
+      batch.delete(_sub(currentHolderUserId, 'months', shift.monthKey, 'shifts', String(shift.id)));
+      batch.delete(_sub(currentHolderUserId, 'manualShifts', String(shift.id)));
+
+      const nextLog = appendLog(shift?.transferLog, makeLogEntry({
+        type: TRANSFER_LOG_TYPES.DEVOLUTION,
+        fromUserId: currentHolderUserId,
+        fromUserName: opts.fromUserName || null,
+        toUserId: originUserId,
+        toUserName: opts.toUserName || shift?.originUserName || null,
+        actorUserId: opts.actorUserId || currentHolderUserId,
+      }));
+
+      // Devolvido volta como manualShift do originUser — tratamento neutro:
+      // shift volta sob controle pleno dele e pode ser cedido novamente.
+      const restored = {
+        ..._stripShift(shift),
+        id: newId,
+        userId: originUserId,
+        source: 'aurora',
+        isManual: true,
+        currentHolderUserId: originUserId,
+        // Limpa origin pra evitar mostrar "Recebido de X" no DayView.
+        originUserId: null,
+        originUserName: null,
+        openingId: null,
+        // Mantém originalShiftId pra rastreabilidade — não atrapalha o display.
+        transferLog: nextLog,
+        cededAt: null,
+        transferredAt: now,
+        _updatedAt: now,
+      };
+      batch.set(_sub(originUserId, 'months', shift.monthKey, 'shifts', newId), restored);
+      batch.set(_sub(originUserId, 'manualShifts', newId), restored);
+
+      await batch.commit();
+      return { success: true, newShiftId: newId };
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] devolveShift: ${err.message}`);
+      return { success: false, newShiftId: null };
+    }
+  },
+
   // [WEBCLIENT-BRIDGE] — remove when webClient is fully retired.
   /**
-   * Snapshot a webClient user's graph (groups + persons + memberships) into Firestore
-   * so aurora-only mode can read everything without hitting PlantaoAPI. Members are
-   * resolved from coworkers map so the destination has the full Person shape.
-   *
-   * Writes to:
-   *   users/{uid}/groups/{gid}
-   *   users/{uid}/persons/{pid}
-   *   users/{uid}/groupMembers/{gid}  ← shape aurora reads: { memberIds, members }
+   * Snapshot do grafo webClient (groups + persons + memberships) num namespace
+   * SEPARADO do aurora — `users/{uid}/webClientArchive/{kind}/{id}` — pra que:
+   *   1. O caminho aurora (users/{uid}/groups, /persons, /groupMembers) continue
+   *      contendo SÓ grupos aurora reais. Aurora-only mode mostra só esses.
+   *   2. Os plantões snapshotados ainda tenham referência rica de grupo/colegas
+   *      pra exibição (consultando o archive como fallback) — não somem.
+   *   3. Trocar/ceder funciona só com grupos do path aurora (não do archive).
    */
   snapshotWebClientGraph: async (uid, { groups, coworkers, membersByGroupId }) => {
     if (!db || !uid) return { success: true, groups: 0, persons: 0, memberships: 0 };
@@ -1044,8 +1264,9 @@ const FirebaseAdapter = {
       const groupList = Object.values(groups || {});
       const coworkerMap = coworkers || {};
       const mbgi = membersByGroupId || {};
+      const ARCHIVE_BASE = ['webClientArchive']; // users/{uid}/webClientArchive/...
 
-      // 1) groups
+      // 1) groups → users/{uid}/webClientArchive/groups/{gid}
       if (groupList.length) {
         const CHUNK = 400;
         for (let i = 0; i < groupList.length; i += CHUNK) {
@@ -1053,13 +1274,17 @@ const FirebaseAdapter = {
           const batch = writeBatch(db);
           for (const g of slice) {
             if (!g?.id) continue;
-            batch.set(_sub(uid, 'groups', String(g.id)), { ...g, _updatedAt: now }, { merge: true });
+            batch.set(
+              _sub(uid, ...ARCHIVE_BASE, 'groups', String(g.id)),
+              { ...g, _updatedAt: now, _archived: true },
+              { merge: true }
+            );
           }
           await batch.commit();
         }
       }
 
-      // 2) persons
+      // 2) persons → users/{uid}/webClientArchive/persons/{pid}
       const personEntries = Object.entries(coworkerMap).filter(([pid]) => pid);
       if (personEntries.length) {
         const CHUNK = 400;
@@ -1067,13 +1292,18 @@ const FirebaseAdapter = {
           const slice = personEntries.slice(i, i + CHUNK);
           const batch = writeBatch(db);
           for (const [pid, p] of slice) {
-            batch.set(_sub(uid, 'persons', String(pid)), { ...p, id: String(pid), _updatedAt: now }, { merge: true });
+            batch.set(
+              _sub(uid, ...ARCHIVE_BASE, 'persons', String(pid)),
+              { ...p, id: String(pid), _updatedAt: now, _archived: true },
+              { merge: true }
+            );
           }
           await batch.commit();
         }
       }
 
-      // 3) groupMembers — resolve full person from coworkers map
+      // 3) groupMembers → users/{uid}/webClientArchive/groupMembers/{gid}
+      // Archive não precisa mergear cross-source: é fonte única do webClient.
       const membershipEntries = Object.entries(mbgi);
       if (membershipEntries.length) {
         const CHUNK = 400;
@@ -1097,14 +1327,19 @@ const FirebaseAdapter = {
                 memberType: m.memberType || 'member',
               });
             }
-            batch.set(_sub(uid, 'groupMembers', String(gid)), {
-              userId: String(uid),
-              groupId: String(gid),
-              memberIds,
-              members,
-              syncedAt: now,
-              _updatedAt: now,
-            }, { merge: true });
+            batch.set(
+              _sub(uid, ...ARCHIVE_BASE, 'groupMembers', String(gid)),
+              {
+                userId: String(uid),
+                groupId: String(gid),
+                memberIds,
+                members,
+                syncedAt: now,
+                _updatedAt: now,
+                _archived: true,
+              },
+              { merge: true }
+            );
           }
           await batch.commit();
         }
@@ -1119,6 +1354,31 @@ const FirebaseAdapter = {
     } catch (err) {
       Logger.warn(`[FirebaseAdapter] snapshotWebClientGraph: ${err.message}`);
       return { success: false, error: err.message };
+    }
+  },
+
+  // [WEBCLIENT-BRIDGE] — remove when webClient is fully retired.
+  /**
+   * Lê o archive webClient (groups + persons) só pra fins de exibição:
+   * quando um plantão snapshotado em aurora-only referencia um grupo/colega
+   * que não existe no path aurora, a UI cai aqui pra recuperar nome/hospital.
+   */
+  fetchWebClientArchive: async (uid) => {
+    if (!db || !uid) return { groups: {}, persons: {} };
+    try {
+      const { collection, getDocs } = await import('./fdb');
+      const [gSnap, pSnap] = await Promise.allSettled([
+        getDocs(collection(db, 'users', String(uid), 'webClientArchive', 'groups')),
+        getDocs(collection(db, 'users', String(uid), 'webClientArchive', 'persons')),
+      ]);
+      const groups = {};
+      const persons = {};
+      if (gSnap.status === 'fulfilled') gSnap.value.forEach(d => { groups[d.id] = { id: d.id, ...d.data() }; });
+      if (pSnap.status === 'fulfilled') pSnap.value.forEach(d => { persons[d.id] = { id: d.id, ...d.data() }; });
+      return { groups, persons };
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] fetchWebClientArchive: ${err.message}`);
+      return { groups: {}, persons: {} };
     }
   },
 
@@ -1178,6 +1438,16 @@ const FirebaseAdapter = {
     });
   },
 
+  // Auto-expire: leilão cujo expiresAt (= startISO do plantão ofertado) passou
+  // e ainda está open. Disparado em background pelo SwapAuctionsContext.refresh.
+  expireSwapAuction: (auctionId) => {
+    if (!db || !auctionId) return Promise.resolve();
+    return _write(doc(db, 'swapAuctions', String(auctionId)), {
+      status: 'expired',
+      expiredAt: new Date().toISOString(),
+    });
+  },
+
   /** swapAuctions/{auctionId}/bids/{bidId} */
   submitBid: (auctionId, bid) => {
     if (!db || !auctionId || !bid?.id) return Promise.resolve();
@@ -1228,7 +1498,7 @@ const FirebaseAdapter = {
   getSwapAuctionsForGroups: async (groupIds) => {
     if (!db || !Array.isArray(groupIds) || groupIds.length === 0) return [];
     try {
-      const { collection, query, where, getDocs } = await import('firebase/firestore');
+      const { collection, query, where, getDocs } = await import('./fdb');
       const ids = [...new Set(groupIds.map(String))];
       const chunks = [];
       for (let i = 0; i < ids.length; i += 10) chunks.push(ids.slice(i, i + 10));
@@ -1256,7 +1526,7 @@ const FirebaseAdapter = {
   getMyAuctions: async (userId) => {
     if (!db || !userId) return [];
     try {
-      const { collection, query, where, getDocs } = await import('firebase/firestore');
+      const { collection, query, where, getDocs } = await import('./fdb');
       const snap = await getDocs(query(
         collection(db, 'swapAuctions'),
         where('initiatorUserId', '==', String(userId)),
@@ -1274,7 +1544,7 @@ const FirebaseAdapter = {
   getBidsForAuction: async (auctionId) => {
     if (!db || !auctionId) return [];
     try {
-      const { collection, getDocs } = await import('firebase/firestore');
+      const { collection, getDocs } = await import('./fdb');
       const snap = await getDocs(collection(db, 'swapAuctions', String(auctionId), 'bids'));
       const out = [];
       snap.forEach(d => out.push({ id: d.id, auctionId: String(auctionId), ...d.data() }));
@@ -1302,6 +1572,25 @@ const FirebaseAdapter = {
     return _write(_sub(userId, 'notifications', String(notifId)), { read: true });
   },
 
+  /** Marca várias notificações como lidas num único batch. */
+  markNotificationsReadBulk: async (userId, notifIds) => {
+    if (!db || !userId || !Array.isArray(notifIds) || notifIds.length === 0) return;
+    try {
+      const CHUNK = 400;
+      for (let i = 0; i < notifIds.length; i += CHUNK) {
+        const slice = notifIds.slice(i, i + CHUNK);
+        const batch = writeBatch(db);
+        for (const id of slice) {
+          if (!id) continue;
+          batch.set(_sub(userId, 'notifications', String(id)), { read: true }, { merge: true });
+        }
+        await batch.commit();
+      }
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] markNotificationsReadBulk: ${err.message}`);
+    }
+  },
+
   /** users/{userId}/settings/notifications */
   saveNotificationPrefs: (userId, prefs) =>
     _write(_sub(userId, 'settings', 'notifications'), { ...prefs }),
@@ -1309,7 +1598,7 @@ const FirebaseAdapter = {
   loadNotificationPrefs: async (userId) => {
     if (!db || !userId) return null;
     try {
-      const { getDoc } = await import('firebase/firestore');
+      const { getDoc } = await import('./fdb');
       const snap = await getDoc(_sub(userId, 'settings', 'notifications'));
       return snap.exists() ? snap.data() : null;
     } catch (err) {
@@ -1325,7 +1614,7 @@ const FirebaseAdapter = {
   loadPushDevices: async (userId) => {
     if (!db || !userId) return [];
     try {
-      const { collection, getDocs } = await import('firebase/firestore');
+      const { collection, getDocs } = await import('./fdb');
       const snap = await getDocs(collection(db, 'users', String(userId), 'devices'));
       const out = [];
       snap.forEach(d => out.push({ id: d.id, ...d.data() }));

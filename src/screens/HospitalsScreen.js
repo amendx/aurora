@@ -46,7 +46,7 @@ export default function HospitalsScreen({ navigation }) {
 
   return (
     <View style={[s.root, { backgroundColor: C.background.secondary }]}>
-      <ScrollView contentContainerStyle={{ padding: Spacing.screen, paddingBottom: insets.bottom + 32 }}>
+      <ScrollView contentContainerStyle={{ padding: Spacing.screen, paddingBottom: Spacing.lg }}>
         {institutions.length === 0 ? (
           <View style={[s.empty, { backgroundColor: C.background.elevated, borderColor: C.border.light }]}>
             <Ionicons name="business-outline" size={28} color={C.text.tertiary} style={{ marginBottom: 10 }} />

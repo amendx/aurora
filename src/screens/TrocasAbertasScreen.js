@@ -10,13 +10,21 @@
  */
 
 import React, { useContext, useMemo, useState, useCallback, useEffect } from 'react';
-import { View, Text, ScrollView, Pressable, TouchableOpacity, ActivityIndicator } from 'react-native';
+import { View, Text, ScrollView, Pressable, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { AuthContext } from '../context/AuthContext';
 import { useSwapAuctions, isBidCompatible } from '../contexts/SwapAuctionsContext';
 import { useOffers } from '../contexts/OffersContext';
+import { useOpenings } from '../contexts/OpeningsContext';
+import { useShifts } from '../contexts/ShiftsContext';
 import FirebaseAdapter from '../services/firebase/FirebaseAdapter';
 import TrocarAbertoSheet from './TrocarAbertoSheet';
+import CessaoDetailSheet from './CessaoDetailSheet';
+import TrocaDetailSheet from './TrocaDetailSheet';
+import {
+  ShiftBlock, SwapArrow, HospitalRow, CrmSwapCountLine, HourDeltaCard, initials as swapInitials,
+} from '../components/swapParts';
+import { useGroups } from '../contexts/GroupsContext';
 import { useColors, Typography, Spacing, Shadows } from '../constants/DesignSystem';
 import Logger from '../utils/Logger';
 
@@ -94,6 +102,14 @@ const TrocasAbertasScreen = () => {
     acceptSwap, rejectSwap, cancelSwap,
     refresh: refreshOffers,
   } = useOffers();
+  // Cessões abertas ao grupo — conceitualmente diferentes de swaps, mas UX
+  // pede pra ficarem visíveis aqui também (a usuária procura "o que abri pra
+  // o grupo"). Tab "Minhas" → minhas cessões pendentes; "Disponíveis" → as
+  // dos colegas (vagas no grupo). Cancelamento e claim seguem na Vagas.
+  const { myCededOpenings, openings: claimableOpenings, cancelCedeOpening } = useOpenings();
+  const { restoreShiftLocally } = useShifts();
+  const { coworkersById } = useGroups();
+
   const s = makeStyles(C);
   const LABEL_C = _labelColor(C);
   const AV = _AVATARS(C);
@@ -106,6 +122,8 @@ const TrocasAbertasScreen = () => {
   const [submitting, setSubmitting] = useState(false);
   const [bidsByAuction, setBidsByAuction] = useState({});
   const [accepting, setAccepting] = useState(null);
+  const [detailCessao, setDetailCessao] = useState(null);
+  const [detailSwap, setDetailSwap] = useState(null); // { swap, mode }
 
   useEffect(() => { refresh(); refreshOffers?.(); }, [refresh, refreshOffers]);
 
@@ -162,49 +180,64 @@ const TrocasAbertasScreen = () => {
     }
   }, [refresh, refreshOffers]);
 
+  const confirmCancelSwap = useCallback((swap) => {
+    Alert.alert(
+      'Cancelar troca?',
+      `A proposta para ${swap.targetUserName || 'o colega'} será cancelada.`,
+      [
+        { text: 'Voltar', style: 'cancel' },
+        { text: 'Cancelar troca', style: 'destructive', onPress: () => swapAction(swap, cancelSwap) },
+      ],
+    );
+  }, [swapAction, cancelSwap]);
+
   const renderDirectedSwapCard = (swap, mode /* 'received' | 'sent' */) => {
     const give = mode === 'received' ? swap.shiftB : swap.shiftA;   // o que EU dou
     const receive = mode === 'received' ? swap.shiftA : swap.shiftB; // o que EU recebo
     const counterpart = mode === 'received' ? swap.initiatorUserName : swap.targetUserName;
+    const counterpartId = mode === 'received' ? swap.initiatorUserId : swap.targetUserId;
     const busy = respondingSwap === swap.id;
     const avColor = AV[_hash(counterpart || swap.id) % AV.length];
-    const sameTeam = give?.group?.id && receive?.group?.id && String(give.group.id) === String(receive.group.id);
+    const terminal = swap.status === 'accepted';
+    const cw = counterpartId ? coworkersById?.[counterpartId] : null;
+    // Total de trocas pendentes/recentes com essa pessoa (sent + received).
+    const swapCountWithPerson = counterpartId
+      ? [...(swapsSent || []), ...(swapsReceived || [])].filter(sw =>
+          String(sw.initiatorUserId) === String(counterpartId)
+          || String(sw.targetUserId) === String(counterpartId)
+        ).length
+      : 0;
 
     return (
-      <View key={swap.id} style={s.card}>
+      <Pressable key={swap.id} style={s.card} onPress={() => setDetailSwap({ swap, mode })}>
         <View style={s.cardHead}>
           <View style={[s.avatar, { backgroundColor: avColor }]}>
-            <Text style={s.avatarText}>{_initials(counterpart)}</Text>
+            <Text style={s.avatarText}>{swapInitials(counterpart)}</Text>
           </View>
           <View style={{ flex: 1 }}>
             <Text style={s.personName} numberOfLines={1}>{counterpart || 'Colega'}</Text>
-            <Text style={s.personSub}>{mode === 'received' ? 'quer trocar com você' : 'aguardando resposta'}</Text>
+            <CrmSwapCountLine council={cw?.council} swapCount={swapCountWithPerson} C={C} />
           </View>
           {!!_relTime(swap.createdAt) && <Text style={s.relTime}>{_relTime(swap.createdAt)}</Text>}
         </View>
 
-        <View style={s.relRow}>
-          <Text style={s.relLabel}>{sameTeam ? 'MESMA EQUIPE' : 'ENTRE EQUIPES'}</Text>
-          <View style={s.teamPair}>
-            {renderTeamChip(give?.group, 'a')}
-            <Ionicons name="swap-horizontal" size={13} color={C.text.tertiary} />
-            {renderTeamChip(receive?.group, 'b')}
-          </View>
+        <View style={{ gap: 6 }}>
+          <Text style={s.swapCap}>VOCÊ DÁ</Text>
+          <ShiftBlock shift={give} C={C} />
+          <SwapArrow C={C} />
+          <Text style={s.swapCap}>VOCÊ RECEBE</Text>
+          <ShiftBlock shift={receive} C={C} />
         </View>
 
-        <View style={s.swapGrid}>
-          {renderShiftCol('VOCÊ DÁ', give)}
-          <View style={s.swapArrowWrap}>
-            <View style={s.swapArrow}>
-              <Ionicons name="swap-horizontal" size={14} color={C.primary} />
-            </View>
+        <HourDeltaCard give={give} receive={receive} C={C} />
+        <HospitalRow group={give?.group || receive?.group} C={C} />
+
+        {terminal ? (
+          <View style={s.terminalFooter}>
+            <Ionicons name="checkmark-circle" size={15} color={C.money} />
+            <Text style={s.terminalText}>Troca aceita — escala atualizada</Text>
           </View>
-          {renderShiftCol('VOCÊ RECEBE', receive)}
-        </View>
-
-        {renderHospital(give?.group || receive?.group)}
-
-        {busy ? (
+        ) : busy ? (
           <ActivityIndicator size="small" color={C.primary} style={{ marginTop: 4 }} />
         ) : mode === 'received' ? (
           <View style={s.btnRow}>
@@ -217,11 +250,11 @@ const TrocasAbertasScreen = () => {
             </Pressable>
           </View>
         ) : (
-          <Pressable style={s.cancelBtn} onPress={() => swapAction(swap, cancelSwap)}>
+          <Pressable style={s.cancelBtn} onPress={() => confirmCancelSwap(swap)}>
             <Text style={s.cancelBtnText}>Cancelar troca</Text>
           </Pressable>
         )}
-      </View>
+      </Pressable>
     );
   };
 
@@ -282,6 +315,63 @@ const TrocasAbertasScreen = () => {
     setAccepting(null);
     if (r?.success) refresh();
   }, [acceptBid, refresh]);
+
+  // Card de cessão (primeiro a pegar leva). Toque abre o detalhe.
+  const renderCedeCard = (o, mine = false) => {
+    const snap = o.originShiftSnapshot || {};
+    const dateKey = o.dateKey || (o.startISO || '').slice(0, 10);
+    const label = snap.label || o.label || '?';
+    const startISO = snap.startISO || o.startISO;
+    const endISO = snap.endISO || o.endISO;
+    const counterpart = mine ? 'Você cedeu ao grupo' : (o.originUserName || 'Colega');
+    const avColor = AV[_hash(counterpart || o.id) % AV.length];
+    const groupForChip = snap.group || o.group;
+    const cededShift = { label, date: dateKey, startISO, endISO, group: groupForChip };
+    const subText = mine ? 'aguardando alguém aceitar' : 'cedeu ao grupo';
+
+    return (
+      <Pressable key={`cede_${o.id}`} style={s.card} onPress={() => setDetailCessao(o)}>
+        <View style={s.cardHead}>
+          <View style={[s.avatar, { backgroundColor: mine ? C.warning : avColor }]}>
+            {mine
+              ? <Ionicons name="megaphone" size={18} color="#fff" />
+              : <Text style={s.avatarText}>{_initials(counterpart)}</Text>}
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={s.personName} numberOfLines={1}>{counterpart}</Text>
+            <Text style={s.personSub}>{subText}</Text>
+          </View>
+          {!!_relTime(o.createdAt) && <Text style={s.relTime}>{_relTime(o.createdAt)}</Text>}
+        </View>
+
+        <View style={s.relRow}>
+          <View style={[s.modeChip, { backgroundColor: C.money + '14' }]}>
+            <Ionicons name="flash-outline" size={12} color={C.money} />
+            <Text style={[s.modeChipText, { color: C.money }]}>PRIMEIRO A PEGAR</Text>
+          </View>
+          <View style={s.teamPair}>
+            {renderTeamChip(groupForChip, 'cg')}
+          </View>
+        </View>
+
+        <View style={[s.swapGrid, { justifyContent: 'flex-start' }]}>
+          {renderShiftCol(mine ? 'VOCÊ CEDEU' : 'PLANTÃO', cededShift)}
+        </View>
+
+        {renderHospital(groupForChip)}
+
+        <View style={s.cedeFooter}>
+          <Text style={s.footerText}>{mine ? 'Toque para ver detalhes' : 'Primeiro a pegar leva'}</Text>
+          <View style={s.footerCta}>
+            <Text style={[s.footerCtaText, { color: mine ? C.error : C.primary }]}>
+              {mine ? 'Cancelar' : 'Pegar plantão'}
+            </Text>
+            <Ionicons name="chevron-forward" size={14} color={mine ? C.error : C.primary} />
+          </View>
+        </View>
+      </Pressable>
+    );
+  };
 
   const renderAuctionCard = (a, mine = false) => {
     const offered = a.offeredShift;
@@ -362,9 +452,15 @@ const TrocasAbertasScreen = () => {
 
   const list = tab === 'available' ? auctions : myAuctions;
   const directedSwaps = tab === 'available' ? (swapsReceived || []) : (swapsSent || []);
-  const isEmpty = list.length === 0 && directedSwaps.length === 0;
-  const availCount = (auctions?.length || 0) + (swapsReceived?.length || 0);
-  const mineCount = (myAuctions?.length || 0) + (swapsSent?.length || 0);
+  // Cessões: "Minhas" mostra as ativas que EU abri; "Disponíveis" mostra as
+  // dos colegas. Reaproveita openings/myCededOpenings do OpeningsContext.
+  const activeMyCedes = (myCededOpenings || []).filter(o => o.status === 'active');
+  const cededList = tab === 'available'
+    ? (claimableOpenings || []).filter(o => o.availableSlots > 0)
+    : activeMyCedes;
+  const isEmpty = list.length === 0 && directedSwaps.length === 0 && cededList.length === 0;
+  const availCount = (auctions?.length || 0) + (swapsReceived?.length || 0) + ((claimableOpenings || []).filter(o => o.availableSlots > 0).length);
+  const mineCount = (myAuctions?.length || 0) + (swapsSent?.length || 0) + activeMyCedes.length;
 
   const renderTab = (key, label, count) => {
     const active = tab === key;
@@ -379,6 +475,7 @@ const TrocasAbertasScreen = () => {
   return (
     <>
       <ScrollView style={s.container} contentContainerStyle={{ paddingBottom: 120 }}>
+        <Text style={s.caption}>negocie plantões com o seu grupo</Text>
         <View style={s.tabsBar}>
           {renderTab('available', 'Disponíveis', availCount)}
           {renderTab('mine', 'Minhas', mineCount)}
@@ -391,15 +488,34 @@ const TrocasAbertasScreen = () => {
         {!loading && isEmpty && (
           <Text style={s.empty}>
             {tab === 'available'
-              ? 'Nenhuma troca disponível ou direcionada a você.'
-              : 'Você ainda não enviou nem publicou trocas.'}
+              ? 'Nenhuma movimentação disponível pra você no momento.'
+              : 'Você ainda não tem trocas nem cessões em andamento.'}
           </Text>
         )}
 
         <View style={s.cardsCol}>
-          {/* Trocas direcionadas (1:1) primeiro — ação mais urgente */}
+          {/* SEÇÃO 1: Cessões (1:n — abertas ao grupo, qualquer colega pega). */}
+          {cededList.length > 0 && (
+            <Text style={s.sectionLabel}>
+              {tab === 'mine' ? 'Cessões ao grupo (suas)' : 'Cessões abertas no grupo'}
+            </Text>
+          )}
+          {cededList.map(o => renderCedeCard(o, tab === 'mine'))}
+
+          {/* SEÇÃO 2: Trocas direcionadas (1:1). */}
+          {directedSwaps.length > 0 && (
+            <Text style={s.sectionLabel}>
+              {tab === 'mine' ? 'Trocas que você propôs' : 'Trocas propostas a você'}
+            </Text>
+          )}
           {directedSwaps.map(sw => renderDirectedSwapCard(sw, tab === 'available' ? 'received' : 'sent'))}
-          {/* Leilões (abertos ao grupo) */}
+
+          {/* SEÇÃO 3: Leilões (troca aberta ao grupo). */}
+          {list.length > 0 && (
+            <Text style={s.sectionLabel}>
+              {tab === 'mine' ? 'Seus leilões de troca' : 'Leilões abertos ao grupo'}
+            </Text>
+          )}
           {list.map(a => renderAuctionCard(a, tab === 'mine'))}
         </View>
       </ScrollView>
@@ -413,6 +529,19 @@ const TrocasAbertasScreen = () => {
         visible={createOpen}
         shift={null}
         onClose={() => { setCreateOpen(false); refresh(); }}
+      />
+
+      <CessaoDetailSheet
+        visible={!!detailCessao}
+        opening={detailCessao}
+        onClose={() => { setDetailCessao(null); refresh(); refreshOffers?.(); }}
+      />
+
+      <TrocaDetailSheet
+        visible={!!detailSwap}
+        swap={detailSwap?.swap}
+        mode={detailSwap?.mode}
+        onClose={() => { setDetailSwap(null); refresh(); refreshOffers?.(); }}
       />
 
       {/* Bid picker modal */}
@@ -457,10 +586,17 @@ const TrocasAbertasScreen = () => {
 const makeStyles = (C) => ({
   container: { flex: 1, backgroundColor: C.background.secondary },
 
+  caption: {
+    fontSize: 12, fontFamily: Typography.fontFamily.regular,
+    color: C.text.tertiary,
+    paddingHorizontal: Spacing.screen, paddingTop: Spacing.md, paddingBottom: 2,
+  },
+
   // Tabs
   tabsBar: {
     flexDirection: 'row',
-    margin: Spacing.screen,
+    marginHorizontal: Spacing.screen,
+    marginTop: Spacing.sm,
     marginBottom: Spacing.sm,
     padding: 4,
     borderRadius: 999,
@@ -494,6 +630,21 @@ const makeStyles = (C) => ({
   emptyInline: { fontSize: 12, color: C.text.tertiary, paddingTop: 4 },
 
   cardsCol: { gap: 14, paddingHorizontal: Spacing.screen, paddingTop: Spacing.xs },
+  sectionLabel: {
+    fontSize: 11.5,
+    fontFamily: Typography.fontFamily.semiBold,
+    color: C.text.tertiary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginTop: 12,
+    marginBottom: 2,
+  },
+  swapCap: { fontSize: 10, fontFamily: Typography.fontFamily.bold, letterSpacing: 0.8, color: C.text.tertiary },
+  terminalFooter: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    paddingVertical: 11, borderRadius: 12, backgroundColor: C.money + '14',
+  },
+  terminalText: { fontSize: 13, fontFamily: Typography.fontFamily.semiBold, color: C.money },
   card: {
     backgroundColor: C.background.card,
     borderRadius: 18,
@@ -567,6 +718,17 @@ const makeStyles = (C) => ({
   // Hospital
   hospRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   hospText: { fontSize: 11.5, color: C.text.tertiary, flex: 1 },
+
+  // Cessão — mode chip + footer (interessados / ação)
+  modeChip: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999 },
+  modeChipText: { fontSize: 9.5, fontFamily: Typography.fontFamily.bold, letterSpacing: 0.6 },
+  cedeFooter: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingTop: 10, borderTopWidth: 0.5, borderTopColor: C.border.light,
+  },
+  footerText: { flex: 1, fontSize: 12, color: C.text.tertiary },
+  footerCta: { flexDirection: 'row', alignItems: 'center', gap: 2 },
+  footerCtaText: { fontSize: 13, fontFamily: Typography.fontFamily.bold },
 
   // Buttons
   btnRow: { flexDirection: 'row', gap: 10 },

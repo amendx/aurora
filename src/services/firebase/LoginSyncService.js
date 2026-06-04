@@ -26,7 +26,7 @@
  *   receive new/changed shifts from PlantaoAPI between sessions.
  */
 
-import { doc, getDoc } from 'firebase/firestore';
+import { doc, getDoc } from './fdb';
 import { db } from './config';
 import LocalCache from '../LocalCache';
 import FirebaseAdapter from './FirebaseAdapter';
@@ -176,7 +176,7 @@ export const hydratePastMonthsFromFirebase = async (userId, source, count = 12) 
         if (remote.regularAuthoritative) await LocalCache.saveRegularShifts(userId, mk, monthRegular);
 
         // Pull the cached summary doc if present — saves one recompute on Charts.
-        const { doc: _doc, getDoc } = await import('firebase/firestore');
+        const { doc: _doc, getDoc } = await import('./fdb');
         try {
           const sumSnap = await getDoc(_doc(db, 'users', String(userId), 'months', mk, 'summary', 'current'));
           if (sumSnap.exists()) await LocalCache.saveSummary(userId, mk, sumSnap.data());

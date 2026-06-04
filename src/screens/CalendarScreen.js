@@ -14,6 +14,10 @@ import * as SecureStore from 'expo-secure-store';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AuthContext } from '../context/AuthContext';
 import { useShifts } from '../contexts/ShiftsContext';
+import { useOffers } from '../contexts/OffersContext';
+import { useOpenings } from '../contexts/OpeningsContext';
+import { movementVisual } from '../utils/MovementColors';
+import { registerScrollToTop } from '../utils/scrollToTopBus';
 import { useColors, Typography, Spacing, Shadows } from '../constants/DesignSystem';
 import Logger from '../utils/Logger';
 import ShiftBottomSheet from '../components/ShiftBottomSheet';
@@ -121,6 +125,11 @@ const CalendarScreen = ({ navigation }) => {
   const monthSummary = contextSummary || cachedSummary;
   const [groupColors, setGroupColors] = useState({});
   const [timeEntriesByMonth, setTimeEntriesByMonth] = useState({});
+
+  const scrollRef = useRef(null);
+  useEffect(() => registerScrollToTop('calendar', () => {
+    scrollRef.current?.scrollTo?.({ y: 0, animated: true });
+  }), []);
 
   const navigationTimeoutRef = useRef(null);
   const isNavigatingRef = useRef(false);
@@ -305,6 +314,40 @@ const CalendarScreen = ({ navigation }) => {
     });
     return map;
   }, [daysWithShifts, currentDate]);
+
+  // Dia → ação pendente (troca/cessão direcionada/cessão ao grupo) pra marcar
+  // no calendário. Modo pessoal só. Prioridade: troca > oferta > cessão.
+  const { swapsSent, swapsReceived, offersSent } = useOffers();
+  const { myCededOpenings } = useOpenings();
+  const pendingByDay = useMemo(() => {
+    const byShift = {};
+    (swapsSent || []).forEach(sw => { if (sw?.status === 'pending' && sw.shiftA?.id) byShift[String(sw.shiftA.id)] = { kind: 'swap', role: 'initiator' }; });
+    (swapsReceived || []).forEach(sw => { if (sw?.status === 'pending' && sw.shiftB?.id) byShift[String(sw.shiftB.id)] = { kind: 'swap', role: 'target' }; });
+    (offersSent || []).forEach(o => { if (o?.status === 'pending' && o.shiftSnapshot?.id) byShift[String(o.shiftSnapshot.id)] = { kind: 'offer', role: 'sender' }; });
+
+    const year = currentDate.getFullYear();
+    const month = currentDate.getMonth() + 1;
+    const monthPrefix = `${year}-${String(month).padStart(2, '0')}`;
+    const map = {};
+    (daysWithShifts || []).forEach(dayData => {
+      const d = new Date(dayData.date + 'T00:00:00');
+      if (d.getFullYear() !== year || d.getMonth() + 1 !== month) return;
+      const day = d.getDate();
+      (dayData.shifts || []).forEach(sh => {
+        const p = byShift[String(sh.id)] || (sh._pendingCede ? { kind: 'cede' } : null);
+        if (p && !map[day]) map[day] = p;
+      });
+    });
+    // Cessões ao grupo (somem do calendário) — marca o dia mesmo assim.
+    (myCededOpenings || []).forEach(o => {
+      if (o.status && o.status !== 'active') return;
+      const dk = o.dateKey || (o.startISO || '').slice(0, 10);
+      if (!dk.startsWith(monthPrefix)) return;
+      const day = Number(dk.slice(8, 10));
+      if (!map[day]) map[day] = { kind: 'cede' };
+    });
+    return map;
+  }, [swapsSent, swapsReceived, offersSent, myCededOpenings, daysWithShifts, currentDate]);
 
   // Group mode: dots + vacancy flag per day + pending-offer-for-me flag.
   // Derives ONLY from groups currently selected (activeGroups). This way the
@@ -544,6 +587,8 @@ const CalendarScreen = ({ navigation }) => {
       const hasShifts = types.length > 0;
       const hasVacancy = inGroupMode && !!groupEntry?.hasVacancy;
       const hasPendingForMe = inGroupMode && !!groupEntry?.hasPendingForMe;
+      const dayPending = !inGroupMode ? pendingByDay[day] : null;
+      const dayPendingColor = dayPending ? movementVisual(C, dayPending.kind, dayPending.role).color : null;
       const colIndex = (firstDayOfWeek + day - 1) % 7;
       const isWeekend = colIndex === 0 || colIndex === 6;
       const showSkeleton = (inGroupMode ? groupLoading : (loading || isNavigating));
@@ -596,6 +641,9 @@ const CalendarScreen = ({ navigation }) => {
                 {inGroupMode && hasPendingForMe && !isToday && (
                   <View style={[s.pendingBadge, { backgroundColor: C.primary }]} />
                 )}
+                {dayPendingColor && (
+                  <View style={[s.pendingBadge, { backgroundColor: isToday ? '#fff' : dayPendingColor }]} />
+                )}
               </>
             )
           }
@@ -621,6 +669,11 @@ const CalendarScreen = ({ navigation }) => {
       { key: 'N', label: 'Noite' },
       { key: 'multi', label: 'Múltiplos', color: C.primary + '24', border: C.primary + '60' },
     ];
+    // Ações pendentes presentes neste mês (modo pessoal) → legenda por cor.
+    const pendingKinds = calendarMode === 'groups'
+      ? []
+      : [...new Set(Object.values(pendingByDay).map(p => p.kind))];
+    const PEND_LABEL = { swap: 'Em troca', offer: 'Oferecido', cede: 'Cedido' };
     return (
       <View style={s.legend}>
         {items.map(({ key, label, color, border }) => {
@@ -630,6 +683,15 @@ const CalendarScreen = ({ navigation }) => {
             <View key={key} style={s.legendItem}>
               <View style={[s.legendSwatch, { backgroundColor: bg, borderColor: bd }]} />
               <Text style={s.legendLabel}>{label}</Text>
+            </View>
+          );
+        })}
+        {pendingKinds.map(kind => {
+          const color = movementVisual(C, kind, 'sender').color;
+          return (
+            <View key={`p-${kind}`} style={s.legendItem}>
+              <View style={[s.dot, { backgroundColor: color }]} />
+              <Text style={s.legendLabel}>{PEND_LABEL[kind] || 'Pendente'}</Text>
             </View>
           );
         })}
@@ -773,6 +835,7 @@ const CalendarScreen = ({ navigation }) => {
   return (
     <>
       <ScrollView
+        ref={scrollRef}
         style={[s.container]}
         contentContainerStyle={{ paddingBottom: Spacing.xl }}
         showsVerticalScrollIndicator={false}

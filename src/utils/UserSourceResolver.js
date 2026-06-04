@@ -54,7 +54,7 @@ const resolveBatch = async (personIds) => {
       missing.forEach(id => out.set(id, { canonicalUserId: null, source: 'webClient' }));
       return out;
     }
-    const { collection, query, where, getDocs } = await import('firebase/firestore');
+    const { collection, query, where, getDocs } = await import('../services/firebase/fdb');
     // Firestore `in` clause supports up to 10 values per query.
     for (let i = 0; i < missing.length; i += 10) {
       const chunk = missing.slice(i, i + 10);

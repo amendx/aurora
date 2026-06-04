@@ -1,10 +1,8 @@
 import Logger from '../utils/Logger';
-import ApiCounter from '../utils/ApiCounter';
 
 const _fetch = (url, opts) => {
   const path = typeof url === 'string' ? url.replace(/^https?:\/\/[^/]+/, '') : 'fetch';
   Logger.api(opts?.method || 'GET', path);
-  ApiCounter.bump(path);
   return fetch(url, opts);
 };
 

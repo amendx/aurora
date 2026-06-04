@@ -22,7 +22,7 @@ import Logger from '../utils/Logger';
 // Returns true only if Firestore has a doc for this email with source:'aurora'.
 const _isAuroraAccountInFirestore = async (email) => {
   if (!db || !email) return false;
-  const { collection, query, where, getDocs } = await import('firebase/firestore');
+  const { collection, query, where, getDocs } = await import('../services/firebase/fdb');
   const snap = await getDocs(query(collection(db, 'users'), where('email', '==', email)));
   if (snap.empty) return false;
   return snap.docs[0].data()?.source === 'aurora';
@@ -46,7 +46,7 @@ const _isAurora = (userData) => userData?.source === 'aurora';
 const _loadFirestoreUserFlags = async (uid) => {
   if (!db || !uid) return {};
   try {
-    const { doc, getDoc } = await import('firebase/firestore');
+    const { doc, getDoc } = await import('../services/firebase/fdb');
     const snap = await getDoc(doc(db, 'users', String(uid)));
     if (!snap.exists()) return {};
     const d = snap.data() || {};
@@ -108,7 +108,9 @@ export const AuthProvider = ({ children }) => {
           hydratePastMonthsFromFirebase(userData?.id, userData?.source).catch(() => {});
 
           // WebClient-only background tasks — skip for Aurora users who have no WebClient token.
-          if (!_isAurora(userData)) {
+          // [WEBCLIENT-BRIDGE] e tb skip se usuário webClient migrou pra aurora-only:
+          // ele não precisa mais bater no PlantaoAPI.
+          if (!_isAurora(userData) && !userData?.auroraOnlyMode) {
             syncCurrentMonthToFirebase(userData?.id).catch(() => {});
             TodayCoworkersService.compute(userData?.id, activeToken, userData?.id).catch(() => {});
           }
@@ -136,6 +138,13 @@ export const AuthProvider = ({ children }) => {
       // onAuthStateChanged to get the real answer after the SDK initializes.
       if (_isAurora(userData)) {
         return waitForAuroraAuth();
+      }
+
+      // [WEBCLIENT-BRIDGE] usuário webClient que já migrou pra aurora-only não
+      // depende mais do PlantaoAPI. Confia no token local — sessão persiste mesmo
+      // se a API estiver indisponível ou o token tiver expirado lá.
+      if (userData?.auroraOnlyMode === true && tokenToValidate) {
+        return true;
       }
 
       const response = await fetch(`${process.env.EXPO_PUBLIC_API_URL}/users/profile`, {
@@ -380,7 +389,7 @@ export const AuthProvider = ({ children }) => {
       const { _compressAndUpload } = await import('../services/firebase/SignupService');
       const photoUrl = await _compressAndUpload(user.id, photoUri);
       const { db: firestoreDb } = await import('../services/firebase/config');
-      const { doc, setDoc } = await import('firebase/firestore');
+      const { doc, setDoc } = await import('../services/firebase/fdb');
       if (firestoreDb) {
         await setDoc(doc(firestoreDb, 'users', user.id), { photo: photoUrl }, { merge: true });
       }
@@ -402,7 +411,7 @@ export const AuthProvider = ({ children }) => {
     setUser(updated);
     try {
       const { db: firestoreDb } = await import('../services/firebase/config');
-      const { doc, setDoc } = await import('firebase/firestore');
+      const { doc, setDoc } = await import('../services/firebase/fdb');
       if (firestoreDb && user.id) {
         await setDoc(doc(firestoreDb, 'users', user.id), { showOnboarding: false }, { merge: true });
       }
@@ -430,7 +439,7 @@ export const AuthProvider = ({ children }) => {
     await StorageService.saveUserData(updated).catch(() => {});
     setUser(updated);
     try {
-      const { doc, setDoc } = await import('firebase/firestore');
+      const { doc, setDoc } = await import('../services/firebase/fdb');
       if (db && user.id) {
         await setDoc(doc(db, 'users', String(user.id)), {
           auroraOnlyMode: !!enabled,

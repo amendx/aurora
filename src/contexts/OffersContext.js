@@ -22,12 +22,13 @@ import { AuthContext } from '../context/AuthContext';
 import { useGroups } from './GroupsContext';
 import FirebaseAdapter from '../services/firebase/FirebaseAdapter';
 import { db } from '../services/firebase/config';
-import { collection, query, where, onSnapshot } from 'firebase/firestore';
+import { collection, query, where, onSnapshot } from '../services/firebase/fdb';
 import NotificationService from '../services/NotificationService';
 import LocalCache from '../services/LocalCache';
 import Logger from '../utils/Logger';
 import ActivityLogger from '../utils/ActivityLogger';
 import UserSourceResolver from '../utils/UserSourceResolver';
+import { isWithinDevolutionWindow } from '../utils/shiftTransferLog';
 
 const OffersContext = createContext();
 
@@ -197,6 +198,9 @@ export const OffersProvider = ({ children }) => {
     const opening = {
       id: openingId,
       source: 'aurora',
+      kind: 'cede',                  // discriminador — médico cedendo seu próprio plantão
+      createdByRole: 'doctor',
+      targetUserId: null,            // null = aberto ao grupo
       status: 'active',
       groupId,
       group: shift.group,
@@ -345,6 +349,8 @@ export const OffersProvider = ({ children }) => {
     if (!offer?.id || String(offer.toUserId) !== String(userId)) return { success: false };
     const result = await FirebaseAdapter.transferShift(offer.fromUserId, userId, offer.shiftSnapshot, {
       fromUserName: offer.fromUserName || null,
+      toUserName: userName || null,
+      actorUserId: userId,
     });
     if (!result.success) return { success: false };
 
@@ -405,7 +411,11 @@ export const OffersProvider = ({ children }) => {
     if (!swap?.id || String(swap.targetUserId) !== String(userId)) return { success: false };
     const result = await FirebaseAdapter.swapShifts(
       swap.initiatorUserId, userId, swap.shiftA, swap.shiftB,
-      { uidAName: swap.initiatorUserName || null, uidBName: swap.targetUserName || userName || null },
+      {
+        uidAName: swap.initiatorUserName || null,
+        uidBName: swap.targetUserName || userName || null,
+        actorUserId: userId,
+      },
     );
     if (!result.success) return { success: false };
 
@@ -461,11 +471,55 @@ export const OffersProvider = ({ children }) => {
     return { success: true };
   }, [userName]);
 
+  // ── Devolução: holder de aurora-shift recebido devolve dentro da janela 2h ──
+  const devolverShift = useCallback(async (shift) => {
+    if (!userId || !shift?.id || !shift?.originUserId || !shift?.monthKey) {
+      return { success: false, reason: 'missing_fields' };
+    }
+    if (shift.source !== 'received') return { success: false, reason: 'not_received' };
+    if (!isWithinDevolutionWindow(shift.cededAt)) return { success: false, reason: 'window_expired' };
+
+    const result = await FirebaseAdapter.devolveShift(userId, shift, {
+      fromUserName: userName || null,
+      toUserName: shift.originUserName || null,
+      actorUserId: userId,
+    });
+    if (!result.success) return { success: false, reason: 'write_failed' };
+
+    // LocalCache: remover do holder atual (em ambos os buckets defensivamente).
+    try {
+      await LocalCache.deleteManualShift(userId, shift.id, shift.monthKey);
+      await LocalCache.deleteRegularShift(userId, shift.id, shift.monthKey);
+    } catch (err) {
+      Logger.warn(`[OffersContext] devolverShift cache cleanup: ${err?.message}`);
+    }
+
+    // Notifica o originUser que recebeu de volta.
+    try {
+      await NotificationService.notify(shift.originUserId, 'offer_outcome', {
+        title: `${userName || 'Colega'} devolveu um plantão`,
+        body: _humanShiftLabel(shift),
+        payload: { originalShiftId: shift.originalShiftId || null, outcome: 'devolved' },
+      });
+    } catch (err) {
+      Logger.warn(`[OffersContext] devolverShift notify: ${err?.message}`);
+    }
+
+    return { success: true, newShiftId: result.newShiftId };
+  }, [userId, userName]);
+
   // ── Inbox helpers ─────────────────────────────────────────────────────────
   const markInboxRead = useCallback(async (notifId) => {
     if (!userId) return;
     await NotificationService.markRead(userId, notifId);
   }, [userId]);
+
+  const markAllInboxRead = useCallback(async () => {
+    if (!userId) return;
+    const unreadIds = inbox.filter(n => !n.read).map(n => n.id);
+    if (unreadIds.length === 0) return;
+    await NotificationService.markAllRead(userId, unreadIds);
+  }, [userId, inbox]);
 
   const unreadCount = inbox.filter(n => !n.read).length;
 
@@ -477,7 +531,8 @@ export const OffersProvider = ({ children }) => {
       cedeOpenToGroup, cedeTargeted, proposeSwap,
       acceptOffer, rejectOffer, cancelOffer,
       acceptSwap, rejectSwap, cancelSwap,
-      markInboxRead, savePrefs,
+      devolverShift,
+      markInboxRead, markAllInboxRead, savePrefs,
     }}>
       {children}
     </OffersContext.Provider>

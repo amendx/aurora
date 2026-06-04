@@ -50,6 +50,7 @@ const K = {
   regularShifts:   (uid, mk)  => `${P}_regular_${uid}_${mk}`,
   openings:        (uid, mk)  => `${P}_openings_${uid}_${mk}`,
   openingsLastFetch: (uid)    => `${P}_openings_last_fetch_${uid}`,
+  availability:    (uid)      => `${P}_availability_${uid}`, // Aura (IA do Aurora): bloqueios/folgas/regras
 };
 
 // ── Staleness helpers ─────────────────────────────────────────────────────────
@@ -519,6 +520,17 @@ const isOpeningsStale = async (userId) => {
   return Date.now() - new Date(ts).getTime() > OPENINGS_TTL_MS;
 };
 
+// ── Aura (IA do Aurora): disponibilidade ──────────────────────────────────────
+// Bloqueios recorrentes + folgas + regras de fadiga. Per-user, sem monthKey.
+
+const getAvailability = (userId) => _get(K.availability(userId));
+
+const saveAvailability = async (userId, config) => {
+  const result = await _set(K.availability(userId), config);
+  if (_fb) _fb.saveAvailabilityConfig(userId, config).catch(() => {});
+  return result;
+};
+
 // ── Firebase adapter registration ─────────────────────────────────────────────
 
 /**
@@ -590,6 +602,10 @@ const LocalCache = {
   getOpenings,
   saveOpenings,
   isOpeningsStale,
+
+  // Aura (IA do Aurora): disponibilidade (bloqueios/folgas/regras)
+  getAvailability,
+  saveAvailability,
 
   // Migration
   getMigrationVersion,

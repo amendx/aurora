@@ -197,7 +197,7 @@ export default function HospitalDetailScreen({ navigation, institution: instProp
 
   return (
     <View style={[s.root, { backgroundColor: C.background.secondary }]}>
-      <ScrollView contentContainerStyle={{ padding: Spacing.screen, paddingBottom: insets.bottom + 100 }}>
+      <ScrollView contentContainerStyle={{ padding: Spacing.screen, paddingBottom: 100 }}>
 
         {/* Institution info card */}
         <View style={[s.card, { backgroundColor: C.background.elevated, borderColor: C.border.light }]}>
@@ -453,7 +453,7 @@ export default function HospitalDetailScreen({ navigation, institution: instProp
       </ScrollView>
 
       {/* Save button */}
-      <View style={[s.footer, { paddingBottom: insets.bottom + Spacing.md, backgroundColor: C.background.secondary, borderTopColor: C.border.light }]}>
+      <View style={[s.footer, { paddingBottom: Spacing.md, backgroundColor: C.background.secondary, borderTopColor: C.border.light }]}>
         <Pressable style={[s.saveBtn, { backgroundColor: C.primary }]} onPress={handleSave} disabled={saving}>
           {saving
             ? <ActivityIndicator size="small" color="#fff" />

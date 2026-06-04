@@ -11,7 +11,7 @@
 
 import { Platform } from 'react-native';
 import Constants from 'expo-constants';
-import { collection, onSnapshot, orderBy, query, limit } from 'firebase/firestore';
+import { collection, onSnapshot, orderBy, query, limit } from './firebase/fdb';
 import { db } from './firebase/config';
 import FirebaseAdapter from './firebase/FirebaseAdapter';
 import Logger from '../utils/Logger';
@@ -112,6 +112,10 @@ const NotificationService = {
 
   markRead(userId, notifId) {
     return FirebaseAdapter.markNotificationRead(userId, notifId);
+  },
+
+  markAllRead(userId, notifIds) {
+    return FirebaseAdapter.markNotificationsReadBulk(userId, notifIds);
   },
 
   async savePrefs(userId, prefs) {

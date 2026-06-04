@@ -85,11 +85,28 @@ export const SwapAuctionsProvider = ({ children }) => {
         FirebaseAdapter.getSwapAuctionsForGroups(groupIds),
         FirebaseAdapter.getMyAuctions(userId),
       ]);
-      // Hide expired locally + remove my own from the "open" list (UX: don't bid on yourself)
       const now = Date.now();
-      const filterActive = a => a.status === 'open' && (!a.expiresAt || new Date(a.expiresAt).getTime() > now);
+      const isExpired = a => !!a.expiresAt && new Date(a.expiresAt).getTime() <= now;
+
+      // Auto-expire no servidor: leilões `open` cujo plantão ofertado já passou
+      // viram `expired`. expiresAt é setado pra startISO no createAuction.
+      // Sem isso, leilão de plantão passado fica "vivo" pra sempre.
+      const stale = [...open, ...mine].filter(a => a.status === 'open' && isExpired(a));
+      for (const a of stale) {
+        FirebaseAdapter.expireSwapAuction(a.id).catch(() => {});
+      }
+
+      // Disponíveis: só `open` E ainda ativos E que não sejam meus.
+      const filterActive = a => a.status === 'open' && !isExpired(a);
       setAuctions(open.filter(filterActive).filter(a => String(a.initiatorUserId) !== userId));
-      setMyAuctions(mine);
+
+      // Minhas: só `open` E ativos (sem mostrar expired/cancelled/matched).
+      // Histórico vai pra HistoricoScreen, não aqui.
+      const myActive = mine
+        .filter(filterActive)
+        .map(a => stale.find(s => s.id === a.id) ? { ...a, status: 'expired' } : a)
+        .filter(a => a.status === 'open');
+      setMyAuctions(myActive);
     } catch (err) {
       Logger.warn(`[SwapAuctions] refresh: ${err?.message}`);
     } finally {

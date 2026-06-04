@@ -15,12 +15,30 @@ import {
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useGroups } from '../contexts/GroupsContext';
 import { AuthContext } from '../context/AuthContext';
-import WebClientApiService from '../services/WebClientApiService';
 import Logger from '../utils/Logger';
 import { COLOR_PALETTE, getGroupColors, saveGroupColor } from '../utils/GroupColorConfig';
 import { useColors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
 
 const { width } = Dimensions.get('window');
+
+// Coerções defensivas — aceita string ou objeto e devolve string vazia/válida.
+// Usado pra renderizar campos vindos do model NormalizedUser (council = {id,state})
+// ou do webClient (council = string) sem quebrar React.
+const _str = (v) => {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  return ''; // qualquer objeto/array — quem chama trata via campo específico
+};
+const _councilStr = (c) => {
+  if (!c) return '';
+  if (typeof c === 'string') return c;
+  if (typeof c === 'object') {
+    const parts = [c.crm, c.id, c.state].filter(Boolean);
+    return parts.length ? parts.join(' · ') : '';
+  }
+  return String(c);
+};
 
 const MemberCard = ({ member, type }) => {
   const C = useColors();
@@ -59,10 +77,10 @@ const MemberCard = ({ member, type }) => {
       </View>
 
       <View style={s.memberInfo}>
-        <Text style={s.memberName}>{member.name || member.full_name}</Text>
-        <Text style={s.memberRole}>{member.role}</Text>
-        {member.council && (
-          <Text style={s.memberCouncil}>{member.council}</Text>
+        <Text style={s.memberName}>{_str(member.name || member.full_name)}</Text>
+        {!!_str(member.role) && <Text style={s.memberRole}>{_str(member.role)}</Text>}
+        {!!_councilStr(member.council) && (
+          <Text style={s.memberCouncil}>{_councilStr(member.council)}</Text>
         )}
         <Text style={[s.memberType, { color: typeIcon.color }]}>{typeLabel}</Text>
       </View>
@@ -133,15 +151,38 @@ const GroupCard = ({ group, initialExpanded = false, onCardLayout, customColor, 
   const [loadingMembers, setLoadingMembers] = useState(false);
   const [memberSearch, setMemberSearch] = useState('');
   const { token } = useContext(AuthContext);
+  const { getGroupMembers } = useGroups();
 
   const displayColor = customColor || group.color || C.primary;
 
-  const partialMembers = [
-    ...(group.manager ? [{ ...group.manager, type: 'manager' }] : []),
-    ...(group.assists || []).map(m => ({ ...m, type: 'assist' })),
-    ...(group.analysts || []).map(m => ({ ...m, type: 'analyst' })),
-    ...(group.observers || []).map(m => ({ ...m, type: 'observer' })),
-  ];
+  // Aurora groups (isAuroraGroup) vêm com membros no contexto via
+  // fetchAuroraGroupMembers. WebClient groups têm manager/assists/etc no doc
+  // do grupo e fetchFullGroupDetails bate na PlantãoAPI.
+  const isAuroraGroup = group.isAuroraGroup === true;
+
+  const auroraMembers = isAuroraGroup
+    ? (getGroupMembers(group.id) || []).map(m => {
+        const p = m.person || {};
+        return {
+          id: p.id || m.userId,
+          name: p.name || '',
+          full_name: p.name || '',
+          photo: p.photo || null,
+          council: p.council || '',
+          role: p.role || 'Médico',
+          type: m.memberType || 'member',
+        };
+      })
+    : [];
+
+  const partialMembers = isAuroraGroup
+    ? auroraMembers
+    : [
+        ...(group.manager ? [{ ...group.manager, type: 'manager' }] : []),
+        ...(group.assists || []).map(m => ({ ...m, type: 'assist' })),
+        ...(group.analysts || []).map(m => ({ ...m, type: 'analyst' })),
+        ...(group.observers || []).map(m => ({ ...m, type: 'observer' })),
+      ];
 
   const totalMembers = group.total_users || partialMembers.length;
 
@@ -155,33 +196,8 @@ const GroupCard = ({ group, initialExpanded = false, onCardLayout, customColor, 
     : displayMembers;
 
   const fetchFullGroupDetails = async () => {
-    if (fullMembers || !token) return;
-
-    setLoadingMembers(true);
-    try {
-      const response = await WebClientApiService.getGroupMembers(token, group.id);
-      if (response.success && response.data && response.data.length > 0) {
-        const members = response.data.map(m => ({
-          id: m.id,
-          name: m.name || m.full_name || '',
-          full_name: m.full_name || m.name || '',
-          photo: m.photo || null,
-          council: m.council || '',
-          email: m.email || '',
-          phone: m.phone || '',
-          role: m.role || m.description || '',
-          type: m.member_type || m.type || 'analyst',
-        }));
-        setFullMembers(members);
-        Logger.info(`👥 Grupo ${group.name}: ${members.length} membros carregados via /members`);
-      } else {
-        Logger.warn(`⚠️ Nenhum membro retornado para grupo ${group.name}`);
-      }
-    } catch (error) {
-      Logger.error(`Erro ao buscar membros do grupo ${group.id}:`, error);
-    } finally {
-      setLoadingMembers(false);
-    }
+    // Sem webClient: membros vêm do contexto (grupos aurora) ou do próprio doc
+    // do grupo (manager/assists/analysts/observers). Nada a buscar na PlantãoAPI.
   };
 
   const handleToggleExpand = () => {
@@ -583,41 +599,10 @@ const GroupsScreen = ({ navigation, focusGroupId = null, onRefreshReady }) => {
 
   const loadAllGroups = async () => {
     if (allGroupsLoaded || allGroupsLoading) return;
-    setAllGroupsLoading(true);
-    try {
-      const response = await WebClientApiService.getGroups(token, true);
-      if (response?.data?.items) {
-        const normalized = response.data.items
-          .map(g => ({
-            id: g.id,
-            name: g.name || '',
-            color: (g.color || '007AFF').startsWith('#') ? g.color : `#${g.color || '007AFF'}`,
-            is_personal: g.is_personal || false,
-            is_removed: g.is_removed || false,
-            logo: g.logo || null,
-            is_admin: g.is_admin || false,
-            total_users: g.total_users || 0,
-            created_at: g.created_at || null,
-            has_workingtime: g.has_workingtime || false,
-            has_amount: g.has_amount || false,
-            unread_notices: g.unread_notices || 0,
-            institution: g.institution ? { id: g.institution.id, name: g.institution.name || '' } : null,
-            manager: g.manager || null,
-            assists: Array.isArray(g.assists) ? g.assists : [],
-            analysts: Array.isArray(g.analysts) ? g.analysts : [],
-            observers: Array.isArray(g.observers) ? g.observers : [],
-          }))
-          .filter(g => !g.is_removed);
-        setAllGroups(normalized);
-        Logger.info(`🏢 Todos os grupos carregados: ${normalized.length}`);
-      }
-      setAllGroupsLoaded(true);
-    } catch (err) {
-      Logger.error('Erro ao carregar todos os grupos:', err);
-      Alert.alert('Erro', 'Não foi possível carregar todos os grupos');
-    } finally {
-      setAllGroupsLoading(false);
-    }
+    // Sem webClient: "Todos" reflete os grupos já conhecidos no contexto
+    // (mesma fonte de "Meus"), sem descobrir grupos via PlantãoAPI.
+    setAllGroups((rawGroups || []).filter(g => !g.is_removed));
+    setAllGroupsLoaded(true);
   };
 
   const handleTabChange = (tab) => {
@@ -788,7 +773,6 @@ const GroupsScreen = ({ navigation, focusGroupId = null, onRefreshReady }) => {
           </View>
         )}
 
-        <View style={s.bottomSpacing} />
       </ScrollView>
     );
   };
@@ -857,10 +841,7 @@ const makeStyles = (C) => ({
     fontSize: 14,
     fontFamily: Typography.fontFamily.semiBold,
   },
-  bottomSpacing: {
-    height: 40,
-  },
-  // Segmented pill — mesmo padrão de TrocasAbertasScreen.
+  // Padrão segmented pill — mesmo de TrocasAbertasScreen.
   tabsBar: {
     flexDirection: 'row',
     marginHorizontal: Spacing.screen,

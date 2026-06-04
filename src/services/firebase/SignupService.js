@@ -1,7 +1,7 @@
 
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, signOut } from 'firebase/auth';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { collection, doc, setDoc, getDoc, getDocs, query, where, serverTimestamp } from 'firebase/firestore';
+import { collection, doc, setDoc, getDoc, getDocs, query, where, serverTimestamp } from './fdb';
 import { db, auth, storage } from './config';
 
 // Maps Firebase Auth error codes to user-friendly Portuguese messages.

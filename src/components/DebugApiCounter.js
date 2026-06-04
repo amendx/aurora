@@ -4,8 +4,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import ApiCounter from '../utils/ApiCounter';
 
 /**
- * Floating debug pill showing total webClient API requests this session.
- * Tap to reset. Mounted once at the App root, sits above every screen.
+ * Floating debug pill showing total Firestore operations this session
+ * (reads + writes + listener deliveries). Tap to reset. Mounted at App root.
  */
 export default function DebugApiCounter() {
   const insets = useSafeAreaInsets();
@@ -25,7 +25,7 @@ export default function DebugApiCounter() {
     <View pointerEvents="box-none" style={[s.host, { paddingTop: insets.top + 6 }]}>
       <Pressable onPress={() => ApiCounter.reset()} style={[s.pill, flash && s.pillFlash]}>
         <View style={s.dot} />
-        <Text style={s.label}>API</Text>
+        <Text style={s.label}>FB</Text>
         <Text style={s.value}>{count}</Text>
       </Pressable>
     </View>

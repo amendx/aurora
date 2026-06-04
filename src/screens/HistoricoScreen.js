@@ -135,7 +135,7 @@ export default function HistoricoScreen({ navigation }) {
   return (
     <View style={[s.root, { backgroundColor: C.background.secondary }]}>
       <ScrollView
-        contentContainerStyle={{ padding: Spacing.screen, paddingBottom: insets.bottom + 32 }}
+        contentContainerStyle={{ padding: Spacing.screen, paddingBottom: Spacing.lg }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.primary} />}
       >
         {loadingHistory && !refreshing && history.length === 0 && pendingCount === 0 ? (

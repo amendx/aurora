@@ -32,9 +32,46 @@ service cloud.firestore {
       return isFirebaseUser(userId) || isWebClientUser();
     }
 
+    // Managers/admins (Aurora accounts) may read any user profile — needed for the
+    // "Profissionais" screen where they assign hospitals/groups. Read-only; writes to a
+    // user doc still require the owner.
+    function isManagerOrAdmin() {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['gestor', 'admin'];
+    }
+    // Platform admins may edit other users (assign role, approve access). Trusted role.
+    function isAdmin() {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    // Per-institution role helpers — managerIds/coordIds são denormalizados no doc
+    // da institution; subcoleção members/{uid} é a fonte de verdade auditável. Arrays
+    // existem só pra filtragem rápida e gates de rule. App garante consistência via
+    // batch writes — rules não enforçam.
+    function _instData(instId) {
+      return get(/databases/$(database)/documents/institutions/$(instId)).data;
+    }
+    function isManagerOfInst(instId) {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/institutions/$(instId))
+        && (request.auth.uid in _instData(instId).managerIds);
+    }
+    function isCoordOfInst(instId) {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/institutions/$(instId))
+        && (request.auth.uid in _instData(instId).coordIds);
+    }
+    function isStaffOfInst(instId) {
+      return isManagerOfInst(instId) || isCoordOfInst(instId);
+    }
+
     // ── Structured paths: users/{userId}/... ─────────────────────────────────
     match /users/{userId} {
-      allow read, write: if canAccess(userId);
+      allow read: if canAccess(userId) || isManagerOrAdmin();
+      allow write: if canAccess(userId) || isAdmin();
 
       match /financialConfig/{doc} {
         allow read, write: if canAccess(userId);
@@ -49,6 +86,12 @@ service cloud.firestore {
         allow read, write: if canAccess(userId);
       }
       match /persons/{personId} {
+        allow read, write: if canAccess(userId);
+      }
+      // [WEBCLIENT-BRIDGE] Archive separado pros grupos/pessoas/memberships
+      // que vieram do webClient. Aurora-only path (groups/persons/groupMembers
+      // acima) só vê dados aurora reais. Archive é só pra display histórico.
+      match /webClientArchive/{kind}/{docId} {
         allow read, write: if canAccess(userId);
       }
       match /todayCoworkers/{shiftId} {
@@ -179,6 +222,94 @@ service cloud.firestore {
         match /days/{dateStr} {
           allow read, write: if request.auth != null || request.auth == null;
         }
+      }
+    }
+
+    // ── Aurora-native collaborative groups ───────────────────────────────────
+    // Cross-user groups vinculados a um hospital (institutionId). Médicos só veem
+    // grupos onde foram explicitamente adicionados por manager/coord do hospital
+    // (self-join por código foi removido — agora vai por convite via cloud function
+    // ou criação direta por staff).
+    //
+    // BLINDADO: requires a real Firebase Auth account. WebClient users (anonymous
+    // at Firestore) são bloqueados — a web precisa gatekeepar antes de bater aqui.
+    match /auroraGroups/{groupId} {
+      // Read: membro do grupo OU staff (manager/coord) do hospital dono OU admin.
+      allow read: if isAdmin()
+        || (request.auth != null && (request.auth.uid in resource.data.memberIds))
+        || isStaffOfInst(resource.data.institutionId);
+
+      // Create: admin, OU manager/coord do hospital alvo. Caller deve stampar
+      // createdBy = self e estar em memberIds.
+      allow create: if request.auth != null
+        && request.resource.data.createdBy == request.auth.uid
+        && (request.auth.uid in request.resource.data.memberIds)
+        && (
+          isAdmin()
+          || isManagerOfInst(request.resource.data.institutionId)
+          || isCoordOfInst(request.resource.data.institutionId)
+        );
+
+      // Update: staff do hospital dono ou admin. Membros comuns (médicos) não editam.
+      // institutionId é imutável pelos não-admins — mover grupo de hospital é coisa de admin.
+      allow update: if isAdmin()
+        || (
+          isStaffOfInst(resource.data.institutionId)
+          && request.resource.data.institutionId == resource.data.institutionId
+          && request.resource.data.createdBy == resource.data.createdBy
+        );
+
+      // Delete: criador ou admin.
+      allow delete: if isAdmin()
+        || (request.auth != null && request.auth.uid == resource.data.createdBy);
+    }
+
+    // ── Institutions (hospitais/clínicas registrados por managers/admins) ────
+    // Read PÚBLICO: usado no autocomplete de cadastro (roda antes do login).
+    // Create: só admin ou gestor (role global). Caller vira manager (managerIds inclui self).
+    // Update: admin (qualquer campo) ou manager-do-hospital (exceto membership/audit).
+    // Delete: admin ou criador.
+    //
+    // Membership management é via subcoleção members/{uid} + arrays denormalizados
+    // (managerIds/coordIds) — app deve manter consistência via writeBatch.
+    match /institutions/{institutionId} {
+      allow read: if true;
+
+      allow create: if isManagerOrAdmin()
+        && request.resource.data.createdBy == request.auth.uid
+        && (request.auth.uid in request.resource.data.managerIds)
+        && request.resource.data.managerIds is list
+        && request.resource.data.coordIds is list;
+
+      // Admin: edita tudo. Manager-do-hospital: edita tudo EXCETO membership/audit.
+      // Membership só muda via subcoleção + batch — campos managerIds/coordIds/createdBy/createdAt
+      // ficam imutáveis pra manager (admin pode forçar se precisar consertar).
+      allow update: if isAdmin()
+        || (
+          isManagerOfInst(institutionId)
+          && !request.resource.data.diff(resource.data).affectedKeys()
+              .hasAny(['managerIds', 'coordIds', 'createdBy', 'createdAt'])
+        )
+        // Caso especial: app sincronizando managerIds/coordIds via batch write
+        // — é manager-do-hospital E está só mexendo nessas chaves de membership.
+        || (
+          isManagerOfInst(institutionId)
+          && request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['managerIds', 'coordIds'])
+        );
+
+      allow delete: if isAdmin()
+        || (request.auth != null && request.auth.uid == resource.data.createdBy);
+
+      // ── Subcoleção de membros (staff do hospital) ────────────────────────
+      // role: 'manager' | 'coord'. Manager controla adição/remoção; coord pode
+      // sair sozinho.
+      match /members/{memberUid} {
+        allow read: if isAdmin() || isStaffOfInst(institutionId);
+        allow create, update: if isAdmin() || isManagerOfInst(institutionId);
+        allow delete: if isAdmin()
+          || isManagerOfInst(institutionId)
+          || (request.auth != null && request.auth.uid == memberUid);
       }
     }
 

@@ -59,7 +59,7 @@ export default function NotificationsSettingsScreen({ navigation }) {
         {saving && <ActivityIndicator size="small" color={C.primary} style={{ marginLeft: 8 }} />}
       </View>
 
-      <ScrollView contentContainerStyle={{ padding: Spacing.screen, paddingBottom: insets.bottom + 32 }}>
+      <ScrollView contentContainerStyle={{ padding: Spacing.screen, paddingBottom: Spacing.lg }}>
         {/* Master toggle */}
         <View style={[s.card, { backgroundColor: C.background.elevated, borderColor: C.border.light }]}>
           <View style={s.row}>

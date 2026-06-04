@@ -21,15 +21,20 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useShifts } from '../contexts/ShiftsContext';
 import { useOpenings } from '../contexts/OpeningsContext';
 import { useOffers } from '../contexts/OffersContext';
+import { useGroups } from '../contexts/GroupsContext';
 import { useColors, Typography, Spacing, BorderRadius, Shadows } from '../constants/DesignSystem';
 import { getFullShiftConfig, calculateShiftValueSync, roundCurrency, getShiftPeriod, shouldUseWeekendValue } from '../utils/ShiftValueCalculator';
 import ShiftBottomSheet from '../components/ShiftBottomSheet';
 import CederFlowSheet from './CederFlowSheet';
 import TrocarFlowSheet from './TrocarFlowSheet';
+import TrocaDetailSheet from './TrocaDetailSheet';
+import CessaoDetailSheet from './CessaoDetailSheet';
 import AddManualShiftModal from '../components/AddManualShiftModal';
 import { AuthContext } from '../context/AuthContext';
 import { getGroupColors } from '../utils/GroupColorConfig';
+import { movementVisual } from '../utils/MovementColors';
 import TodayCoworkersService from '../services/TodayCoworkersService';
+import { deriveShiftStatus, SHIFT_STATUS_META, statusTone, SHIFT_STATUS } from '../utils/shiftStatus';
 
 const WEEKDAYS_PT = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
 const MONTHS_FULL_PT = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
@@ -75,12 +80,14 @@ const buildWeekDays = (centerDate) => {
 
 // ── DayViewScreen ──────────────────────────────────────────────────────────────
 
-const DayViewScreen = ({ navigation, initialDate }) => {
+const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
   const C = useColors();
   const insets = useSafeAreaInsets();
   const { daysWithShifts, hoursReport } = useShifts();
-  const { myCededOpenings, refresh: refreshOpenings } = useOpenings();
-  const { swapsSent, swapsReceived, offersSent } = useOffers();
+  const { myCededOpenings, refresh: refreshOpenings, cancelCedeOpening } = useOpenings();
+  const { swapsSent, swapsReceived, offersSent, cancelSwap, cancelOffer } = useOffers();
+  const { coworkersById } = useGroups();
+  const { deleteManualShift, restoreShiftLocally } = useShifts();
   const { user } = useContext(AuthContext);
 
   useEffect(() => { refreshOpenings?.(true); }, [refreshOpenings]);
@@ -101,6 +108,26 @@ const DayViewScreen = ({ navigation, initialDate }) => {
 
   const [shiftPickerVisible, setShiftPickerVisible] = useState(false);
   const [addModalVisible, setAddModalVisible] = useState(false);
+
+  // Foco + lista (mockup Aurora · Dia + Detalhe · variação C).
+  // Só o plantão em foco exibe ações; os demais ficam como linhas compactas.
+  // null = nenhum em foco (todos colapsados). Pode ser controlado externamente
+  // pelo caller (ex: HomeScreen.navigate('DayView', { focusShiftId })).
+  const [focusedShiftId, setFocusedShiftId] = useState(initialFocusShiftId || null);
+  // Confirmação que SEMPRE nomeia o plantão exato (turno · dia · hospital).
+  const [confirmIntent, setConfirmIntent] = useState(null); // { action, shift }
+  // Detalhe da troca/cessão aberto ao tocar no status banner.
+  const [detailSwap, setDetailSwap] = useState(null); // { swap, mode }
+  const [detailCessao, setDetailCessao] = useState(null); // opening
+  // Toast pós-ação.
+  const [doneAction, setDoneAction] = useState(null);
+  const doneTimerRef = useRef(null);
+  const fireDone = (action) => {
+    setDoneAction(action);
+    if (doneTimerRef.current) clearTimeout(doneTimerRef.current);
+    doneTimerRef.current = setTimeout(() => setDoneAction(null), 2200);
+  };
+  useEffect(() => () => { if (doneTimerRef.current) clearTimeout(doneTimerRef.current); }, []);
 
   const swipePan = useRef(PanResponder.create({
     onMoveShouldSetPanResponder: (_, g) =>
@@ -188,7 +215,16 @@ const DayViewScreen = ({ navigation, initialDate }) => {
       };
     });
 
-    return [...annotated, ...ceded];
+    // Dedup por id — evita renderizar o mesmo plantão duas vezes (e o warning
+    // "two children with the same key"). Pode ocorrer se um ghost de cessão
+    // coincidir com o shift base, ou se daysWithShifts trouxer duplicata.
+    const seen = new Set();
+    return [...annotated, ...ceded].filter((sh, i) => {
+      const k = sh?.id != null ? String(sh.id) : `idx_${i}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
   }, [baseDayShifts, myCededOpenings, selectedDateStr, swapsSent, swapsReceived, offersSent]);
 
   useEffect(() => {
@@ -204,6 +240,27 @@ const DayViewScreen = ({ navigation, initialDate }) => {
     const itemCenter = DAY_PADDING + 3 * DAY_ITEM_TOTAL + DAY_ITEM_TOTAL / 2;
     daySelectorRef.current?.scrollTo({ x: Math.max(0, itemCenter - W / 2), animated: true });
   }, [selectedDateStr]);
+
+  // Auto-foco do shift pedido via prop (Home → DayView com shift específico).
+  // Roda 1x quando dayShifts ficar pronto pra esse id.
+  const initialFocusAppliedRef = useRef(false);
+  useEffect(() => {
+    if (initialFocusAppliedRef.current) return;
+    if (!initialFocusShiftId || !dayShifts.length) return;
+    if (dayShifts.some(sh => String(sh.id) === String(initialFocusShiftId))) {
+      setFocusedShiftId(initialFocusShiftId);
+      initialFocusAppliedRef.current = true;
+    }
+  }, [dayShifts, initialFocusShiftId]);
+
+  // Reseta foco quando o shift atual sai do dia (mudou de data, etc.).
+  // NÃO faz auto-foco do primeiro — todos podem ficar colapsados.
+  useEffect(() => {
+    if (!focusedShiftId) return;
+    const stillValid = dayShifts.some(sh => String(sh.id) === String(focusedShiftId));
+    if (!stillValid) setFocusedShiftId(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dayShifts]);
 
   useEffect(() => {
     if (shiftPickerVisible) {
@@ -264,14 +321,11 @@ const DayViewScreen = ({ navigation, initialDate }) => {
     return `${wd}, ${selectedDate.getDate()} de ${MONTHS_FULL_PT[selectedDate.getMonth()]}`;
   };
 
-  const renderShiftCard = (shift, index) => {
-    const d = new Date(shift.date + 'T00:00:00');
-    const groupColor = resolveGroupColor(shift);
-    const timeStr = parseShiftTime(shift.time);
-    const typeKey = shiftTypeKey(shift);
-    const badgeColor = SHIFT_TYPE_COLOR[typeKey] || C.primary;
+  // Cálculo de valor reaproveitado pelo FocusCard e pelo CompactRow.
+  // Mantém regras de loyalty/bonus/horas-extras como antes.
+  const computeShiftValue = (shift, index) => {
     const baseValue = calculateShiftValueSync(shift, shift.date, savedValues);
-    const value = (() => {
+    return (() => {
       let mult = 1;
       const monthlyHours = hoursReport?.realHours || 0;
       if (fullConfig?.loyaltyEnabled && fullConfig.loyaltyOptions?.length) {
@@ -312,159 +366,346 @@ const DayViewScreen = ({ navigation, initialDate }) => {
       }
       return roundCurrency(baseValue * mult) + extraValue;
     })();
+  };
 
-    let coworkers = TodayCoworkersService.getCoworkers(shift.id);
-    if (coworkers.length === 0) {
-      // Same dedup + self-exclusion the detail sheet applies (ShiftBottomSheet._getCoworkersForShift)
-      const selfId = user?.id ? String(user.id) : null;
-      const raw = [
-        ...(shift?.originalData?.coworkers || []),
-        ...(shift?.originalData?.vacancy?.coworkers || []),
-      ];
-      const seen = new Set();
-      coworkers = [];
-      for (const p of raw) {
-        if (!p?.id) continue;
-        const pid = String(p.id);
-        if (seen.has(pid)) continue;
-        if (selfId && pid === selfId) continue;
-        seen.add(pid);
-        coworkers.push(p);
-      }
+  // Handler central: roteia ações do FocusCard pro fluxo certo.
+  // Pra ações de risco (ceder/trocar/excluir + cancelar pendentes), abre
+  // ConfirmSheet que nomeia o plantão antes. Pra "registrar horas" e
+  // "ver interessados", dispara direto.
+  const handleShiftAction = (shift, action) => {
+    if (action === 'registrar_horas' || action === 'confirmar_presenca') {
+      openShiftDetail(shift);
+      return;
     }
-    const vacancies = TodayCoworkersService.getVacanciesByGroup(shift.id);
-    const totalVacancies = vacancies.reduce((acc, v) => acc + (v.available ?? 0), 0);
+    if (action === 'ver_interessados') {
+      // TODO: rotear pra TrocasAbertasScreen filtrada pela cessão deste shift.
+      fireDone('ver_interessados');
+      return;
+    }
+    // Ações de risco: ceder/trocar/excluir + cancelar pendentes — passam pela
+    // ConfirmActionSheet que sempre nomeia o plantão exato (turno · dia · hospital).
+    setConfirmIntent({ action, shift });
+  };
 
-    const pendingCede = shift._pendingCede;
-    const pendingSwap = shift._pendingSwap;
-    const pendingSwapRole = shift._pendingSwapRole; // 'initiator' | 'target'
-    const pendingOffer = shift._pendingOffer;
-    const isPending = !!(pendingCede || pendingSwap || pendingOffer);
-    const cardBg = isPending ? C.warning + '14' : C.background.card;
-    const cardBorder = isPending ? C.warning + '55' : C.border.light;
-    const accentColor = isPending ? C.warning : groupColor;
+  const executeConfirmedAction = async () => {
+    if (!confirmIntent) return;
+    const { action, shift } = confirmIntent;
+    setConfirmIntent(null);
+    try {
+      if (action === 'ceder') {
+        setCedeShift(shift);
+        return;
+      }
+      if (action === 'trocar') {
+        setTrocarShift(shift);
+        return;
+      }
+      if (action === 'excluir') {
+        if (shift.isManual) await deleteManualShift?.(shift.id, shift.monthKey);
+        fireDone('excluir');
+        return;
+      }
+      if (action === 'cancelar_troca') {
+        const swap = shift._pendingSwap;
+        if (swap) await cancelSwap?.(swap);
+        fireDone('cancelar_troca');
+        return;
+      }
+      if (action === 'cancelar_oferta') {
+        const offer = shift._pendingOffer;
+        if (offer) await cancelOffer?.(offer);
+        fireDone('cancelar_oferta');
+        return;
+      }
+      if (action === 'cancelar_cessao') {
+        const opening = shift._pendingCede;
+        if (opening) {
+          const r = await cancelCedeOpening?.(opening.id);
+          if (r?.success && r.restoredShift) restoreShiftLocally?.(r.restoredShift);
+        }
+        fireDone('cancelar_cessao');
+        return;
+      }
+    } catch (_) {
+      // ação falha silenciosa — toast genérico é OK
+    }
+  };
 
-    const pendingBadgeText = pendingCede
-      ? 'Cedido'
-      : pendingSwap
-        ? (pendingSwapRole === 'initiator' ? 'Troca pendente' : 'Pediram troca')
-        : pendingOffer ? 'Oferecido' : '';
-    const pendingSubText = pendingCede
-      ? 'Aguardando colega assumir'
-      : pendingSwap
-        ? (pendingSwapRole === 'initiator'
-            ? `Aguardando ${pendingSwap.targetUserName || 'colega'} aceitar`
-            : `${pendingSwap.initiatorUserName || 'Colega'} quer trocar com você`)
-        : pendingOffer ? `Cedido para ${pendingOffer.toUserName || 'colega'}` : '';
+  // Descrição dinâmica do status — usa nomes/contagens do pending state em vez
+  // do texto estático. Retorna também handler de tap pra abrir o detalhe certo.
+  const describeStatus = (shift, status) => {
+    const swap = shift?._pendingSwap;
+    const offer = shift?._pendingOffer;
+    const opening = shift?._pendingCede;
+    if (status === SHIFT_STATUS.EM_TROCA && swap) {
+      const target = swap.targetUserName || 'colega';
+      return { text: `Você e ${target} estão trocando`, onPress: () => setDetailSwap({ swap, mode: 'sent' }) };
+    }
+    if (status === SHIFT_STATUS.EM_TROCA && offer) {
+      const to = offer.toUserName || 'colega';
+      return { text: `Oferecido a ${to} — aguardando resposta`, onPress: null };
+    }
+    if (status === SHIFT_STATUS.TROCA_RECEBIDA && swap) {
+      const initiator = swap.initiatorUserName || 'Um colega';
+      return { text: `${initiator} quer trocar com você`, onPress: () => setDetailSwap({ swap, mode: 'received' }) };
+    }
+    if (status === SHIFT_STATUS.CEDIDO && opening) {
+      const interested = Array.isArray(opening.interests) ? opening.interests.length : 0;
+      const txt = interested > 0 ? `${interested} interessado${interested === 1 ? '' : 's'}` : 'Aguardando interessado';
+      return { text: txt, onPress: () => setDetailCessao(opening) };
+    }
+    if (status === SHIFT_STATUS.COBRINDO) {
+      const origin = shift?.originUserName || coworkersById?.[shift?.originUserId]?.name || 'colega';
+      return { text: `Recebido de ${origin}`, onPress: null };
+    }
+    return { text: SHIFT_STATUS_META[status]?.desc || '', onPress: null };
+  };
 
+  // ── Status banner (top do FocusCard) ─────────────────────────────────────
+  const renderStatusBanner = (shift, status) => {
+    const meta = SHIFT_STATUS_META[status];
+    if (!meta) return null;
+    const t = statusTone(meta.tone, C);
+    const iconName = ({
+      check: 'checkmark-circle', clock: 'time-outline',
+      swap: 'swap-horizontal', cede: 'megaphone-outline', login: 'enter-outline', x: 'close-circle',
+    })[meta.icon] || 'ellipse';
+    const { text: descText, onPress } = describeStatus(shift, status);
+    const baseStyle = [s.statusBanner, { backgroundColor: t.bg }];
+    const inner = (
+      <>
+        <View style={[s.statusBannerIcon, { backgroundColor: t.fg + '22' }]}>
+          <Ionicons name={iconName} size={13} color={t.fg} />
+        </View>
+        <Text style={[s.statusBannerLabel, { color: t.fg, fontFamily: Typography.fontFamily.bold }]} numberOfLines={1}>
+          {meta.label.toUpperCase()}
+        </Text>
+        <Text style={[s.statusBannerDesc, { color: t.fg }]} numberOfLines={1}>· {descText}</Text>
+        {onPress && <Ionicons name="chevron-forward" size={14} color={t.fg} style={{ opacity: 0.7 }} />}
+      </>
+    );
+    if (onPress) {
+      return (
+        <Pressable onPress={onPress} style={({ pressed }) => [baseStyle, pressed && { opacity: 0.85 }]}>
+          {inner}
+        </Pressable>
+      );
+    }
+    return <View style={baseStyle}>{inner}</View>;
+  };
+
+  // ── Status chip (linha compacta) ─────────────────────────────────────────
+  const renderStatusChip = (status) => {
+    const meta = SHIFT_STATUS_META[status];
+    if (!meta) return null;
+    const t = statusTone(meta.tone, C);
+    return (
+      <View style={[s.statusChip, { backgroundColor: t.bg }]}>
+        <Text style={[s.statusChipText, { color: t.fg, fontFamily: Typography.fontFamily.bold }]} numberOfLines={1}>
+          {meta.label.toUpperCase()}
+        </Text>
+      </View>
+    );
+  };
+
+  // ── Linha compacta (plantão fora de foco) ────────────────────────────────
+  const renderCompactRow = ({ shift, value, status, index = 0 }) => {
+    const groupColor = resolveGroupColor(shift);
+    const typeKey = shiftTypeKey(shift);
+    const badgeColor = SHIFT_TYPE_COLOR[typeKey] || C.primary;
+    const timeStr = parseShiftTime(shift.time) || `${shift.startTime || ''}${shift.endTime ? '–' + shift.endTime : ''}`;
+    const labelTxt = LABEL_MAP[shift.label] || LABEL_MAP[typeKey] || shift.label || 'Plantão';
     return (
       <Pressable
-        key={index}
-        style={({ pressed }) => [s.shiftCard, { backgroundColor: cardBg, borderColor: cardBorder }, pressed && { opacity: 0.85 }]}
-        onPress={() => openShiftDetail(shift)}
+        key={`c-${shift.id ?? 'x'}-${index}`}
+        onPress={() => setFocusedShiftId(shift.id)}
+        style={({ pressed }) => [s.compactRow, { backgroundColor: C.background.card, borderColor: C.border.light }, pressed && { opacity: 0.85 }]}
       >
-        <View style={[s.shiftAccentBar, { backgroundColor: accentColor }]} />
-        <View style={s.shiftDateCol}>
-          <Text
-            style={[s.shiftDay, { color: C.text.primary }]}
-            numberOfLines={1}
-            adjustsFontSizeToFit
-            minimumFontScale={0.6}
-            allowFontScaling={false}
-          >
-            {d.getDate()}
-          </Text>
-          <Text style={[s.shiftWday, { color: C.text.tertiary }]} numberOfLines={1} allowFontScaling={false}>
-            {d.toLocaleDateString('pt-BR', { weekday: 'short' }).replace('.', '')}
-          </Text>
+        <View style={[s.leftBar, { backgroundColor: groupColor }]} />
+        <View style={[s.shiftTypeBadge, { backgroundColor: badgeColor + '1f', marginLeft: 6 }]}>
+          <Text style={[s.shiftTypeBadgeText, { color: badgeColor }]}>{labelTxt}</Text>
         </View>
-        <View style={s.shiftInfoCol}>
-          <View style={s.shiftTopRow}>
-            <View style={[s.shiftTypeBadge, { backgroundColor: badgeColor + '1f' }]}>
-              <Text style={[s.shiftTypeBadgeText, { color: badgeColor }]}>
-                {LABEL_MAP[shift.label] || LABEL_MAP[typeKey] || shift.label || 'Plantão'}
-              </Text>
-            </View>
-            {timeStr ? <Text style={[s.shiftTime, { color: C.text.secondary }]}>{timeStr}</Text> : null}
-            {!isPending && shift.isFixedSchedule && (
-              <View style={{ paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, backgroundColor: C.accentSoft }}>
-                <Text style={{ fontSize: 9.5, fontFamily: Typography.fontFamily.bold, color: C.primary, letterSpacing: 0.4, textTransform: 'uppercase' }}>
-                  Fixa
-                </Text>
-              </View>
-            )}
-            {isPending && (
-              <View style={{ paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, backgroundColor: C.warning + '22' }}>
-                <Text style={{ fontSize: 9.5, fontFamily: Typography.fontFamily.bold, color: C.warning, letterSpacing: 0.4, textTransform: 'uppercase' }}>
-                  {pendingBadgeText}
-                </Text>
-              </View>
-            )}
-          </View>
-          {shift.group?.institution?.name
-            ? <Text style={[s.shiftInstitution, { color: C.text.primary }]} numberOfLines={1}>{shift.group.institution.name}</Text>
-            : null}
-          {shift.source === 'received' && (
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 }}>
-              <Ionicons name="enter-outline" size={11} color={C.text.secondary} />
-              <Text style={{ fontSize: 11, color: C.text.secondary }} numberOfLines={1}>
-                Recebido de {shift.originUserName || `Doutor#${String(shift.originUserId || '').slice(0, 6)}`}
-                {shift.isFixedSchedule_origin ? (
-                  <Text style={{ fontStyle: 'italic', color: C.text.tertiary }}> · escala fixa</Text>
-                ) : null}
-              </Text>
-            </View>
-          )}
-          {isPending && (
-            <Text style={{ fontSize: 11.5, color: C.warning, fontFamily: Typography.fontFamily.semiBold, marginTop: 2 }} numberOfLines={1}>
-              {pendingSubText}
-            </Text>
-          )}
-          <View style={s.shiftMeta}>
-            {shift.group?.name ? (
-              <>
-                <View style={[s.shiftGroupDot, { backgroundColor: groupColor }]} />
-                <Text style={[s.shiftGroupName, { color: C.text.tertiary }]} numberOfLines={1}>{shift.group.name}</Text>
-              </>
-            ) : null}
-            {(coworkers.length > 0 || totalVacancies > 0) && (() => {
-              // Mirror ShiftBottomSheet team mini-stack: coworker avatars, one vacancy
-              // placeholder, and a single combined overflow chip.
-              const hasV = totalVacancies > 0;
-              const personPreview = coworkers.slice(0, hasV ? 2 : 3);
-              const overflow = (coworkers.length - personPreview.length) + (totalVacancies - (hasV ? 1 : 0));
-              return (
-                <View style={s.coworkerStack}>
-                  {personPreview.map((p, i) => (
-                    <View key={p.id || i} style={[s.coworkerAvatar, { marginLeft: i === 0 ? 6 : -5, borderColor: C.background.card }]}>
-                      {p.photo
-                        ? <Image source={{ uri: p.photo }} style={s.coworkerAvatarImg} />
-                        : <View style={[s.coworkerAvatarFallback, { backgroundColor: C.accentSoft }]}>
-                            <Text style={[s.coworkerAvatarInitial, { color: C.primary }]}>{(p.name || '?').charAt(0).toUpperCase()}</Text>
-                          </View>
-                      }
-                    </View>
-                  ))}
-                  {hasV && (
-                    <View style={[s.coworkerAvatar, s.coworkerAvatarVacancy, { marginLeft: personPreview.length > 0 ? -5 : 6, borderColor: C.background.card, backgroundColor: C.warning + '18' }]}>
-                      <Ionicons name="star-outline" size={10} color={C.warning} />
-                    </View>
-                  )}
-                  {overflow > 0 && (
-                    <View style={[s.coworkerAvatar, s.coworkerAvatarOverflow, { marginLeft: -5, backgroundColor: C.border.light, borderColor: C.background.card }]}>
-                      <Text style={[s.coworkerAvatarOverflowText, { color: C.text.secondary }]}>+{overflow}</Text>
-                    </View>
-                  )}
-                </View>
-              );
-            })()}
-          </View>
+        <View style={{ flex: 1, marginLeft: 8 }}>
+          <Text style={[s.compactRowTitle, { color: C.text.primary }]} numberOfLines={1}>
+            {labelTxt} · {timeStr}
+          </Text>
+          {status && <View style={{ marginTop: 4 }}>{renderStatusChip(status)}</View>}
         </View>
-        <View style={s.shiftValueCol}>
-          {value > 0 ? <Text style={[s.shiftValue, { color: C.money }]}>{fmtBRLk(value)}</Text> : null}
-          <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
+        <View style={{ alignItems: 'flex-end' }}>
+          {value > 0 ? <Text style={[s.compactRowValue, { color: C.money }]}>{fmtBRLk(value)}</Text> : null}
+          <Ionicons name="chevron-down" size={14} color={C.text.tertiary} style={{ marginTop: 2 }} />
         </View>
       </Pressable>
+    );
+  };
+
+  // ── Action row do FocusCard (ações dependem do status) ───────────────────
+  const renderActionsRow = (shift, status) => {
+    if (status === SHIFT_STATUS.EM_TROCA) {
+      const info = statusTone('info', C);
+      return (
+        <Pressable
+          onPress={() => handleShiftAction(shift, shift._pendingOffer ? 'cancelar_oferta' : 'cancelar_troca')}
+          style={({ pressed }) => [s.actionBtnSecondary, { borderColor: info.line }, pressed && { opacity: 0.8 }]}
+        >
+          <Ionicons name="swap-horizontal" size={15} color={info.fg} />
+          <Text style={[s.actionBtnSecondaryText, { color: info.fg }]}>Cancelar {shift._pendingOffer ? 'cessão' : 'troca'}</Text>
+        </Pressable>
+      );
+    }
+    if (status === SHIFT_STATUS.TROCA_RECEBIDA) {
+      // Quem decide é o destinatário — abrindo bottom sheet existente p/ aceitar/recusar
+      return (
+        <Pressable onPress={() => openShiftDetail(shift)} style={({ pressed }) => [s.actionBtnPrimary, { backgroundColor: C.primary }, pressed && { opacity: 0.85 }]}>
+          <Ionicons name="open-outline" size={16} color="#fff" />
+          <Text style={s.actionBtnPrimaryText}>Ver proposta</Text>
+        </Pressable>
+      );
+    }
+    if (status === SHIFT_STATUS.CEDIDO) {
+      const opening = shift._pendingCede;
+      const interested = Array.isArray(opening?.interests) ? opening.interests.length : 0;
+      return (
+        <View style={{ flexDirection: 'row', gap: 9 }}>
+          <Pressable
+            onPress={() => handleShiftAction(shift, 'ver_interessados')}
+            style={({ pressed }) => [s.actionBtnPrimary, { flex: 1.3, backgroundColor: C.primary }, pressed && { opacity: 0.85 }]}
+          >
+            <Text style={s.actionBtnPrimaryText}>
+              Ver interessados{interested > 0 ? ` · ${interested}` : ''}
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => handleShiftAction(shift, 'cancelar_cessao')}
+            style={({ pressed }) => [s.actionBtnSecondary, { flex: 1, borderColor: C.border.light }, pressed && { opacity: 0.8 }]}
+          >
+            <Text style={[s.actionBtnSecondaryText, { color: C.text.secondary }]}>Cancelar cessão</Text>
+          </Pressable>
+        </View>
+      );
+    }
+    // confirmado / cobrindo / a_confirmar — primário "Registrar horas" + menu 3-pontos
+    const primaryConfirm = status === SHIFT_STATUS.A_CONFIRMAR;
+    return (
+      <FocusActionPrimary
+        shift={shift}
+        primaryConfirm={primaryConfirm}
+        onPrimary={() => handleShiftAction(shift, primaryConfirm ? 'confirmar_presenca' : 'registrar_horas')}
+        onMenuAction={(act) => handleShiftAction(shift, act)}
+        C={C}
+        s={s}
+      />
+    );
+  };
+
+  // ── Focus card (plantão expandido com detalhes + ações) ─────────────────
+  const renderFocusCard = ({ shift, index, value, status }) => {
+    const groupColor = resolveGroupColor(shift);
+    const typeKey = shiftTypeKey(shift);
+    const badgeColor = SHIFT_TYPE_COLOR[typeKey] || C.primary;
+    const labelTxt = LABEL_MAP[shift.label] || LABEL_MAP[typeKey] || shift.label || 'Plantão';
+    const timeStr = parseShiftTime(shift.time) || `${shift.startTime || ''}${shift.endTime ? '–' + shift.endTime : ''}`;
+    const hours = Math.round((shift.durationMinutes || 0) / 60 * 10) / 10;
+    const rate = hours > 0 && value > 0 ? roundCurrency(value / hours) : null;
+    const hospitalName = shift.group?.institution?.name || shift.group?.institutionName || shift.hospitalName || '';
+    const groupName = shift.group?.name || '';
+    const originName = shift.originUserName
+      || coworkersById?.[shift.originUserId]?.name
+      || (shift.originUserId ? `Doutor#${String(shift.originUserId).slice(0, 6)}` : null);
+
+    return (
+      <View
+        key={`f-${shift.id ?? 'x'}-${index}`}
+        style={[s.focusCard, { backgroundColor: C.background.card, borderColor: C.primary + '40' }]}
+      >
+        <View style={[s.leftBar, { backgroundColor: groupColor, zIndex: 2 }]} />
+        {renderStatusBanner(shift, status)}
+        <View style={s.focusCardBody}>
+          {/* Topo: tag tempo · hospital · grupo / valor previsto */}
+          <View style={{ flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <View style={[s.shiftTypeBadge, { backgroundColor: badgeColor + '1f' }]}>
+                  <Text style={[s.shiftTypeBadgeText, { color: badgeColor }]}>{labelTxt}</Text>
+                </View>
+                <Text style={[s.focusTimeText, { color: C.text.secondary }]}>{timeStr}</Text>
+              </View>
+              {!!hospitalName && (
+                <Text style={[s.focusHospital, { color: C.text.primary, fontFamily: Typography.fontFamily.display }]} numberOfLines={2}>
+                  {hospitalName}
+                </Text>
+              )}
+              {!!groupName && (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 7 }}>
+                  <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: groupColor }} />
+                  <Text style={[s.focusGroupName, { color: groupColor }]} numberOfLines={1}>{groupName}</Text>
+                </View>
+              )}
+            </View>
+            <View style={{ alignItems: 'flex-end', flexShrink: 0 }}>
+              {value > 0 ? (
+                <>
+                  <Text style={[s.focusValueLabel, { color: C.text.tertiary }]}>VALOR PREVISTO</Text>
+                  <Text style={[s.focusValueText, { color: C.money, fontFamily: Typography.fontFamily.display }]} numberOfLines={1}>
+                    {fmtBRLk(value)}
+                  </Text>
+                </>
+              ) : null}
+              {/* Collapse — só faz sentido com 2+ plantões (com 1 ele é sempre
+                  focado e não recolhe). */}
+              {dayShifts.length > 1 && (
+                <Pressable
+                  onPress={() => setFocusedShiftId(null)}
+                  hitSlop={8}
+                  style={({ pressed }) => [s.collapseBtn, { borderColor: C.border.light }, pressed && { opacity: 0.75 }]}
+                >
+                  <Ionicons name="chevron-up" size={15} color={C.text.tertiary} />
+                </Pressable>
+              )}
+            </View>
+          </View>
+
+          <View style={[s.hairline, { backgroundColor: C.border.light }]} />
+
+          {/* Linha "Horário" */}
+          <View style={s.focusInfoRow}>
+            <Ionicons name="time-outline" size={16} color={C.text.secondary} />
+            <Text style={[s.focusInfoLabel, { color: C.text.secondary }]}>Horário</Text>
+            <Text style={[s.focusInfoValue, { color: C.text.primary }]} numberOfLines={1}>
+              {timeStr} {hours > 0 ? <Text style={{ color: C.text.tertiary }}>({typeKey}) {hours}h</Text> : null}
+            </Text>
+          </View>
+
+          {/* "Recebido de" se aplicável */}
+          {originName && (
+            <View style={s.focusInfoRow}>
+              <Ionicons name="enter-outline" size={16} color={C.text.secondary} />
+              <Text style={[s.focusInfoLabel, { color: C.text.secondary }]}>Recebido de</Text>
+              <Text style={[s.focusInfoValue, { color: C.text.primary }]} numberOfLines={1}>{originName}</Text>
+            </View>
+          )}
+
+          {/* Composição do valor */}
+          {value > 0 && rate && hours > 0 && (
+            <View style={[s.compositionCard, { backgroundColor: C.background.secondary, borderColor: C.border.light }]}>
+              <Text style={[s.compositionLabel, { color: C.text.tertiary }]}>COMPOSIÇÃO DO VALOR</Text>
+              <View style={s.compositionRow}>
+                <Text style={[s.compositionLine, { color: C.text.secondary }]}>{fmtBRLk(rate)}/h × {hours}h</Text>
+                <Text style={[s.compositionLine, { color: C.text.primary }]}>+ {fmtBRLk(value)}</Text>
+              </View>
+              <View style={[s.hairline, { backgroundColor: C.border.light, marginVertical: 9 }]} />
+              <View style={s.compositionRow}>
+                <Text style={[s.compositionTotal, { color: C.text.primary }]}>Total</Text>
+                <Text style={[s.compositionTotalValue, { color: C.money }]}>{fmtBRLk(value)}</Text>
+              </View>
+            </View>
+          )}
+
+          <View style={[s.hairline, { backgroundColor: C.border.light, marginVertical: 13 }]} />
+
+          {renderActionsRow(shift, status)}
+        </View>
+      </View>
     );
   };
 
@@ -520,10 +761,10 @@ const DayViewScreen = ({ navigation, initialDate }) => {
         </ScrollView>
       </View>
 
-      {/* Shift list */}
+      {/* Shift list — padrão Foco + Lista (mockup Aurora · Dia + Detalhe · C) */}
       <ScrollView
         style={s.listArea}
-        contentContainerStyle={{ padding: Spacing.md, paddingBottom: insets.bottom + 80 }}
+        contentContainerStyle={{ padding: Spacing.md, paddingBottom: 80 }}
         showsVerticalScrollIndicator={false}
         decelerationRate="fast"
         overScrollMode="never"
@@ -535,9 +776,52 @@ const DayViewScreen = ({ navigation, initialDate }) => {
             <Text style={[s.emptyTitle, { color: C.text.primary, fontFamily: Typography.fontFamily.semiBold }]}>Nenhum plantão</Text>
             <Text style={[s.emptySubtitle, { color: C.text.secondary }]}>Sem turnos para este dia</Text>
           </View>
-        ) : (
-          dayShifts.map((shift, index) => renderShiftCard(shift, index))
-        )}
+        ) : (() => {
+          // Computa valor + status uma vez por shift; FocusCard usa tudo, CompactRow só value + status.
+          const enriched = dayShifts.map((sh, idx) => ({
+            shift: sh,
+            index: idx,
+            value: computeShiftValue(sh, idx),
+            status: deriveShiftStatus(sh, user?.id),
+          }));
+          const total = enriched.reduce((acc, e) => acc + (e.value || 0), 0);
+          const hours = enriched.reduce((acc, e) => acc + ((e.shift?.durationMinutes || 0) / 60), 0);
+          // NÃO reordena: cada card abre/fecha NA POSIÇÃO dele. Fallback foca o
+          // primeiro. (Reordenar fazia os cards "trocarem de lugar".)
+          const focusedId = focusedShiftId || enriched[0]?.shift?.id;
+          return (
+            <>
+              {/* DaySummary — N plantões · Xh / Total previsto */}
+              <View style={[s.daySummary, { backgroundColor: C.background.card, borderColor: C.border.light }]}>
+                <View style={{ flex: 1 }}>
+                  <Text style={[s.daySummaryEyebrow, { color: C.text.tertiary }]}>SEU DIA</Text>
+                  <Text style={[s.daySummaryTitle, { color: C.text.primary }]} numberOfLines={1}>
+                    {enriched.length} plant{enriched.length > 1 ? 'ões' : 'ão'} · {Math.round(hours)}h
+                  </Text>
+                </View>
+                <View style={{ alignItems: 'flex-end' }}>
+                  <Text style={[s.daySummaryEyebrow, { color: C.text.tertiary }]}>TOTAL PREVISTO</Text>
+                  <Text style={[s.daySummaryTotal, { color: C.money }]} numberOfLines={1}>
+                    {fmtBRLk(total) || 'R$ 0,00'}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={{ height: Spacing.md }} />
+
+              {enriched.map(({ shift, index, value, status }) => (
+                String(shift.id) === String(focusedId)
+                  ? renderFocusCard({ shift, index, value, status })
+                  : renderCompactRow({ shift, value, status, index })
+              ))}
+
+              <View style={s.footerHint}>
+                <Ionicons name="shield-outline" size={11} color={C.text.tertiary} />
+                <Text style={[s.footerHintText, { color: C.text.tertiary }]}>Só o plantão aberto tem ações</Text>
+              </View>
+            </>
+          );
+        })()}
       </ScrollView>
 
       {/* FAB — always visible, adds a manual shift */}
@@ -596,9 +880,201 @@ const DayViewScreen = ({ navigation, initialDate }) => {
         onClose={() => setAddModalVisible(false)}
         date={selectedDateStr}
       />
+
+      <ConfirmActionSheet
+        intent={confirmIntent}
+        C={C}
+        onCancel={() => setConfirmIntent(null)}
+        onConfirm={executeConfirmedAction}
+      />
+      <DoneActionToast action={doneAction} C={C} insetsBottom={insets.bottom} />
+
+      {detailSwap && (
+        <TrocaDetailSheet
+          visible
+          swap={detailSwap.swap}
+          mode={detailSwap.mode}
+          onClose={() => setDetailSwap(null)}
+        />
+      )}
+      {detailCessao && (
+        <CessaoDetailSheet
+          visible
+          opening={detailCessao}
+          onClose={() => setDetailCessao(null)}
+        />
+      )}
     </View>
   );
 };
+
+// ────────────────────────────────────────────────────────────────────────────
+// Componentes auxiliares — escopo do módulo, sem closures sobre estado.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Primário "Registrar horas" (ou "Confirmar presença" se a_confirmar) + menu 3-pontos.
+function FocusActionPrimary({ shift, primaryConfirm, onPrimary, onMenuAction, C, s }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const isManual = shift?.isManual === true;
+  return (
+    <View style={{ position: 'relative' }}>
+      <View style={{ flexDirection: 'row', gap: 9 }}>
+        <Pressable
+          onPress={onPrimary}
+          style={({ pressed }) => [s.actionBtnPrimary, { flex: 1, backgroundColor: primaryConfirm ? C.warning : C.primary }, pressed && { opacity: 0.85 }]}
+        >
+          <Ionicons name={primaryConfirm ? 'checkmark' : 'add'} size={16} color="#fff" />
+          <Text style={s.actionBtnPrimaryText}>
+            {primaryConfirm ? 'Confirmar presença' : 'Registrar horas'}
+          </Text>
+        </Pressable>
+        <Pressable
+          onPress={() => setMenuOpen(v => !v)}
+          style={({ pressed }) => [s.actionBtnDots, { backgroundColor: menuOpen ? C.background.secondary : C.background.card, borderColor: C.border.light }, pressed && { opacity: 0.85 }]}
+          hitSlop={6}
+        >
+          <Ionicons name="ellipsis-horizontal" size={18} color={C.text.secondary} />
+        </Pressable>
+      </View>
+      {menuOpen && (
+        <>
+          <Pressable onPress={() => setMenuOpen(false)} style={StyleSheet.absoluteFillObject} />
+          <View style={[s.actionMenu, { backgroundColor: C.background.card, borderColor: C.border.light }]}>
+            <Text style={[s.actionMenuTitle, { color: C.text.tertiary, borderBottomColor: C.border.light }]}>
+              Ações neste plantão
+            </Text>
+            {[
+              { id: 'trocar',  label: 'Trocar plantão', icon: 'swap-horizontal', danger: false },
+              { id: 'ceder',   label: 'Ceder ao grupo', icon: 'megaphone-outline', danger: false },
+              ...(isManual ? [{ id: 'excluir', label: 'Excluir', icon: 'trash-outline', danger: true }] : []),
+            ].map((a, i) => (
+              <Pressable
+                key={a.id}
+                onPress={() => { setMenuOpen(false); onMenuAction(a.id); }}
+                style={({ pressed }) => [
+                  s.actionMenuItem,
+                  i > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border.light },
+                  pressed && { backgroundColor: C.background.secondary },
+                ]}
+              >
+                <Ionicons name={a.icon} size={17} color={a.danger ? C.error : C.text.secondary} />
+                <Text style={[s.actionMenuItemText, { color: a.danger ? C.error : C.text.primary }]}>{a.label}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </>
+      )}
+    </View>
+  );
+}
+
+// Confirmação que NOMEIA o plantão exato.
+function ConfirmActionSheet({ intent, C, onCancel, onConfirm }) {
+  if (!intent) return null;
+  const { action, shift } = intent;
+  const meta = {
+    ceder:           { label: 'Ceder plantão',   desc: 'O plantão será oferecido ao grupo.',                color: C.primary, btn: 'Ceder' },
+    trocar:          { label: 'Trocar plantão',  desc: 'Você vai propor a troca a um colega.',              color: C.primary, btn: 'Trocar' },
+    excluir:         { label: 'Excluir plantão', desc: 'Remove o plantão da sua escala. Não pode desfazer.', color: C.error,  btn: 'Excluir' },
+    cancelar_troca:  { label: 'Cancelar troca',  desc: 'A proposta é desfeita e o plantão volta a ser seu.', color: C.error,  btn: 'Cancelar troca' },
+    cancelar_oferta: { label: 'Cancelar cessão', desc: 'A oferta direcionada é desfeita.',                  color: C.error,  btn: 'Cancelar cessão' },
+    cancelar_cessao: { label: 'Cancelar cessão', desc: 'O plantão sai do grupo e volta a ser seu.',         color: C.error,  btn: 'Cancelar cessão' },
+  }[action];
+  if (!meta) return null;
+  const typeKey = (shift?.label || '').charAt(0).toUpperCase();
+  const badgeColor = SHIFT_TYPE_COLOR[typeKey] || C.primary;
+  const labelTxt = LABEL_MAP[shift?.label] || LABEL_MAP[typeKey] || shift?.label || 'Plantão';
+  const dtStr = (() => {
+    if (!shift?.date) return '';
+    const d = new Date(shift.date + 'T00:00:00');
+    const wd = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'][d.getDay()];
+    return `${wd}, ${d.getDate()}/${String(d.getMonth() + 1).padStart(2, '0')}`;
+  })();
+  const timeStr = parseShiftTime(shift?.time) || `${shift?.startTime || ''}${shift?.endTime ? '–' + shift.endTime : ''}`;
+  const hospital = shift?.group?.institution?.name || shift?.group?.name || '';
+  return (
+    <Modal visible transparent animationType="fade" onRequestClose={onCancel}>
+      <Pressable onPress={onCancel} style={{ flex: 1, backgroundColor: 'rgba(15,20,26,0.45)', justifyContent: 'flex-end' }}>
+        <Pressable onPress={(e) => e.stopPropagation()} style={{
+          backgroundColor: C.background.card, borderTopLeftRadius: 20, borderTopRightRadius: 20,
+          padding: 20, paddingBottom: 30,
+        }}>
+          <View style={{ width: 36, height: 4, borderRadius: 2, backgroundColor: C.border.light, alignSelf: 'center', marginBottom: 14 }} />
+          <Text style={{ fontSize: 18, fontFamily: Typography.fontFamily.bold, color: C.text.primary, letterSpacing: -0.3 }}>
+            {meta.label}?
+          </Text>
+          <View style={{
+            flexDirection: 'row', alignItems: 'center', gap: 9, marginTop: 12,
+            padding: 11, borderRadius: 12, backgroundColor: C.background.secondary, borderWidth: StyleSheet.hairlineWidth, borderColor: C.border.light,
+          }}>
+            <View style={{ paddingHorizontal: 7, paddingVertical: 2, borderRadius: 5, backgroundColor: badgeColor + '1f' }}>
+              <Text style={{ fontSize: 9.5, fontFamily: Typography.fontFamily.bold, color: badgeColor, letterSpacing: 0.4, textTransform: 'uppercase' }}>
+                {labelTxt}
+              </Text>
+            </View>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text style={{ fontSize: 13.5, fontFamily: Typography.fontFamily.semiBold, color: C.text.primary }} numberOfLines={1}>
+                {labelTxt} · {dtStr}
+              </Text>
+              <Text style={{ fontSize: 11, color: C.text.tertiary, marginTop: 1 }} numberOfLines={1}>
+                {hospital}{timeStr ? ' · ' + timeStr : ''}
+              </Text>
+            </View>
+          </View>
+          <Text style={{ fontSize: 12.5, color: C.text.secondary, marginVertical: 14 }}>{meta.desc}</Text>
+          <View style={{ flexDirection: 'row', gap: 10 }}>
+            <Pressable
+              onPress={onCancel}
+              style={({ pressed }) => [{
+                flex: 1, padding: 13, borderRadius: 999,
+                borderWidth: StyleSheet.hairlineWidth, borderColor: C.border.light,
+                backgroundColor: C.background.card, alignItems: 'center',
+              }, pressed && { opacity: 0.85 }]}
+            >
+              <Text style={{ fontSize: 14, fontFamily: Typography.fontFamily.semiBold, color: C.text.secondary }}>Cancelar</Text>
+            </Pressable>
+            <Pressable
+              onPress={onConfirm}
+              style={({ pressed }) => [{
+                flex: 1.3, padding: 13, borderRadius: 999,
+                backgroundColor: meta.color, alignItems: 'center',
+              }, pressed && { opacity: 0.9 }]}
+            >
+              <Text style={{ fontSize: 14, fontFamily: Typography.fontFamily.bold, color: '#fff' }}>{meta.btn}</Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+// Toast pós-ação (2.2s).
+function DoneActionToast({ action, C, insetsBottom = 0 }) {
+  if (!action) return null;
+  const label = ({
+    ceder:           'Plantão cedido ao grupo',
+    trocar:          'Proposta de troca enviada',
+    excluir:         'Plantão removido',
+    cancelar_troca:  'Troca cancelada',
+    cancelar_oferta: 'Cessão cancelada',
+    cancelar_cessao: 'Cessão cancelada',
+    ver_interessados:'Abrindo interessados…',
+    confirmar_presenca: 'Presença confirmada',
+  })[action] || 'Feito';
+  return (
+    <View pointerEvents="none" style={{
+      position: 'absolute', left: 16, right: 16, bottom: 22 + insetsBottom,
+      flexDirection: 'row', alignItems: 'center', gap: 9,
+      padding: 12, paddingHorizontal: 14, borderRadius: 12,
+      backgroundColor: C.text.primary,
+      shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 16, shadowOffset: { width: 0, height: 6 }, elevation: 6,
+    }}>
+      <Ionicons name="checkmark" size={15} color="#fff" />
+      <Text style={{ fontSize: 13, color: '#fff', fontFamily: Typography.fontFamily.semiBold }}>{label}</Text>
+    </View>
+  );
+}
 
 const s = StyleSheet.create({
   root: { flex: 1 },
@@ -728,6 +1204,121 @@ const s = StyleSheet.create({
   pickerDot: { width: 10, height: 10, borderRadius: 5 },
   pickerItemLabel: { fontSize: Typography.fontSize.body, fontWeight: '500' },
   pickerItemSub: { fontSize: Typography.fontSize.footnote, marginTop: 1 },
+
+  // ── Foco + Lista (novo design Dia + Detalhe · variação C) ──────────────
+  daySummary: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    padding: 12, paddingHorizontal: 14, borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    ...Platform.select({
+      ios: { shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 6, shadowOffset: { width: 0, height: 1 } },
+      android: { elevation: 1 },
+    }),
+  },
+  daySummaryEyebrow: { fontSize: 9.5, fontWeight: '700', letterSpacing: 0.8 },
+  daySummaryTitle: { fontSize: 15, fontWeight: '700', marginTop: 2 },
+  daySummaryTotal: { fontSize: 19, fontWeight: '800', letterSpacing: -0.4, marginTop: 1 },
+
+  leftBar: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 4 },
+
+  focusCard: {
+    borderRadius: 18, borderWidth: 1, position: 'relative', overflow: 'hidden',
+    marginBottom: 11,
+    ...Platform.select({
+      ios: { shadowColor: '#000', shadowOpacity: 0.1, shadowRadius: 24, shadowOffset: { width: 0, height: 8 } },
+      android: { elevation: 4 },
+    }),
+  },
+  focusCardBody: { paddingHorizontal: 16, paddingVertical: 14, paddingLeft: 18 },
+  focusTimeText: { fontSize: 12.5, fontWeight: '600' },
+  focusHospital: { fontSize: 16.5, fontWeight: '800', letterSpacing: -0.3, marginTop: 9, lineHeight: 20 },
+  focusGroupName: { fontSize: 11, fontWeight: '700', letterSpacing: 0.6, textTransform: 'uppercase' },
+  focusValueLabel: { fontSize: 9, fontWeight: '700', letterSpacing: 0.8 },
+  focusValueText: { fontSize: 22, fontWeight: '800', letterSpacing: -0.4, marginTop: 3 },
+  collapseBtn: {
+    marginTop: 6,
+    width: 26, height: 22, borderRadius: 11,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  hairline: { height: StyleSheet.hairlineWidth, marginVertical: 14 },
+  focusInfoRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 5 },
+  focusInfoLabel: { flex: 1, fontSize: 13 },
+  focusInfoValue: { fontSize: 13, fontWeight: '700' },
+
+  compositionCard: {
+    marginTop: 14, padding: 13, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth,
+  },
+  compositionLabel: { fontSize: 9.5, fontWeight: '700', letterSpacing: 0.8, marginBottom: 9 },
+  compositionRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline' },
+  compositionLine: { fontSize: 12.5 },
+  compositionTotal: { fontSize: 13, fontWeight: '700' },
+  compositionTotalValue: { fontSize: 15, fontWeight: '700' },
+
+  // Status banner (cabeça do FocusCard)
+  statusBanner: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: 10, paddingHorizontal: 14, paddingLeft: 18 },
+  statusBannerIcon: { width: 22, height: 22, borderRadius: 7, alignItems: 'center', justifyContent: 'center' },
+  statusBannerLabel: { fontSize: 11, letterSpacing: 0.6, fontWeight: '800' },
+  statusBannerDesc: { flex: 1, fontSize: 11.5, fontWeight: '600' },
+
+  // Status chip (linha compacta)
+  statusChip: { alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999 },
+  statusChipText: { fontSize: 9.5, letterSpacing: 0.4, fontWeight: '800' },
+
+  // CompactRow
+  compactRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    padding: 12, paddingHorizontal: 14, borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    position: 'relative', overflow: 'hidden',
+    marginBottom: 11,
+    ...Platform.select({
+      ios: { shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 6, shadowOffset: { width: 0, height: 1 } },
+      android: { elevation: 1 },
+    }),
+  },
+  compactRowTitle: { fontSize: 13.5, fontWeight: '700' },
+  compactRowValue: { fontSize: 14, fontWeight: '800' },
+
+  // Action buttons / menu
+  actionBtnPrimary: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7,
+    paddingVertical: 13, borderRadius: 999,
+  },
+  actionBtnPrimaryText: { color: '#fff', fontSize: 14, fontWeight: '800' },
+  actionBtnSecondary: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7,
+    paddingVertical: 12, borderRadius: 999, borderWidth: StyleSheet.hairlineWidth,
+  },
+  actionBtnSecondaryText: { fontSize: 13.5, fontWeight: '700' },
+  actionBtnDots: {
+    width: 46, borderRadius: 999, borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  actionMenu: {
+    position: 'absolute', bottom: 52, right: 0, width: 220, zIndex: 9,
+    borderRadius: 14, borderWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
+    ...Platform.select({
+      ios: { shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 24, shadowOffset: { width: 0, height: 8 } },
+      android: { elevation: 8 },
+    }),
+  },
+  actionMenuTitle: {
+    fontSize: 9.5, fontWeight: '700', letterSpacing: 0.5,
+    padding: 9, paddingHorizontal: 13, borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  actionMenuItem: {
+    flexDirection: 'row', alignItems: 'center', gap: 11,
+    padding: 12, paddingHorizontal: 13,
+  },
+  actionMenuItemText: { fontSize: 13.5, fontWeight: '600' },
+
+  footerHint: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    marginTop: 16,
+  },
+  footerHintText: { fontSize: 10.5 },
 });
 
 export default DayViewScreen;

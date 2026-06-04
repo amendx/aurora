@@ -70,6 +70,9 @@ export function fromWebClient(item) {
   return {
     id: item.id || t.public_id,
     source: 'webClient',
+    // Vacancies do PlantaoAPI são conceitualmente vagas admin temporárias.
+    kind: isVacancy ? 'admin_temp' : 'cede',
+    status: 'active',
     startISO,
     endISO,
     dateKey,
@@ -87,6 +90,9 @@ export function fromWebClient(item) {
     webClientTransactionId: item.id || t.public_id || null,
     createdAt: startISO,
     createdBy: null,
+    createdByRole: 'doctor',
+    targetUserId: null,
+    recurrenceId: null,
     restrictedToGroupId: null,
     originShiftId: null,
     originUserId: null,
@@ -217,9 +223,13 @@ export function normalizeGroupDaySchedule(dateStr, group, dynamicSchedule) {
  */
 export function fromFirestore(doc) {
   const available = (doc.slots || []).filter(s => s.status === 'open').length;
+  // kind discriminador. Legados sem kind viraram cessão ao grupo (comportamento atual).
+  const kind = doc.kind === 'admin_temp' || doc.kind === 'admin_fixed' ? doc.kind : 'cede';
   return {
     id: doc.id,
     source: 'aurora',
+    kind,                                  // 'cede' | 'admin_temp' | 'admin_fixed'
+    status: doc.status || 'active',        // 'active' | 'cancelled' | 'claimed' | 'expired'
     startISO: doc.startISO,
     endISO: doc.endISO,
     dateKey: doc.dateKey,
@@ -229,6 +239,7 @@ export function fromFirestore(doc) {
     totalSlots: doc.totalSlots ?? (doc.slots?.length ?? 1),
     availableSlots: available,
     slots: doc.slots || [],
+    interests: Array.isArray(doc.interests) ? doc.interests : [],  // vaga de escala: médicos interessados
     group: doc.group || null,
     coworkers: [],
     estimatedValue: doc.estimatedValue ?? null,
@@ -238,6 +249,9 @@ export function fromFirestore(doc) {
     webClientTransactionId: null,
     createdAt: doc.createdAt,
     createdBy: doc.createdBy || null,
+    createdByRole: doc.createdByRole || 'doctor', // legados: cessão de médico
+    targetUserId: doc.targetUserId || null,       // null = ao grupo; uid = direcionada
+    recurrenceId: doc.recurrenceId || null,       // só pra kind='admin_fixed'
     restrictedToGroupId: doc.restrictedToGroupId || null,
     originShiftId: doc.originShiftId || null,
     originUserId: doc.originUserId || null,

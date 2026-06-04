@@ -434,7 +434,7 @@ const GroupDayTeamScreen = ({ navigation, date, groupIds }) => {
 
   return (
     <>
-      <ScrollView style={s.container} contentContainerStyle={{ paddingBottom: Spacing.xl }}>
+      <ScrollView style={s.container} contentContainerStyle={{ paddingBottom: Spacing.lg }}>
         <View style={s.headerWrap}>
           <Text style={s.dateLabel}>{dateLabel()}</Text>
           <Text style={s.subLabel}>

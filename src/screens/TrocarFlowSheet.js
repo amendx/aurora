@@ -55,7 +55,7 @@ export default function TrocarFlowSheet({ visible, shift: initialShift, presetTa
   const insets = useSafeAreaInsets();
   const s = makeStyles(C);
   const { user } = useContext(AuthContext);
-  const { groupsById, getGroupMembers } = useGroups();
+  const { groupsById, getShiftCapableGroupMembers } = useGroups();
   const { proposeSwap } = useOffers();
 
   // When the user opens Trocar from a colleague's row in GroupDayTeam we don't
@@ -80,7 +80,7 @@ export default function TrocarFlowSheet({ visible, shift: initialShift, presetTa
     const seen = new Map();
     Object.values(groupsById || {}).forEach(g => {
       const gid = String(g.public_id || g.id);
-      getGroupMembers(gid).forEach(m => {
+      getShiftCapableGroupMembers(gid).forEach(m => {
         const p = m.person;
         if (!p || String(p.id) === String(user.id)) return;
         if (!seen.has(p.id)) seen.set(p.id, { person: p, groupIds: new Set() });
@@ -90,7 +90,42 @@ export default function TrocarFlowSheet({ visible, shift: initialShift, presetTa
     return Array.from(seen.values())
       .map(({ person, groupIds }) => ({ person, groupIds: [...groupIds] }))
       .sort((a, b) => (a.person.name || '').localeCompare(b.person.name || '', 'pt-BR'));
-  }, [user?.id, groupsById, getGroupMembers]);
+  }, [user?.id, groupsById, getShiftCapableGroupMembers]);
+
+  // Set de uids aurora-capable (source='aurora' OU auroraOnlyMode=true).
+  // Quem não estiver, vai aparecer na lista desabilitado — pra preservar a
+  // informação dos grupos webClient sem permitir trocas que o target não
+  // conseguiria receber.
+  //
+  // Otimização + workaround de permissão: colegas que aparecem por um grupo
+  // aurora SÃO aurora-capable por definição (regras de auroraGroups exigem
+  // Firebase Auth). Marca esses como conhecidos sem precisar ler users/{uid}
+  // — a leitura cross-user é negada pelas rules quando o caller não é
+  // admin/gestor. Só consultamos o Firestore pros colegas que vêm exclusivamente
+  // de grupos webClient.
+  const [auroraCapableSet, setAuroraCapableSet] = useState(null);
+  useEffect(() => {
+    if (!visible || colleagues.length === 0) { setAuroraCapableSet(null); return; }
+    let cancelled = false;
+
+    const knownAurora = new Set();
+    const unknownUids = [];
+    colleagues.forEach(c => {
+      const inAuroraGroup = c.groupIds.some(gid => groupsById?.[gid]?.isAuroraGroup === true);
+      if (inAuroraGroup) knownAurora.add(String(c.person.id));
+      else unknownUids.push(String(c.person.id));
+    });
+
+    if (unknownUids.length === 0) {
+      setAuroraCapableSet(knownAurora);
+      return () => { cancelled = true; };
+    }
+
+    FirebaseAdapter.getAuroraCapableUsers(unknownUids).then(set => {
+      if (!cancelled) setAuroraCapableSet(new Set([...knownAurora, ...set]));
+    });
+    return () => { cancelled = true; };
+  }, [visible, colleagues, groupsById]);
 
   // Load user's own upcoming shifts when needed (step 0 / opened without a preselected shift)
   useEffect(() => {
@@ -175,11 +210,20 @@ export default function TrocarFlowSheet({ visible, shift: initialShift, presetTa
             _seen.set(key, sh);
           }
         }
-        // Filter to upcoming + passes initiator-side eligibility
+        // Filter to upcoming + passes initiator-side eligibility +
+        // não mesmo dia/turno do meu plantão (trocar M-day-X por M-day-X não
+        // tem sentido — slot equivalente).
+        const myDate = shift.date || (shift.startISO || '').slice(0, 10);
+        const myLabelChar = String(shift.label || '').charAt(0).toUpperCase();
         const out = deduped
           .filter(sh => {
             const date = sh.date || (sh.startISO || '').slice(0, 10);
             return date && date >= todayStr;
+          })
+          .filter(sh => {
+            const date = sh.date || (sh.startISO || '').slice(0, 10);
+            const labelChar = String(sh.label || '').charAt(0).toUpperCase();
+            return !(date === myDate && labelChar === myLabelChar);
           })
           .filter(sh => {
             try {
@@ -335,11 +379,15 @@ export default function TrocarFlowSheet({ visible, shift: initialShift, presetTa
               <Text style={s.empty}>Nenhum colega em seus grupos.</Text>
             ) : colleagues.map(c => {
               const sel = pickedColleague?.person?.id === c.person.id;
+              // null = ainda carregando (não desabilita); set = já carregado.
+              const isAurora = auroraCapableSet ? auroraCapableSet.has(String(c.person.id)) : true;
+              const disabled = auroraCapableSet !== null && !isAurora;
               return (
                 <TouchableOpacity
                   key={c.person.id}
-                  style={[s.memberRow, sel && { backgroundColor: C.accentSoft + '60' }]}
-                  onPress={() => setColl(c)}
+                  style={[s.memberRow, sel && { backgroundColor: C.accentSoft + '60' }, disabled && { opacity: 0.45 }]}
+                  onPress={() => { if (!disabled) setColl(c); }}
+                  disabled={disabled}
                 >
                   {c.person.photo
                     ? <Image source={{ uri: c.person.photo }} style={s.avatar} />
@@ -349,9 +397,14 @@ export default function TrocarFlowSheet({ visible, shift: initialShift, presetTa
                   }
                   <View style={{ flex: 1 }}>
                     <Text style={s.memberName} numberOfLines={1}>{c.person.name}</Text>
-                    <Text style={s.memberMeta}>{c.groupIds.length} grupo{c.groupIds.length !== 1 ? 's' : ''} em comum</Text>
+                    <Text style={s.memberMeta}>
+                      {disabled
+                        ? 'Ainda não usa Aurora'
+                        : `${c.groupIds.length} grupo${c.groupIds.length !== 1 ? 's' : ''} em comum`}
+                    </Text>
                   </View>
-                  {sel && <Ionicons name="checkmark-circle" size={20} color={C.primary} />}
+                  {sel && !disabled && <Ionicons name="checkmark-circle" size={20} color={C.primary} />}
+                  {disabled && <Ionicons name="lock-closed-outline" size={16} color={C.text.tertiary} />}
                 </TouchableOpacity>
               );
             })}
@@ -360,6 +413,8 @@ export default function TrocarFlowSheet({ visible, shift: initialShift, presetTa
 
         {step === 2 && (
           <ScrollView style={{ maxHeight: 460 }} contentContainerStyle={{ paddingHorizontal: 18, paddingBottom: 8 }}>
+            <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: C.border?.light || C.text.tertiary + '33', marginBottom: 10 }} />
+            <Text style={[s.eyebrow, { marginBottom: 8 }]}>Plantões disponíveis</Text>
             {presetTargetShiftId && pickedShift && (
               <Text style={[s.subtitle, { marginBottom: 8, marginTop: 0 }]}>
                 Você está trocando por este plantão específico. Para trocar por outro dia, cancele e selecione outro no calendário.

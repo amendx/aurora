@@ -29,11 +29,12 @@ Os plantões são carregados diretamente da sua conta. Qualquer mudança na plat
 
 ## <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:-3px;margin-right:6px"><rect x="3" y="12" width="4" height="8" rx="1"/><rect x="9" y="8" width="4" height="12" rx="1"/><rect x="15" y="4" width="4" height="16" rx="1"/></svg> Relatórios Financeiros
 
-Visibilidade total sobre seus ganhos. Aurora calcula o valor de cada plantão com base na sua configuração de valor por hora.
+Visibilidade total sobre seus ganhos. Aurora calcula o valor de cada plantão com base na configuração de cada hospital.
 
 **O que é calculado:**
-- Valor base por hora de plantão
+- Valor-base por hora, com tabela separada para semana e fim de semana
 - Adicional noturno (plantões noturnos têm peso diferente)
+- **Fidelização** — bônus por volume de horas no hospital (faixas, percentual fixo ou automático)
 - Horas extras registradas manualmente
 - Total mensal e histórico de meses anteriores
 
@@ -42,10 +43,95 @@ Visibilidade total sobre seus ganhos. Aurora calcula o valor de cada plantão co
 - Resumo compacto com total de horas e valor
 
 **Configuração:**
-Acesse Configurações → Valor do Plantão e defina:
-- Valor por hora (R$/h)
-- Configuração de adicional noturno
-- Grupos com valores diferentes
+Acesse Configurações → Plantões & valores → **Meus hospitais** e defina, por hospital:
+- Valor por hora (R$/h) para semana e fim de semana
+- Adicional noturno
+- Regras de fidelização e bônus
+
+---
+
+## <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:-3px;margin-right:6px"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg> Trocas de Plantão
+
+Não pode num dia, mas pode noutro? Proponha uma troca direta com um colega — sem grupo de WhatsApp.
+
+**Como funciona:**
+- Toque num plantão e escolha **Trocar**
+- Ofereça um dos seus plantões e escolha o que quer receber em troca
+- O colega recebe a proposta e pode **aceitar** ou **recusar**
+- Trocas abertas ficam visíveis para a equipe, que pode **fazer um lance**
+
+**Você dá / Você recebe:**
+Cada proposta mostra claramente o que sai e o que entra na sua escala, com data, turno e duração.
+
+---
+
+## <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:-3px;margin-right:6px"><path d="M18 8h1a4 4 0 0 1 0 8h-1"/><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4Z"/><line x1="6" y1="1" x2="6" y2="4"/><line x1="10" y1="1" x2="10" y2="4"/><line x1="14" y1="1" x2="14" y2="4"/></svg> Ceder Plantão
+
+Precisa abrir mão de um plantão? Ceda — para alguém específico ou para a equipe inteira.
+
+**Dois modos:**
+1. **Aberto** — qualquer colega elegível pode pegar o plantão
+2. **Direcionado** — você escolhe a pessoa para quem está cedendo
+
+O colega recebe a oferta na **Central de avisos** e confirma com um toque. Assim que aceito, o plantão sai da sua escala e entra na dele.
+
+---
+
+## <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:-3px;margin-right:6px"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg> Plantões Abertos & Vagas
+
+Plantões cedidos pela equipe e vagas em aberto ficam reunidos numa lista só.
+
+**O que você encontra:**
+- Plantões que colegas cederam e ainda estão disponíveis
+- Vagas em aberto nos seus grupos, com data, turno e duração
+- Indicação de **preenchidas** vs. disponíveis
+- Toque em **Quero esse plantão** para se candidatar
+
+---
+
+## <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:-3px;margin-right:6px"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49"/><path d="M7.76 16.24a6 6 0 0 1 0-8.49"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M4.93 19.07a10 10 0 0 1 0-14.14"/></svg> Vagas na Rede
+
+Saiba onde **falta gente** — nos seus grupos ou em toda a rede.
+
+**Como funciona:**
+- Veja onde a escala está descoberta hoje e nos próximos dias
+- Filtre por **Meus grupos** ou **Todos os grupos**
+- Visão **por equipe**, destacando onde falta gente com você
+- Ideal para pegar plantões extras ou ajudar a cobrir a equipe
+
+---
+
+## <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:-3px;margin-right:6px"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg> Central de Avisos
+
+Tudo que precisa da sua atenção, num lugar só.
+
+**Reúne:**
+- **Plantões oferecidos a você** — cessões direcionadas aguardando resposta
+- **Propostas de troca** — com o "Você dá / Você recebe" lado a lado
+- **Atividade recente** — o que aconteceu com suas ofertas e trocas
+- Ações rápidas de **Aceitar** / **Recusar** direto no aviso
+
+---
+
+## <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:-3px;margin-right:6px"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><polyline points="12 7 12 12 15 15"/></svg> Histórico
+
+Cada cessão e cada troca, do início ao fim.
+
+**O que você acompanha:**
+- Status de cada item: **Aceito**, **Recusado**, **Cancelado**, **Expirado** ou aguardando resposta
+- Cessões e trocas, pendentes e passadas
+- Cancele uma oferta ou cessão que ainda esteja em aberto
+
+---
+
+## <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:-3px;margin-right:6px"><path d="M3 3v18h18"/><polyline points="19 9 14 14 11 11 7 15"/></svg> Gráficos & Insights
+
+Tendências dos seus ganhos e plantões, além do número do mês.
+
+**O que você vê:**
+- Evolução de ganhos e horas ao longo dos meses
+- Toque nos pontos do gráfico para ver o detalhe de cada período
+- **Insights** automáticos sobre sua rotina de plantões
 
 ---
 
@@ -54,7 +140,7 @@ Acesse Configurações → Valor do Plantão e defina:
 Veja quem está de plantão com você hoje, sem precisar ligar ou mandar mensagem.
 
 **Como funciona:**
-- O Aurora consulta a API de escalas para o dia atual
+- O Aurora consulta a sua plataforma de escalas para o dia atual
 - Lista os colegas que estão escalados no mesmo local e turno
 - Atualiza em tempo real durante o plantão
 
@@ -89,14 +175,14 @@ Aurora foi construído para funcionar com a plataforma de gestão de escalas que
 
 **Dois modos de autenticação:**
 
-1. **Conta Aurora (Firebase):** Crie uma conta própria no Aurora. Ideal para quem quer usar o app independentemente.
+1. **Conta Aurora:** Crie uma conta própria no Aurora. Ideal para quem quer usar o app independentemente.
 
-2. **Conta WebClient:** Faça login com suas credenciais. Seus plantões são sincronizados diretamente sem precisar adicionar nada manualmente.
+2. **Conta da sua plataforma:** Faça login com suas credenciais. Seus plantões são sincronizados diretamente sem precisar adicionar nada manualmente.
 
 **Sincronização:**
 - Plantões carregam automaticamente ao abrir o app
 - Pull-to-refresh para atualizar manualmente
-- Cache local para uso offline
+- Funciona offline com os dados já carregados
 - Migração automática entre versões
 
 ---
@@ -120,12 +206,13 @@ Interface construída com os princípios de design do iOS — limpa, rápida e b
 ## <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:-3px;margin-right:6px"><path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 0 0-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 0 0-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 0 0-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 0 0-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 0 0 1.066-2.573c-.94-1.543.826-3.31 2.37-2.37a1.724 1.724 0 0 0 2.572-1.065z"/><circle cx="12" cy="12" r="3"/></svg> Configurações Avançadas
 
 **O que você pode configurar:**
-- Nome de exibição e foto de perfil
-- Valor por hora para cálculo financeiro
-- Configuração de adicional noturno
-- Visibilidade dos grupos
-- Preferência de tema (claro/escuro)
-- Logout de contas separadamente
+- **Perfil** — nome de exibição e foto
+- **Grupos** e **visibilidade de equipes** — quem aparece no seu plantão
+- **Meus hospitais** — valores por hora, fidelização e bônus por hospital
+- **Notificações** — ofertas, trocas e atualizações
+- **Histórico** — cessões e trocas, pendentes e passadas
+- Preferência de tema (claro/escuro, acompanha o sistema)
+- Limpeza de horas registradas e logout de contas separadamente
 
 ---
 

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
 import WebClientApiService from '../services/WebClientApiService';
 import Logger from '../utils/Logger';
 import { AuthContext } from '../context/AuthContext';
@@ -393,15 +393,16 @@ export const GroupsProvider = ({ children }) => {
       try {
         const { groups: gList, membersByGroupId: mbgi, persons } = await FirebaseAdapter.fetchAuroraGroupMembers(userId);
         if (cancelled) return;
-        if (gList.length) {
-          const groupsMap = {};
-          gList.forEach(g => { groupsMap[g.id] = g; });
-          setGroups(prev => ({ ...prev, ...groupsMap }));
-          LocalCache.saveGroups(userId, gList).catch(() => {});
-        }
-        if (Object.keys(mbgi).length) setMembersByGroupId(prev => ({ ...prev, ...mbgi }));
-        if (Object.keys(persons).length) setCoworkers(prev => ({ ...prev, ...persons }));
-        Logger.info(`👥 Aurora graph hydrated: ${gList.length} groups, ${Object.keys(mbgi).length} member-lists, ${Object.keys(persons).length} persons`);
+        // Aurora-only / aurora puro: Firestore é fonte autoritativa.
+        // REPLACE em vez de merge — evita lixo de sessões anteriores
+        // (ex.: grupos antigos do clone webClient sobrevivendo após seed limpo).
+        const groupsMap = {};
+        gList.forEach(g => { groupsMap[g.id] = g; });
+        setGroups(groupsMap);
+        LocalCache.saveGroups(userId, gList).catch(() => {});
+        setMembersByGroupId(mbgi || {});
+        setCoworkers(persons || {});
+        Logger.info(`👥 Aurora graph hydrated (replace): ${gList.length} groups, ${Object.keys(mbgi).length} member-lists, ${Object.keys(persons).length} persons`);
       } catch (err) {
         Logger.warn(`Aurora group hydration falhou: ${err?.message}`);
       }
@@ -423,15 +424,37 @@ export const GroupsProvider = ({ children }) => {
     })).filter(member => member.person);
   };
 
+  // Subset de getGroupMembers excluindo admin/manager (não recebem escalas).
+  // Use em fluxos de cede/troca/agregação de escala. Render visual continua
+  // com getGroupMembers pra mostrar admin com ícone diferente.
+  const getShiftCapableGroupMembers = (groupId) => {
+    return getGroupMembers(groupId).filter(m =>
+      m.memberType !== 'manager' && m.canHaveShifts !== false
+    );
+  };
+
   // Obter coworker por ID
   const getCoworker = (id) => {
     return coworkers[id] || null;
   };
 
+  // Referências ESTÁVEIS: sem memo, Object.values gera um array novo a cada render.
+  // Como GroupsProvider é filho do ShiftsProvider, qualquer setShiftsData
+  // re-renderiza aqui e entregava um `groups` novo, invalidando groupIds/refresh
+  // em consumidores (ex.: SwapAuctionsContext) e disparando FB em loop.
+  const groupsArray = useMemo(
+    () => (groups && typeof groups === 'object') ? Object.values(groups) : [],
+    [groups],
+  );
+  const coworkersArray = useMemo(
+    () => (coworkers && typeof coworkers === 'object') ? Object.values(coworkers) : [],
+    [coworkers],
+  );
+
   const value = {
     // Converter objetos para arrays com validação adicional
-    groups: (groups && typeof groups === 'object') ? Object.values(groups) : [],
-    coworkers: (coworkers && typeof coworkers === 'object') ? Object.values(coworkers) : [],
+    groups: groupsArray,
+    coworkers: coworkersArray,
     groupsById: groups || {}, // Manter acesso por ID
     coworkersById: coworkers || {}, // Manter acesso por ID
     membersByGroupId: membersByGroupId || {},
@@ -444,6 +467,7 @@ export const GroupsProvider = ({ children }) => {
     loadPersistedData,
     getUserGroups,
     getGroupMembers,
+    getShiftCapableGroupMembers,
     getCoworker
   };
 

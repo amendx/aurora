@@ -30,6 +30,7 @@ import {
   Dimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AuthContext } from '../context/AuthContext';
 import AppHeader from '../components/AppHeader';
@@ -49,13 +50,16 @@ import NetworkVacanciesScreen from './NetworkVacanciesScreen';
 import AvisosScreen from './AvisosScreen';
 import NotificationsSettingsScreen from './NotificationsSettingsScreen';
 import HistoricoScreen from './HistoricoScreen';
-import ChartsScreen from './ChartsScreen';
 import GroupDayTeamScreen from './GroupDayTeamScreen';
 import TrocasAbertasScreen from './TrocasAbertasScreen';
 import ActivityLogScreen from './ActivityLogScreen';
+// Aura (IA do Aurora): conselho de escala + gestão de disponibilidade.
+import AuraScreen from './AuraScreen';
+import AuraAvailabilityScreen from './AuraAvailabilityScreen';
 import TabBar from '../components/TabBar';
 import { useColors, Spacing } from '../constants/DesignSystem';
 import Logger from '../utils/Logger';
+import { emitScrollToTop } from '../utils/scrollToTopBus';
 
 // ─── Animation constants ───────────────────────────────────────────────────────
 const { width: W } = Dimensions.get('window');
@@ -83,7 +87,7 @@ const SCREEN_MAP = {
   Reports:               'reports',
   GroupVisibilityScreen: 'groupVisibility',
   DayView:               'dayView',
-  ChartsScreen:          'charts',
+  // ChartsScreen virou aba dentro de Reports — navega via 'Reports' com params.initialTab='graficos'.
   HospitalsScreen:       'hospitals',
   HospitalDetailScreen:  'hospitalDetail',
   OpeningsScreen:        'openings',
@@ -94,6 +98,8 @@ const SCREEN_MAP = {
   GroupDayTeam:          'groupDayTeam',
   TrocasAbertas:         'trocasAbertas',
   ActivityLog:           'activityLog',
+  AuraScreen:            'aura',              // Aura (IA do Aurora)
+  AuraAvailabilityScreen: 'auraAvailability', // Aura (IA do Aurora)
 };
 
 export default function MainScreen() {
@@ -109,6 +115,17 @@ export default function MainScreen() {
 
   const { user } = useContext(AuthContext);
   const C        = useColors();
+  const insets   = useSafeAreaInsets();
+
+  // Espaço único reservado pro TabBar absoluto.
+  //   - tabBarReserve: pra base layer (tabs visíveis, TabBar mostra)
+  //   - overlayReserve: pra sub-screens (overlayLayer tem zIndex 5 e cobre o
+  //     TabBar — só precisa do safe-area inferior, sem altura do TabBar)
+  // Telas filhas NÃO devem adicionar paddingBottom próprio em
+  // ScrollView/contentContainerStyle.
+  const TAB_BAR_HEIGHT = 56;
+  const tabBarReserve  = TAB_BAR_HEIGHT + insets.bottom + Spacing.md;
+  const overlayReserve = insets.bottom + Spacing.md;
 
   // ── Animated values ──────────────────────────────────────────────────────────
 
@@ -351,7 +368,11 @@ export default function MainScreen() {
       Logger.nav(`tab → ${tabId}`);
       return;
     }
-    if (currentTab === tabId) return;
+    if (currentTab === tabId) {
+      // Re-tap na aba já ativa → volta ao topo do conteúdo.
+      emitScrollToTop(tabId);
+      return;
+    }
     setCurrentTab(tabId);
     Logger.nav(`tab → ${tabId}`);
   };
@@ -374,9 +395,10 @@ export default function MainScreen() {
   // Back label when Back returns to a stacked overlay (not a tab).
   const OVERLAY_BACK_LABELS = {
     openings: 'Vagas', networkVacancies: 'Vagas', groups: 'Grupos',
-    trocasAbertas: 'Trocas', historico: 'Histórico', reports: 'Relatórios',
+    trocasAbertas: 'Movimentações', historico: 'Histórico', reports: 'Relatórios',
     hospitals: 'Hospitais', charts: 'Gráficos', dayView: 'Dia',
     groupDayTeam: 'Equipe', profile: 'Perfil', config: 'Valores',
+    aura: 'Aura', // Aura (IA do Aurora)
   };
 
   const getTabHeaderData = () => {
@@ -416,8 +438,6 @@ export default function MainScreen() {
         return { title: 'Perfil', subtitle: 'Sua conta e configurações', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
       case 'config':
         return { title: 'Valores do Plantão', subtitle: 'Configure valores e parâmetros', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
-      case 'charts':
-        return { title: 'Gráficos', subtitle: 'Estimativas mensais', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
       case 'hospitals':
         return { title: 'Meus hospitais', subtitle: 'Instituições e fidelização', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
       case 'hospitalDetail': {
@@ -436,9 +456,14 @@ export default function MainScreen() {
       case 'groupDayTeam':
         return { title: 'Equipe do plantão', subtitle: 'Quem está hoje', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
       case 'trocasAbertas':
-        return { title: 'Trocas abertas', subtitle: 'Negocie plantões com o grupo', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
+        return { title: 'Movimentações', subtitle: 'Trocas e cessões em andamento', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
       case 'activityLog':
         return { title: 'Minhas ações', subtitle: 'Log da sessão atual', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
+      // Aura (IA do Aurora)
+      case 'aura':
+        return { title: 'Aura', subtitle: 'Conselho de escala', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
+      case 'auraAvailability':
+        return { title: 'Disponibilidade', subtitle: 'Bloqueios, folgas e regras', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
       default:
         return { title: '', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
     }
@@ -471,12 +496,18 @@ export default function MainScreen() {
           />
         );
       case 'reports':
-        return <ReportsScreen onExportReady={(fn) => setReportsExportFn(() => fn)} />;
+        return (
+          <ReportsScreen
+            onExportReady={(fn) => setReportsExportFn(() => fn)}
+            initialTab={screen.params?.initialTab || 'resumo'}
+          />
+        );
       case 'dayView':
         return (
           <DayViewScreen
             navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }}
             initialDate={screen.params?.date}
+            initialFocusShiftId={screen.params?.focusShiftId}
           />
         );
       case 'groupVisibility':
@@ -485,8 +516,6 @@ export default function MainScreen() {
         return <ProfileScreen navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }} />;
       case 'config':
         return <ConfigScreen navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }} />;
-      case 'charts':
-        return <ChartsScreen />;
       case 'hospitals':
         return <HospitalsScreen navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }} />;
       case 'hospitalDetail':
@@ -518,6 +547,11 @@ export default function MainScreen() {
         return <TrocasAbertasScreen navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }} />;
       case 'activityLog':
         return <ActivityLogScreen />;
+      // Aura (IA do Aurora)
+      case 'aura':
+        return <AuraScreen navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }} />;
+      case 'auraAvailability':
+        return <AuraAvailabilityScreen navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }} />;
       default:
         return null;
     }
@@ -542,7 +576,7 @@ export default function MainScreen() {
         {TAB_SCREENS.map(({ id, el }) => (
           <View
             key={id}
-            style={[styles.content, id !== currentTab && styles.tabHidden]}
+            style={[styles.content, { paddingBottom: tabBarReserve }, id !== currentTab && styles.tabHidden]}
           >
             {el}
           </View>
@@ -569,7 +603,7 @@ export default function MainScreen() {
           )}
 
           {/* Screen content */}
-          <View style={[styles.content, isSelfContained && styles.fullContent]}>
+          <View style={[styles.content, { paddingBottom: overlayReserve }, isSelfContained && styles.fullContent]}>
             {renderOverlayContent(overlayScreen)}
           </View>
         </Animated.View>
@@ -608,7 +642,7 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
-    paddingBottom: 68 + Spacing.md * 2,
+    // paddingBottom é injetado inline via tabBarReserve (insets-aware).
   },
   tabHidden: {
     display: 'none',

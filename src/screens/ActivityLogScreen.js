@@ -45,7 +45,7 @@ const ActivityLogScreen = () => {
   return (
     <ScrollView
       style={s.container}
-      contentContainerStyle={{ paddingBottom: Spacing.xl }}
+      contentContainerStyle={{ paddingBottom: Spacing.lg }}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
     >
       <View style={s.header}>

@@ -22,6 +22,7 @@ import { AuthContext } from '../context/AuthContext';
 import LocalCache from '../services/LocalCache';
 import { getMonthTotalValue, getMonthTotalHours } from '../utils/MonthSummaryComputer';
 import { buildHybridConfig, isPastMonthKey } from '../utils/HospitalConfigResolver';
+import { ChartsView } from './ChartsScreen';
 
 // ── Skeleton ──────────────────────────────────────────────────────────────────
 const SkeletonBox = ({ width = '100%', height = 20, style }) => {
@@ -75,7 +76,8 @@ const formatHoursWithExtras = (plannedMinutes, extraMinutes) => {
 
 const SCREEN_W = Dimensions.get('window').width;
 
-export default function ReportsScreen({ onExportReady } = {}) {
+export default function ReportsScreen({ onExportReady, initialTab = 'resumo' } = {}) {
+  const [tab, setTab] = useState(initialTab); // 'resumo' | 'graficos'
   const { loading, prefetchMonth, getMonthCache } = useShifts();
   const [reportsDaysWithShifts, setReportsDaysWithShifts] = useState([]);
   const daysWithShifts = reportsDaysWithShifts;
@@ -390,8 +392,30 @@ export default function ReportsScreen({ onExportReady } = {}) {
     N: C.warning,
   };
 
+  const renderTabs = () => (
+    <View style={s.tabsBar}>
+      <Pressable style={[s.tab, tab === 'resumo' && s.tabActive]} onPress={() => setTab('resumo')}>
+        <Text style={[s.tabText, tab === 'resumo' && s.tabTextActive]}>Resumo</Text>
+      </Pressable>
+      <Pressable style={[s.tab, tab === 'graficos' && s.tabActive]} onPress={() => setTab('graficos')}>
+        <Text style={[s.tabText, tab === 'graficos' && s.tabTextActive]}>Gráficos</Text>
+      </Pressable>
+    </View>
+  );
+
+  if (tab === 'graficos') {
+    return (
+      <View style={{ flex: 1 }}>
+        {renderTabs()}
+        <ChartsView />
+      </View>
+    );
+  }
+
   return (
-    <ScrollView style={s.container} contentContainerStyle={{ paddingBottom: insets.bottom + 32 }} showsVerticalScrollIndicator={false}>
+    <View style={{ flex: 1 }}>
+      {renderTabs()}
+    <ScrollView style={s.container} contentContainerStyle={{ paddingBottom: Spacing.lg }} showsVerticalScrollIndicator={false}>
 
       {/* Hero */}
       <View style={s.heroSection}>
@@ -562,6 +586,7 @@ export default function ReportsScreen({ onExportReady } = {}) {
 
       <View style={{ height: 20 }} />
     </ScrollView>
+    </View>
   );
 }
 
@@ -570,6 +595,31 @@ const makeStyles = (C) => StyleSheet.create({
     flex: 1,
     backgroundColor: C.background.secondary,
   },
+
+  // Segmented pill — padrão TrocasAbertasScreen / GroupsScreen
+  tabsBar: {
+    flexDirection: 'row',
+    marginHorizontal: Spacing.screen,
+    marginTop: Spacing.md,
+    marginBottom: Spacing.sm,
+    padding: 4,
+    borderRadius: 999,
+    backgroundColor: C.background.elevated,
+    borderWidth: 0.5,
+    borderColor: C.border.light,
+    gap: 4,
+  },
+  tab: {
+    flex: 1,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 9,
+    borderRadius: 999,
+  },
+  tabActive: { backgroundColor: C.background.card, ...Shadows.small },
+  tabText: { fontSize: 14, fontFamily: Typography.fontFamily.semiBold, color: C.text.tertiary },
+  tabTextActive: { color: C.text.primary },
 
   // Hero
   heroSection: {

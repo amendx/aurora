@@ -4,7 +4,7 @@ layout: home
 hero:
   name: "Aurora•"
   text: "Seus plantões,\nfinalmente sob controle."
-  tagline: "Calendário inteligente, cálculo financeiro em tempo real, rede de colegas e relatórios — num único app nativo feito para profissionais de saúde brasileiros."
+  tagline: "Calendário inteligente, financeiro em tempo real com fidelização, trocas e cessões de plantão, rede de colegas e relatórios — num único app nativo feito para profissionais de saúde brasileiros."
   image:
     src: /icon.png
     alt: Aurora
@@ -52,6 +52,19 @@ hero:
     <div class="ab-body">Login com sua conta existente. Sem cadastro extra, sem digitação.</div>
   </div>
 
+  <div class="ab-card ab-card--teal ab-card--wide">
+    <div class="ab-label">Trocas & Cessões</div>
+    <div class="ab-title">Troque, ceda,<br />pegue plantões.</div>
+    <div class="ab-body">Proponha trocas, ceda plantões para a equipe e pegue vagas em aberto — tudo dentro do app.</div>
+    <div class="ab-accent-num">⇄</div>
+  </div>
+
+  <div class="ab-card ab-card--mint">
+    <div class="ab-label">Avisos</div>
+    <div class="ab-title">Ofertas e trocas,<br />num lugar só.</div>
+    <div class="ab-body">Aceite ou recuse direto da central. Nada se perde no grupo de WhatsApp.</div>
+  </div>
+
 </div>
 </div>
 </div>
@@ -59,7 +72,7 @@ hero:
 <div class="aurora-section-header">
   <div class="aurora-badge">Aurora em uso</div>
   <div class="aurora-h2">Cada tela, uma resposta.</div>
-  <p>Dashboard financeiro, detalhe do plantão, calendário, gráficos — tudo conectado.</p>
+  <p>Dashboard financeiro, detalhe do plantão, trocas, avisos, fidelização — tudo conectado.</p>
 </div>
 
 <!-- Row 1: Home + DayView -->
@@ -112,6 +125,93 @@ hero:
 <div class="aurora-device-label"><div class="aurora-device-label-dot" style="background:#41b883"></div>Android · Pixel 9</div>
 </div><!-- /aurora-device-col -->
 
+</div><!-- /aurora-device-showcase -->
+
+<div class="aurora-section-header" style="margin-top: 4.5rem;">
+  <div class="aurora-badge">Colaboração</div>
+  <div class="aurora-h2">Troque. Ceda. Cubra.</div>
+  <p>A escala mudou? Resolva entre colegas — propostas, cessões e avisos sem sair do app.</p>
+</div>
+
+<!-- Row 2: Trades + Avisos -->
+<div class="aurora-device-showcase">
+
+<!-- iPhone: Trocas -->
+<div class="aurora-device-col">
+<div class="device-frame iphone">
+  <div class="device-island"></div>
+  <div class="device-status-time">9:41</div>
+  <div class="device-status-icons">
+    <svg width="12" height="9" viewBox="0 0 14 10" fill="currentColor"><rect x="0" y="4" width="2" height="6" rx="0.5"/><rect x="3" y="2" width="2" height="8" rx="0.5"/><rect x="6" y="0" width="2" height="10" rx="0.5"/><rect x="9" y="2" width="4" height="8" rx="0.5"/></svg>
+  </div>
+  <div class="device-screen device-screen--iframe">
+    <iframe
+      src="mockup-trades.html"
+      class="device-mockup-iframe"
+      scrolling="no"
+      frameborder="0"
+      title="Aurora — trocas de plantão"
+    ></iframe>
+  </div>
+</div><!-- /device-frame.iphone -->
+<div class="aurora-device-label"><div class="aurora-device-label-dot"></div>Trocas · propostas e lances</div>
+</div><!-- /aurora-device-col -->
+
+<!-- Android: Avisos -->
+<div class="aurora-device-col">
+<div class="device-frame android">
+  <div class="device-camera"></div>
+  <div class="device-status-time">9:41</div>
+  <div class="device-status-icons">
+    <svg width="11" height="9" viewBox="0 0 14 10" fill="currentColor"><rect x="0" y="4" width="2" height="6" rx="0.5"/><rect x="3" y="2" width="2" height="8" rx="0.5"/><rect x="6" y="0" width="2" height="10" rx="0.5"/><rect x="9" y="2" width="4" height="8" rx="0.5"/></svg>
+  </div>
+  <div class="device-screen device-screen--iframe">
+    <iframe
+      src="mockup-avisos.html"
+      class="device-mockup-iframe device-mockup-iframe--zoomed"
+      scrolling="no"
+      frameborder="0"
+      title="Aurora — central de avisos"
+    ></iframe>
+  </div>
+  <div class="device-navbar">
+    <div class="device-nav-btn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg></div>
+    <div class="device-nav-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/></svg></div>
+    <div class="device-nav-btn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="6" height="16" rx="1"/><rect x="14" y="4" width="6" height="16" rx="1"/></svg></div>
+  </div>
+</div><!-- /device-frame.android -->
+<div class="aurora-device-label"><div class="aurora-device-label-dot" style="background:#41b883"></div>Central de avisos</div>
+</div><!-- /aurora-device-col -->
+
+</div><!-- /aurora-device-showcase -->
+
+<div class="aurora-section-header" style="margin-top: 4.5rem;">
+  <div class="aurora-badge">Financeiro de verdade</div>
+  <div class="aurora-h2">Cada hospital,<br>suas regras.</div>
+  <p>Valores por hora para semana e fim de semana, adicional noturno e fidelização por volume de horas — configurados por hospital.</p>
+</div>
+
+<!-- Row 3: Hospital / Fidelização -->
+<div class="aurora-device-showcase">
+<div class="aurora-device-col">
+<div class="device-frame iphone">
+  <div class="device-island"></div>
+  <div class="device-status-time">9:41</div>
+  <div class="device-status-icons">
+    <svg width="12" height="9" viewBox="0 0 14 10" fill="currentColor"><rect x="0" y="4" width="2" height="6" rx="0.5"/><rect x="3" y="2" width="2" height="8" rx="0.5"/><rect x="6" y="0" width="2" height="10" rx="0.5"/><rect x="9" y="2" width="4" height="8" rx="0.5"/></svg>
+  </div>
+  <div class="device-screen device-screen--iframe">
+    <iframe
+      src="mockup-hospital.html"
+      class="device-mockup-iframe"
+      scrolling="no"
+      frameborder="0"
+      title="Aurora — fidelização por hospital"
+    ></iframe>
+  </div>
+</div><!-- /device-frame.iphone -->
+<div class="aurora-device-label"><div class="aurora-device-label-dot"></div>Hospital · valores & fidelização</div>
+</div><!-- /aurora-device-col -->
 </div><!-- /aurora-device-showcase -->
 
 <!-- Row 2: How it works -->

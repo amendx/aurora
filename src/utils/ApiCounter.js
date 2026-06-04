@@ -1,10 +1,9 @@
 /**
- * ApiCounter — debug-only request counter for the webClient API.
+ * ApiCounter — debug-only request counter for Firestore operations.
  *
- * Centralized so any caller (WebClientApiService) bumps it and any subscriber
- * (DebugApiCounter overlay) reflects the live value without prop drilling.
- *
- * Not for production. Remove the overlay mount + import to disable.
+ * Conta operações de Firebase (leitura/escrita/listener) via a fachada
+ * `src/services/firebase/fdb.js`. Qualquer subscriber (DebugApiCounter)
+ * reflete o valor ao vivo. Não é pra produção.
  */
 
 let _count = 0;
@@ -15,7 +14,8 @@ function _emit() {
 }
 
 const ApiCounter = {
-  bump() { _count++; _emit(); },
+  // label só pra debug/log; n = quantas operações somar (ex.: docs lidos).
+  bump(label, n = 1) { _count += (Number(n) || 1); _emit(); },
   get() { return _count; },
   reset() { _count = 0; _emit(); },
   subscribe(fn) {

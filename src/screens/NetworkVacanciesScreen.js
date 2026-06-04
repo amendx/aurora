@@ -356,7 +356,7 @@ export default function NetworkVacanciesScreen({ navigation }) {
         </View>
       ) : (
         <ScrollView
-          contentContainerStyle={{ padding: Spacing.screen, paddingBottom: insets.bottom + 32 }}
+          contentContainerStyle={{ padding: Spacing.screen, paddingBottom: Spacing.lg }}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.primary} />}
         >
           <View style={s.toggle}>

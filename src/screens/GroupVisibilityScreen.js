@@ -282,7 +282,7 @@ const makeStyles = (C) => ({
 
   listContent: {
     paddingHorizontal: Spacing.lg,
-    paddingBottom: Spacing.xl,
+    paddingBottom: Spacing.lg,
   },
 
   sectionLabel: {

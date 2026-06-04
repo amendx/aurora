@@ -1,4 +1,4 @@
-import React, { useContext, useState } from 'react';
+import React, { useContext, useState, useRef, useEffect } from 'react';
 import {
   View, Text, ScrollView, Pressable, Alert, Switch, Image, ActivityIndicator,
 } from 'react-native';
@@ -10,12 +10,68 @@ import { useTheme } from '../contexts/ThemeContext';
 import { useGroups } from '../contexts/GroupsContext';
 import { useShifts } from '../contexts/ShiftsContext';
 import { useColors, Typography, Spacing, Shadows } from '../constants/DesignSystem';
+import { registerScrollToTop } from '../utils/scrollToTopBus';
 import FirebaseAdapter from '../services/firebase/FirebaseAdapter';
 import LocalCache from '../services/LocalCache';
 import * as SecureStore from 'expo-secure-store';
+import TimeUtils from '../utils/TimeUtils';
 import Logger from '../utils/Logger';
 
+// Parse "07h00 - 13h00 (M)" → ["07:00", "13:00"]. Helper compartilhado.
+const _parseTimeParts = (timeStr) => {
+  if (!timeStr) return null;
+  let parts = String(timeStr).split(' – ');
+  if (parts.length !== 2) parts = String(timeStr).split(' - ');
+  if (parts.length !== 2) return null;
+  const norm = t => t.replace(/\s*\([^)]*\)/, '').replace('h', ':').trim();
+  return [norm(parts[0]), norm(parts[1])];
+};
+
+// Parse "07h00 - 13h00 (M)" → 360 min. webClient shifts não trazem
+// durationMinutes do PlantaoAPI; sem isso, o caminho aurora computa 0h.
+const _shiftDurationMinutes = (shift) => {
+  if (typeof shift?.durationMinutes === 'number' && shift.durationMinutes > 0) {
+    return shift.durationMinutes;
+  }
+  const tp = _parseTimeParts(shift?.time);
+  if (tp) {
+    const min = TimeUtils.calculateDurationMinutes(tp[0], tp[1]);
+    if (min !== null && min > 0) return min;
+  }
+  return TimeUtils.getShiftStandardMinutes(shift?.label) || 0;
+};
+
+// Constrói startISO/endISO + crossesMidnight a partir de date + time.
+// Botões Ceder/Trocar dependem de startISO (gate `startTs > Date.now()`).
+const _buildShiftISOs = (shift) => {
+  if (shift?.startISO && shift?.endISO) {
+    return { startISO: shift.startISO, endISO: shift.endISO, crossesMidnight: !!shift.crossesMidnight };
+  }
+  const date = shift?.date;
+  const tp = _parseTimeParts(shift?.time);
+  if (!date || !tp) return {};
+  const [startHM, endHM] = tp;
+  const startISO = `${date}T${startHM}:00`;
+  const [sh, sm] = startHM.split(':').map(Number);
+  const [eh, em] = endHM.split(':').map(Number);
+  const crossesMidnight = (eh * 60 + em) < (sh * 60 + sm);
+  let endISO;
+  if (crossesMidnight) {
+    const next = new Date(date + 'T00:00:00');
+    next.setDate(next.getDate() + 1);
+    const nd = next.toISOString().slice(0, 10);
+    endISO = `${nd}T${endHM}:00`;
+  } else {
+    endISO = `${date}T${endHM}:00`;
+  }
+  return { startISO, endISO, crossesMidnight };
+};
+
 const SettingsScreen = ({ navigation }) => {
+  const scrollRef = useRef(null);
+  useEffect(() => registerScrollToTop('settings', () => {
+    scrollRef.current?.scrollTo?.({ y: 0, animated: true });
+  }), []);
   const { logout, user, setAuroraOnlyMode } = useContext(AuthContext);
   const { isDark, setTheme } = useTheme();
   const { groupsById, coworkersById, membersByGroupId } = useGroups();
@@ -57,7 +113,17 @@ const SettingsScreen = ({ navigation }) => {
             if (!sh?.id) continue;
             const monthKey = sh.monthKey || (sh.date ? String(sh.date).slice(0, 7) : null);
             if (!monthKey) continue;
-            collected.push({ ...sh, monthKey });
+            // Snapshot só inclui plantões reais — webClient (com `time` string)
+            // ou criados pelo app (`isManual:true`). Filtra seeds/lixo gravado
+            // direto no Firestore que não veio do PlantaoAPI nem do user.
+            const isReal = !!sh.time || sh.isManual === true;
+            if (!isReal) continue;
+            collected.push({
+              ...sh,
+              monthKey,
+              durationMinutes: _shiftDurationMinutes(sh),
+              ..._buildShiftISOs(sh),
+            });
           }
         }
       } catch (err) {
@@ -107,6 +173,10 @@ const SettingsScreen = ({ navigation }) => {
                 const written = await _runSnapshot();
                 const now = new Date().toISOString();
                 await setAuroraOnlyMode(true, now);
+                // Força reload pra ShiftsContext entrar no branch aurora
+                // (lê Firestore com source='aurora' = botões Ceder/Trocar liberados).
+                const _now = new Date();
+                await loadMonthlyShifts(_now.getMonth() + 1, _now.getFullYear(), true);
                 Alert.alert('Pronto', `${written} plantões prontos para usar no Aurora.`);
               } catch (err) {
                 Alert.alert('Erro', err?.message || 'Não foi possível ativar.');
@@ -170,6 +240,8 @@ const SettingsScreen = ({ navigation }) => {
               const written = await _runSnapshot();
               const now = new Date().toISOString();
               await setAuroraOnlyMode(true, now);
+              const _now = new Date();
+              await loadMonthlyShifts(_now.getMonth() + 1, _now.getFullYear(), true);
               Alert.alert('Pronto', `Snapshot atualizado com ${written} plantões.`);
             } catch (err) {
               Alert.alert('Erro', err?.message || 'Falha ao sincronizar.');
@@ -215,9 +287,23 @@ const SettingsScreen = ({ navigation }) => {
                   } catch {}
                 }
               }
+              // webClient (sem aurora-only): força refetch dos plantões na PlantaoAPI
+              // pra recalcular horas zeradas com dados frescos. Equivalente ao
+              // pull-to-refresh da Home. Aurora puro / aurora-only não precisam
+              // — eles re-hidratam direto do Firestore no próximo load.
+              let refreshed = false;
+              if (!isAuroraNative && !auroraOnly) {
+                try {
+                  const _now = new Date();
+                  await loadMonthlyShifts(_now.getMonth() + 1, _now.getFullYear(), true);
+                  refreshed = true;
+                } catch (refreshErr) {
+                  Logger.warn(`refetch pós-limpeza falhou: ${refreshErr?.message}`);
+                }
+              }
               Alert.alert(
                 'Pronto',
-                `${removed} meses limpos no LocalCache, ${legacyRemoved} chaves legadas removidas do SecureStore.\n\nReabra a Home pra recalcular.`,
+                `${removed} meses limpos no LocalCache, ${legacyRemoved} chaves legadas removidas.${refreshed ? '\nPlantões revalidados no PlantãoAPI.' : '\nReabra a Home pra recalcular.'}`,
               );
             } catch (err) {
               Alert.alert('Erro', err?.message || 'Falha ao limpar.');
@@ -262,8 +348,9 @@ const SettingsScreen = ({ navigation }) => {
 
   return (
     <ScrollView
+      ref={scrollRef}
       style={s.container}
-      contentContainerStyle={{ paddingBottom: insets.bottom + Spacing.xl }}
+      contentContainerStyle={{ paddingBottom: Spacing.lg }}
       showsVerticalScrollIndicator={false}
     >
       <View style={s.pageHeader}>

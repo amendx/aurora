@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   View, Text, ScrollView, Pressable, ActivityIndicator,
   RefreshControl, StyleSheet,
@@ -32,9 +32,23 @@ export default function AvisosScreen({ navigation }) {
   const s = makeStyles(C);
   const {
     offersReceived, swapsReceived, inbox, loading,
-    refresh, acceptOffer, rejectOffer, acceptSwap, rejectSwap, markInboxRead,
+    refresh, acceptOffer, rejectOffer, acceptSwap, rejectSwap,
+    markInboxRead, markAllInboxRead,
   } = useOffers();
   const [refreshing, setRefreshing] = useState(false);
+
+  // Ao abrir a tela, marca todas as notificações como lidas — o badge da
+  // Home reflete esse estado e some/decrementa imediatamente. Só roda 1x
+  // por montagem pra evitar loop com a atualização do snapshot do inbox.
+  const markedOnceRef = useRef(false);
+  useEffect(() => {
+    if (markedOnceRef.current) return;
+    if (loading) return;
+    const hasUnread = inbox.some(n => !n.read);
+    if (!hasUnread) return;
+    markedOnceRef.current = true;
+    markAllInboxRead();
+  }, [loading, inbox, markAllInboxRead]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -59,7 +73,7 @@ export default function AvisosScreen({ navigation }) {
       </View>
 
       <ScrollView
-        contentContainerStyle={{ padding: Spacing.screen, paddingBottom: insets.bottom + 32 }}
+        contentContainerStyle={{ padding: Spacing.screen, paddingBottom: Spacing.lg }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.primary} />}
       >
         {loading && !refreshing ? (

@@ -14,12 +14,15 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AuthContext } from '../context/AuthContext';
 import { useShifts } from '../contexts/ShiftsContext';
 import { useOffers } from '../contexts/OffersContext';
+import { useOpenings } from '../contexts/OpeningsContext';
 import { useColors, Typography, Spacing, Shadows } from '../constants/DesignSystem';
 import ShiftBottomSheet from '../components/ShiftBottomSheet';
 import CederFlowSheet from './CederFlowSheet';
 import TrocarFlowSheet from './TrocarFlowSheet';
 import TodayCoworkersService from '../services/TodayCoworkersService';
 import { getGroupColors } from '../utils/GroupColorConfig';
+import { movementVisual, shiftPending } from '../utils/MovementColors';
+import { registerScrollToTop } from '../utils/scrollToTopBus';
 import LocalCache from '../services/LocalCache';
 import { getShiftValues, getFullShiftConfig, calculateShiftValueSync, calculateShiftFinalValueSync } from '../utils/ShiftValueCalculator';
 import { getMonthTotalValue } from '../utils/MonthSummaryComputer';
@@ -77,6 +80,7 @@ const HomeScreen = ({ navigation }) => {
   const ctx = useShifts();
   const { loading, loadedFor, loadMonthlyShifts, refreshShifts, monthSummary: contextSummary, getMonthCache } = ctx;
   const { unreadCount: avisosUnread, offersReceived, swapsReceived, swapsSent, offersSent } = useOffers();
+  const { myCededOpenings } = useOpenings();
 
   // Mapa de plantões com estado pendente — pra colorir/etiquetar o card condensado.
   // Cobre: troca que iniciei (shiftA.id), troca proposta a mim (shiftB.id), cessão direcionada que enviei (shiftSnapshot.id).
@@ -106,9 +110,50 @@ const HomeScreen = ({ navigation }) => {
   const _curCache = getMonthCache?.(_curMonth, _curYear);
   const _activeIsCurrent = ctx.currentMonth === _curMonth && ctx.currentYear === _curYear;
 
-  const daysWithShifts = _curCache?.daysWithShifts ?? (_activeIsCurrent ? ctx.daysWithShifts : []);
+  const _rawDays       = _curCache?.daysWithShifts ?? (_activeIsCurrent ? ctx.daysWithShifts : []);
   const totalShifts    = _curCache?.totalShifts    ?? (_activeIsCurrent ? ctx.totalShifts    : null);
   const hoursReport    = _curCache?.hoursReport    ?? (_activeIsCurrent ? ctx.hoursReport    : null);
+
+  // Plantões cedidos ao grupo deste mês — re-injeta no calendário como cards
+  // amarelos (mesmo padrão do DayView). Sem isso o plantão "some" da Home
+  // depois de ceder, dando impressão de que ele se perdeu.
+  const daysWithShifts = React.useMemo(() => {
+    const activeCede = (myCededOpenings || []).filter(o => o.status === 'active');
+    if (activeCede.length === 0) return _rawDays;
+    const monthPrefix = `${_curYear}-${String(_curMonth).padStart(2, '0')}`;
+    const byDate = {};
+    (_rawDays || []).forEach(d => { byDate[d.date] = d; });
+    activeCede.forEach(o => {
+      const dateKey = o.dateKey || (o.startISO || '').slice(0, 10);
+      if (!dateKey || !dateKey.startsWith(monthPrefix)) return;
+      const snap = o.originShiftSnapshot || {};
+      const ghost = {
+        ...snap,
+        _pendingCede: o,
+        id: snap.id || `pending_${o.id}`,
+        label: snap.label || o.label,
+        date: snap.date || dateKey,
+        startISO: snap.startISO || o.startISO,
+        endISO: snap.endISO || o.endISO,
+        time: snap.time,
+        group: snap.group || o.group,
+        monthKey: snap.monthKey || o.monthKey,
+      };
+      if (byDate[dateKey]) {
+        if (!(byDate[dateKey].shifts || []).some(s => String(s.id) === String(ghost.id))) {
+          byDate[dateKey] = {
+            ...byDate[dateKey],
+            shifts: [...(byDate[dateKey].shifts || []), ghost],
+            shiftsCount: (byDate[dateKey].shiftsCount || 0) + 1,
+          };
+        }
+      } else {
+        const d = new Date(dateKey + 'T00:00:00');
+        byDate[dateKey] = { day: d.getDate(), date: dateKey, shifts: [ghost], shiftsCount: 1, originalData: null };
+      }
+    });
+    return Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
+  }, [_rawDays, myCededOpenings, _curMonth, _curYear]);
   const [refreshing, setRefreshing] = useState(false);
   const [groupColors, setGroupColors] = useState({});
   const [cachedSummary, setCachedSummary] = useState(null);
@@ -169,6 +214,11 @@ const HomeScreen = ({ navigation }) => {
     setRefreshing(false);
   };
 
+  const scrollRef = useRef(null);
+  useEffect(() => registerScrollToTop('home', () => {
+    scrollRef.current?.scrollTo?.({ y: 0, animated: true });
+  }), []);
+
   const loadedForRef = useRef(loadedFor);
   useEffect(() => { loadedForRef.current = loadedFor; }, [loadedFor]);
 
@@ -195,8 +245,20 @@ const HomeScreen = ({ navigation }) => {
     .filter(s => new Date(s.date + 'T00:00:00') >= today)
     .slice(0, 5);
 
+  // Clique no card de plantão na Home → DayView com esse shift em foco.
+  // Mesma experiência do calendário (status banner, ações por status, confirm
+  // sheet). Antes abria o ShiftBottomSheet — substituído.
   const openShiftBottomSheet = (shift) => {
-    // ShiftBottomSheet anota internamente via useOffers — só passa shifts crus.
+    if (navigation?.navigate) {
+      // initialDate de DayView espera Date — caller original (CalendarScreen)
+      // converte do string yyyy-mm-dd assim. Replicando.
+      navigation.navigate('DayView', {
+        date: new Date(shift.date + 'T00:00:00'),
+        focusShiftId: shift.id,
+      });
+      return;
+    }
+    // Fallback (caso navegação não disponível por algum motivo): bottom sheet.
     const dayData = (daysWithShifts || []).find(d => d.date === shift.date);
     setBsShifts(dayData?.shifts || [shift]);
     setBsDate(new Date(shift.date + 'T00:00:00'));
@@ -342,13 +404,10 @@ const HomeScreen = ({ navigation }) => {
     const typeKey = shiftTypeKey(shift);
     const badgeColor = SHIFT_TYPE_COLOR[typeKey] || C.primary;
 
-    const pending = pendingByShiftId[String(shift.id)];
-    const accentColor = pending ? C.warning : groupColor;
-    const pendingTag = pending
-      ? (pending.kind === 'swap'
-          ? (pending.role === 'initiator' ? 'Em troca' : 'Pediram troca')
-          : 'Oferecido')
-      : null;
+    const pending = shiftPending(shift, pendingByShiftId);
+    const mv = pending ? movementVisual(C, pending.kind, pending.role) : null;
+    const accentColor = mv ? mv.color : groupColor;
+    const pendingTag = mv ? mv.tag : null;
 
     const shiftMonthKey = (shift.date || '').slice(0, 7);
     const realEntry = timeEntriesByMonth?.[shiftMonthKey]?.[shift.id] || null;
@@ -369,7 +428,7 @@ const HomeScreen = ({ navigation }) => {
         key={index}
         style={({ pressed }) => [
           s.shiftCard,
-          pending && { borderColor: C.warning + '55', borderWidth: 1 },
+          mv && { borderColor: mv.color + '55', borderWidth: 1 },
           pressed && { opacity: 0.85 },
         ]}
         onPress={() => openShiftBottomSheet(shift)}
@@ -393,8 +452,8 @@ const HomeScreen = ({ navigation }) => {
               <Text style={[s.shiftTypeBadgeText, { color: badgeColor }]}>{shiftLabel(shift)}</Text>
             </View>
             {pendingTag && (
-              <View style={{ paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4, backgroundColor: C.warning + '22' }}>
-                <Text style={{ fontSize: 8.5, fontFamily: Typography.fontFamily.bold, color: C.warning, letterSpacing: 0.4, textTransform: 'uppercase' }}>
+              <View style={{ paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4, backgroundColor: mv.color + '22' }}>
+                <Text style={{ fontSize: 8.5, fontFamily: Typography.fontFamily.bold, color: mv.color, letterSpacing: 0.4, textTransform: 'uppercase' }}>
                   {pendingTag}
                 </Text>
               </View>
@@ -462,7 +521,7 @@ const HomeScreen = ({ navigation }) => {
   );
 
   // ── Quick Actions ─────────────────────────────────────────────────────────────
-  const renderActionTile = ({ icon, label, iconColor, iconBg, onPress, disabled }) => (
+  const renderActionTile = ({ icon, label, iconColor, iconBg, onPress, disabled, hasDot }) => (
     <Pressable
       key={label}
       style={({ pressed }) => [s.actionTile, disabled && s.actionTileDisabled, pressed && !disabled && { opacity: 0.8 }]}
@@ -471,28 +530,39 @@ const HomeScreen = ({ navigation }) => {
     >
       <View style={[s.actionTileIcon, { backgroundColor: iconBg }]}>
         <Ionicons name={icon} size={20} color={iconColor} />
+        {hasDot && <View style={s.actionTileDot} />}
       </View>
       <Text style={[s.actionTileLabel, disabled && s.actionLabelDisabled]} numberOfLines={1}>{label}</Text>
     </Pressable>
   );
 
+  // Bolinha de notificação na tile de Movimentações.
+  // Acende quando há algo pendente de ação do usuário:
+  //   - troca direcionada recebida (swapsReceived)
+  //   - cessão direcionada recebida (offersReceived)
+  //   - cessão minha aguardando (myCededOpenings) — feedback de "ainda lá"
+  const hasMovimentacoes = (swapsReceived?.length || 0) > 0
+    || (offersReceived?.length || 0) > 0
+    || (myCededOpenings || []).some(o => o.status === 'active' || !o.status);
+
   const renderActions = () => (
     <View style={s.actionsGrid}>
-      {renderActionTile({ icon: 'bar-chart',     label: 'Gráficos',   iconColor: C.primary,       iconBg: C.accentSoft,           onPress: () => navigation?.navigate?.('ChartsScreen') })}
-      {renderActionTile({ icon: 'document-text', label: 'Relatórios', iconColor: C.money,         iconBg: C.moneySoft,            onPress: () => navigation?.navigate?.('Reports') })}
+      {renderActionTile({ icon: 'document-text',  label: 'Relatórios', iconColor: C.money,   iconBg: C.moneySoft,  onPress: () => navigation?.navigate?.('Reports') })}
       {/* [WEBCLIENT-BRIDGE] `|| user?.auroraOnlyMode` rotea o webClient migrado pro Openings aurora. */}
-      {renderActionTile({ icon: 'medkit',        label: 'Vagas',      iconColor: C.money,         iconBg: C.moneySoft,            onPress: () => navigation?.navigate?.((user?.source === 'aurora' || user?.auroraOnlyMode) ? 'OpeningsScreen' : 'NetworkVacanciesScreen') })}
-      {renderActionTile({ icon: 'swap-horizontal', label: 'Trocas',    iconColor: C.primary,       iconBg: C.accentSoft,           onPress: () => navigation?.navigate?.('TrocasAbertas') })}
-      {renderActionTile({ icon: 'time-outline',    label: 'Histórico',  iconColor: C.primary,       iconBg: C.accentSoft,           onPress: () => navigation?.navigate?.('Historico') })}
+      {renderActionTile({ icon: 'medkit',         label: 'Vagas',      iconColor: C.money,   iconBg: C.moneySoft,  onPress: () => navigation?.navigate?.((user?.source === 'aurora' || user?.auroraOnlyMode) ? 'OpeningsScreen' : 'NetworkVacanciesScreen') })}
+      {renderActionTile({ icon: 'swap-horizontal', label: 'Movimentações', iconColor: C.primary, iconBg: C.accentSoft, hasDot: hasMovimentacoes, onPress: () => navigation?.navigate?.('TrocasAbertas') })}
+      {/* Aura (IA do Aurora): conselho de escala */}
+      {renderActionTile({ icon: 'sparkles', label: 'Aura', iconColor: C.primary, iconBg: C.accentSoft, onPress: () => navigation?.navigate?.('AuraScreen') })}
     </View>
   );
 
   return (
     <>
       <ScrollView
+        ref={scrollRef}
         style={s.container}
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: insets.bottom + Spacing.xl }}
+        contentContainerStyle={{ paddingBottom: Spacing.lg }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
       >
         {renderHeader()}
@@ -941,14 +1011,11 @@ const makeStyles = (C) => ({
   // ── Quick Actions ─────────────────────────────────────────────────────────────
   actionsGrid: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
     gap: 10,
   },
   actionTile: {
-    flexBasis: '31%',
-    flexGrow: 1,
+    flex: 1,
     aspectRatio: 1,
-    maxWidth: '32%',
     backgroundColor: C.background.elevated,
     borderRadius: 14,
     paddingVertical: 14,
@@ -969,6 +1036,17 @@ const makeStyles = (C) => ({
     borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  actionTileDot: {
+    position: 'absolute',
+    top: -2,
+    right: -2,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: C.error,
+    borderWidth: 1.5,
+    borderColor: C.background.elevated,
   },
   actionTileLabel: {
     fontSize: 12,

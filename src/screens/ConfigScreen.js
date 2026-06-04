@@ -96,7 +96,7 @@ export default function ConfigScreen({ navigation }) {
   return (
     <ScrollView
       style={{ flex: 1, backgroundColor: C.background.secondary }}
-      contentContainerStyle={{ paddingBottom: insets.bottom + 32 }}
+      contentContainerStyle={{ paddingBottom: Spacing.lg }}
       showsVerticalScrollIndicator={false}
     >
       {/* Hero */}

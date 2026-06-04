@@ -9,6 +9,7 @@ import { useColors, Typography, Spacing, BorderRadius } from '../constants/Desig
 import { AuthContext } from '../context/AuthContext';
 import { useGroups } from '../contexts/GroupsContext';
 import { useOffers } from '../contexts/OffersContext';
+import { useOpenings } from '../contexts/OpeningsContext';
 import { useShifts } from '../contexts/ShiftsContext';
 
 const _initials = (name = '') => name.split(' ').filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase();
@@ -27,16 +28,17 @@ const _shiftSummary = (sh) => {
   return `${_labelName(sh.label)} · ${_fmtDate(date)}${time ? ' · ' + time : ''}`;
 };
 
-export default function CederFlowSheet({ visible, shift, onClose, onDone }) {
+export default function CederFlowSheet({ visible, shift, onClose, onDone, initialMode = null, title }) {
   const C = useColors();
   const insets = useSafeAreaInsets();
   const s = makeStyles(C);
   const { user } = useContext(AuthContext);
-  const { getGroupMembers } = useGroups();
+  const { getShiftCapableGroupMembers } = useGroups();
   const { cedeOpenToGroup, cedeTargeted } = useOffers();
+  const { refresh: refreshOpenings } = useOpenings();
   const { removeShiftLocally } = useShifts();
 
-  const [mode, setMode]       = useState(null); // 'open' | 'targeted'
+  const [mode, setMode]       = useState(initialMode); // 'open' | 'targeted'
   const [picked, setPicked]   = useState(null); // member object
   const [submitting, setSub]  = useState(false);
   const [query, setQuery]     = useState('');
@@ -44,10 +46,10 @@ export default function CederFlowSheet({ visible, shift, onClose, onDone }) {
   const groupId = String(shift?.group?.id || '');
   const members = useMemo(() => {
     if (!groupId) return [];
-    return getGroupMembers(groupId)
+    return getShiftCapableGroupMembers(groupId)
       .filter(m => m?.person?.id != null && String(m.person.id) !== String(user?.id))
       .sort((a, b) => (a.person.name || '').localeCompare(b.person.name || '', 'pt-BR'));
-  }, [groupId, getGroupMembers, user?.id]);
+  }, [groupId, getShiftCapableGroupMembers, user?.id]);
 
   const _councilStr = (c) => (typeof c === 'string' ? c : (c?.state || c?.uf || ''));
 
@@ -62,7 +64,7 @@ export default function CederFlowSheet({ visible, shift, onClose, onDone }) {
     });
   }, [members, query]);
 
-  const reset = () => { setMode(null); setPicked(null); setSub(false); setQuery(''); };
+  const reset = () => { setMode(initialMode); setPicked(null); setSub(false); setQuery(''); };
   const close = () => { reset(); onClose?.(); };
 
   const handleOpen = async () => {
@@ -71,6 +73,9 @@ export default function CederFlowSheet({ visible, shift, onClose, onDone }) {
     if (r?.success) {
       const monthKey = shift?.monthKey || (shift?.startISO || '').slice(0, 7);
       await removeShiftLocally?.(shift.id, monthKey);
+      // Repopula myCededOpenings — sem isso a UI (Home/Trocas/Vagas) não vê
+      // a cessão recém-criada até um pull-to-refresh manual.
+      refreshOpenings?.(true);
     }
     setSub(false);
     if (r?.success) {
@@ -110,7 +115,7 @@ export default function CederFlowSheet({ visible, shift, onClose, onDone }) {
       <View style={[s.sheet, { paddingBottom: 16 + insets.bottom }]}>
         <View style={s.handle} />
         <View style={s.headerRow}>
-          <Text style={s.title}>{mode === 'targeted' ? 'Escolher colega' : 'Ceder plantão'}</Text>
+          <Text style={s.title}>{title || (mode === 'targeted' ? 'Escolher colega' : 'Ceder plantão')}</Text>
           <Pressable onPress={close} hitSlop={10}><Ionicons name="close" size={22} color={C.text.secondary} /></Pressable>
         </View>
 
@@ -219,7 +224,7 @@ export default function CederFlowSheet({ visible, shift, onClose, onDone }) {
               })}
             </ScrollView>
             <View style={s.ctaRow}>
-              <Pressable style={s.secondaryBtn} onPress={() => { setPicked(null); setMode(null); }}>
+              <Pressable style={s.secondaryBtn} onPress={() => { if (initialMode) { close(); } else { setPicked(null); setMode(null); } }}>
                 <Text style={[s.secondaryBtnText, { color: C.text.secondary }]}>Voltar</Text>
               </Pressable>
               <Pressable

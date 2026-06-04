@@ -37,6 +37,7 @@ import HoursEditModal from './HoursEditModal';
 import TimeUtils from '../utils/TimeUtils';
 import { useGroups } from '../contexts/GroupsContext';
 import { AuthContext } from '../context/AuthContext';
+import { isWithinDevolutionWindow, devolutionMsLeft } from '../utils/shiftTransferLog';
 import { getGroupVisibility } from '../utils/GroupVisibilityConfig';
 import { getGroupColors } from '../utils/GroupColorConfig';
 import TodayCoworkersService from '../services/TodayCoworkersService';
@@ -138,6 +139,15 @@ const _fmtShift = (sh) => {
   return `${_labelName(sh.label)}${date ? ' · ' + date : ''}`;
 };
 
+// Procura o escalista original (primeiro 'create' do transferLog). Devolve
+// { id, name } ou null. Histórico completo é só pro aurora-web (coord/manager).
+const findOriginalEscalista = (log) => {
+  if (!Array.isArray(log)) return null;
+  const created = log.find(e => e?.type === 'create');
+  if (created?.toUserId) return { id: String(created.toUserId), name: created.toUserName || null };
+  return null;
+};
+
 const ShiftBottomSheet = ({
   isVisible,
   onClose,
@@ -163,7 +173,7 @@ const ShiftBottomSheet = ({
   // Anota cada shift com _pendingSwap/_pendingOffer baseado em OffersContext,
   // e provê fallback de cancelamento (com Alert.alert) caso o caller não
   // passe os props onCancel*. Assim Home e DayView só passam shifts crus.
-  const { swapsSent, swapsReceived, offersSent, cancelSwap, cancelOffer } = useOffers();
+  const { swapsSent, swapsReceived, offersSent, cancelSwap, cancelOffer, devolverShift } = useOffers();
   const { cancelCedeOpening } = useOpenings();
   const { restoreShiftLocally } = useShifts();
 
@@ -215,6 +225,25 @@ const ShiftBottomSheet = ({
       [
         { text: 'Voltar', style: 'cancel' },
         { text: 'Cancelar cessão', style: 'destructive', onPress: () => cancelOffer(offer) },
+      ],
+    );
+  };
+  const _handleDevolverInternal = (sh) => {
+    const originName = sh?.originUserName || 'o escalista';
+    Alert.alert(
+      'Devolver plantão?',
+      `${_fmtShift(sh)}\n\nO plantão volta para ${originName}. Essa ação não pode ser desfeita e só está disponível por 2h após o recebimento.`,
+      [
+        { text: 'Voltar', style: 'cancel' },
+        { text: 'Devolver', style: 'destructive', onPress: async () => {
+          const r = await devolverShift?.(sh);
+          if (r?.success) { onClose?.(); }
+          else if (r?.reason === 'window_expired') {
+            Alert.alert('Janela expirada', 'O prazo de 2h para devolução já passou.');
+          } else {
+            Alert.alert('Não foi possível devolver', 'Tente novamente em instantes.');
+          }
+        } },
       ],
     );
   };
@@ -1026,7 +1055,9 @@ const ShiftBottomSheet = ({
                   <Ionicons name="enter-outline" size={15} color={C.text.secondary} />
                   <Text style={s.infoRowLabel}>Recebido de</Text>
                   <Text style={s.infoRowValue} numberOfLines={1}>
-                    {shift.originUserName || `Doutor#${String(shift.originUserId).slice(0, 6)}`}
+                    {shift.originUserName
+                      || coworkersById?.[shift.originUserId]?.name
+                      || `Doutor#${String(shift.originUserId).slice(0, 6)}`}
                   </Text>
                 </View>
                 {shift?.isFixedSchedule_origin && (
@@ -1077,6 +1108,30 @@ const ShiftBottomSheet = ({
           }
           return null;
         })()}
+
+        {/* Escalista original — só pra aurora-shifts onde o viewer NÃO é o criador
+            original. Histórico completo (timeline de cedes/devoluções) é só pro
+            aurora-web (coord/manager). Mobile mostra só o ponto fixo. */}
+        {(() => {
+          if (!shift?.group?.isAuroraGroup) return null;
+          const orig = findOriginalEscalista(shift?.transferLog);
+          if (!orig) return null;
+          if (String(orig.id) === String(user?.id)) return null;
+          const name = orig.name
+            || coworkersById?.[orig.id]?.name
+            || `Doutor#${orig.id.slice(0, 6)}`;
+          return (
+            <>
+              <View style={s.hairlineRow} />
+              <View style={s.infoRow}>
+                <Ionicons name="ribbon-outline" size={15} color={C.text.secondary} />
+                <Text style={s.infoRowLabel}>Escalista original</Text>
+                <Text style={s.infoRowValue} numberOfLines={1}>{name}</Text>
+              </View>
+            </>
+          );
+        })()}
+
          {/* Horas registradas — A2 design */}
         {hasRegisteredHours ? (
           <>
@@ -1397,20 +1452,43 @@ const ShiftBottomSheet = ({
                 );
               }
               const startTs = sh?.startISO ? new Date(sh.startISO).getTime() : 0;
-              const isAuroraOwned = sh?.isManual
-                || ['aurora', 'aurora_opening', 'received'].includes(sh?.source);
-              const canCedeOrSwap = !!onCede && !!onTrocar && isAuroraOwned && startTs > Date.now();
-              if (!canCedeOrSwap) return null;
+              // Plantões manuais (criados pelo próprio médico em AddManualShiftModal)
+              // são tracking pessoal — não pertencem a uma escala/grupo formal,
+              // então não podem ser cedidos/trocados. Ver Glossário em models/index.js.
+              const isMovable = !sh?.isManual
+                && ['aurora', 'aurora_opening', 'received'].includes(sh?.source);
+              const canCedeOrSwap = !!onCede && !!onTrocar && isMovable && startTs > Date.now();
+              // Devolver: shift recebido de aurora-group dentro da janela 2h.
+              // Ver src/utils/shiftTransferLog.js + memory project-shift-transferlog.
+              const canDevolve = sh?.source === 'received'
+                && sh?.group?.isAuroraGroup === true
+                && !!sh?.originUserId
+                && isWithinDevolutionWindow(sh?.cededAt);
+              if (!canCedeOrSwap && !canDevolve) return null;
+              const msLeft = canDevolve ? devolutionMsLeft(sh?.cededAt) : 0;
+              const minsLeft = Math.ceil(msLeft / 60000);
               return (
                 <View style={s.transferActionsRow}>
-                  <TouchableOpacity style={s.transferActionBtn} onPress={() => onCede(sh)}>
-                    <Ionicons name="exit-outline" size={15} color={C.primary} />
-                    <Text style={[s.transferActionText, { color: C.primary }]}>Ceder</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={s.transferActionBtn} onPress={() => onTrocar(sh)}>
-                    <Ionicons name="swap-horizontal" size={15} color={C.primary} />
-                    <Text style={[s.transferActionText, { color: C.primary }]}>Trocar</Text>
-                  </TouchableOpacity>
+                  {canCedeOrSwap && (
+                    <>
+                      <TouchableOpacity style={s.transferActionBtn} onPress={() => onCede(sh)}>
+                        <Ionicons name="exit-outline" size={15} color={C.primary} />
+                        <Text style={[s.transferActionText, { color: C.primary }]}>Ceder</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={s.transferActionBtn} onPress={() => onTrocar(sh)}>
+                        <Ionicons name="swap-horizontal" size={15} color={C.primary} />
+                        <Text style={[s.transferActionText, { color: C.primary }]}>Trocar</Text>
+                      </TouchableOpacity>
+                    </>
+                  )}
+                  {canDevolve && (
+                    <TouchableOpacity style={s.transferActionBtn} onPress={() => _handleDevolverInternal(sh)}>
+                      <Ionicons name="arrow-undo-outline" size={15} color={C.warning} />
+                      <Text style={[s.transferActionText, { color: C.warning }]}>
+                        Devolver{minsLeft > 0 ? ` · ${minsLeft}min` : ''}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
                 </View>
               );
             })()}
