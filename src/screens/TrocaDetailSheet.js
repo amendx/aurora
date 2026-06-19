@@ -15,6 +15,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useColors, Typography, BorderRadius } from '../constants/DesignSystem';
 import { AuthContext } from '../context/AuthContext';
+import { isViewOnly } from '../utils/userSource';
 import { useOffers } from '../contexts/OffersContext';
 import { useGroups } from '../contexts/GroupsContext';
 import {
@@ -159,7 +160,7 @@ export default function TrocaDetailSheet({ visible, swap, mode = 'received', onC
         <View style={s.ctaRow}>
           {busy ? (
             <ActivityIndicator color={C.primary} style={{ flex: 1, paddingVertical: 13 }} />
-          ) : mode === 'received' ? (
+          ) : isViewOnly(user) ? null : mode === 'received' ? (
             <>
               <Pressable style={[s.primaryBtn, { flex: 2 }]} onPress={() => run(acceptSwap)}>
                 <Ionicons name="checkmark" size={16} color="#fff" />

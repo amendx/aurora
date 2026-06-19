@@ -1,22 +1,17 @@
 rules_version = '2';
 
-// Auth model: same dual-auth as Firestore.
-//   Aurora users have Firebase Auth → request.auth.uid is set.
-//   WebClient users are unauthenticated at the Firebase layer (no storage writes needed).
-//
-// TODO: tighten further once WebClient users are bridged to Firebase Auth.
+// AURORA-ONLY: todo acesso ao Storage exige Firebase Auth. Sem fallback anônimo.
 
 service firebase.storage {
   match /b/{bucket}/o {
 
-    // Profile photos: owner writes, anyone reads (needed for avatar display).
+    // Profile photos: dono escreve; qualquer usuário LOGADO lê (avatar na UI).
     match /users/{userId}/profile/{file} {
-      allow read:  if true;
+      allow read:  if request.auth != null;
       allow write: if request.auth != null && request.auth.uid == userId;
     }
 
-    // All other paths: require Firebase Auth.
-    // The open fallback has been removed — WebClient users have no storage writes.
+    // Demais caminhos: exigem Firebase Auth.
     match /{allPaths=**} {
       allow read:  if request.auth != null;
       allow write: if request.auth != null;

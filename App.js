@@ -11,6 +11,7 @@ import { OpeningsProvider } from './src/contexts/OpeningsContext';
 import { OffersProvider } from './src/contexts/OffersContext';
 import { SwapAuctionsProvider } from './src/contexts/SwapAuctionsContext';
 import { ThemeProvider } from './src/contexts/ThemeContext';
+import { PrivacyProvider } from './src/contexts/PrivacyContext';
 import AuthScreen from './src/screens/AuthScreen';
 import MainScreen from './src/screens/MainScreen';
 import { AuthContext } from './src/context/AuthContext';
@@ -81,6 +82,7 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <ThemeProvider>
+      <PrivacyProvider>
       <AuthProvider>
         <ShiftsProvider>
           <GroupsProvider>
@@ -95,6 +97,7 @@ export default function App() {
           </GroupsProvider>
         </ShiftsProvider>
       </AuthProvider>
+      </PrivacyProvider>
       </ThemeProvider>
     </SafeAreaProvider>
   );

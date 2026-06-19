@@ -41,6 +41,8 @@ import ProfileScreen from './ProfileScreen';
 import ConfigScreen from './ConfigScreen';
 import GroupsScreen from './GroupsScreen';
 import ReportsScreen from './ReportsScreen';
+import EstimativaScreen from './EstimativaScreen';
+import MinhasEscalasFixasScreen from './MinhasEscalasFixasScreen';
 import GroupVisibilityScreen from './GroupVisibilityScreen';
 import DayViewScreen from './DayViewScreen';
 import HospitalsScreen from './HospitalsScreen';
@@ -60,6 +62,19 @@ import TabBar from '../components/TabBar';
 import { useColors, Spacing } from '../constants/DesignSystem';
 import Logger from '../utils/Logger';
 import { emitScrollToTop } from '../utils/scrollToTopBus';
+import { routeForNotification } from '../utils/notificationRoute';
+
+// expo-notifications carregado lazy (igual ao NotificationService) pra o arquivo
+// importar mesmo sem o pacote instalado.
+let _expoNotifs;
+function expoNotifs() {
+  if (_expoNotifs !== undefined) return _expoNotifs;
+  try { _expoNotifs = require('expo-notifications'); } catch { _expoNotifs = null; }
+  return _expoNotifs;
+}
+// getLastNotificationResponseAsync devolve a última resposta mesmo em aberturas
+// normais; consome só 1× por processo pra não re-navegar a cada login.
+let _consumedLaunchResponse = false;
 
 // ─── Animation constants ───────────────────────────────────────────────────────
 const { width: W } = Dimensions.get('window');
@@ -85,6 +100,8 @@ const SCREEN_MAP = {
   GroupsScreen:          'groups',
   HoursReport:           'reports',
   Reports:               'reports',
+  Estimativa:            'estimativa',
+  MinhasEscalasFixas:    'minhasEscalasFixas',
   GroupVisibilityScreen: 'groupVisibility',
   DayView:               'dayView',
   // ChartsScreen virou aba dentro de Reports — navega via 'Reports' com params.initialTab='graficos'.
@@ -432,6 +449,10 @@ export default function MainScreen() {
           rightComponent: groupsRefreshFn ? <Ionicons name="refresh" size={22} color={C.primary} /> : null,
           onRightPress: groupsRefreshFn ?? undefined,
         };
+      case 'estimativa':
+        return { title: 'Estimativa', subtitle: 'Simule a fidelização do mês', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
+      case 'minhasEscalasFixas':
+        return { title: 'Minhas escalas fixas', subtitle: 'Entregar ou transferir', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
       case 'groupVisibility':
         return { title: 'Visibilidade de grupos', subtitle: 'Escolha quem aparece no seu plantão', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
       case 'profile':
@@ -476,6 +497,29 @@ export default function MainScreen() {
   _navRef.current = handleNavigation;
   const stableNav = useRef({ navigate: (...a) => _navRef.current(...a) }).current;
 
+  // ── Deep-link de push: tocar numa notificação cai no aviso em questão ─────────
+  // Cobre dois caminhos: app aberto pelo toque com app morto/background
+  // (getLastNotificationResponseAsync) e toque com app já em execução
+  // (addNotificationResponseReceivedListener). O destino vem de routeForNotification.
+  useEffect(() => {
+    const Notifications = expoNotifs();
+    if (!Notifications) return;
+    let mounted = true;
+    const go = (response) => {
+      const data = response?.notification?.request?.content?.data;
+      const route = routeForNotification(data);
+      if (route) stableNav.navigate(route.screen, route.params || null);
+    };
+    if (!_consumedLaunchResponse) {
+      _consumedLaunchResponse = true;
+      Notifications.getLastNotificationResponseAsync?.()
+        .then((r) => { if (mounted && r) go(r); })
+        .catch(() => {});
+    }
+    const sub = Notifications.addNotificationResponseReceivedListener?.(go);
+    return () => { mounted = false; sub?.remove?.(); };
+  }, [stableNav]);
+
   // Tab screen elements created once — React reconciles the same instances forever.
   const TAB_SCREENS = useMemo(() => [
     { id: 'home',     el: <HomeScreen navigation={stableNav} /> },
@@ -510,6 +554,10 @@ export default function MainScreen() {
             initialFocusShiftId={screen.params?.focusShiftId}
           />
         );
+      case 'estimativa':
+        return <EstimativaScreen navigation={{ goBack: handleBackNavigation }} />;
+      case 'minhasEscalasFixas':
+        return <MinhasEscalasFixasScreen navigation={{ goBack: handleBackNavigation }} />;
       case 'groupVisibility':
         return <GroupVisibilityScreen navigation={{ goBack: handleBackNavigation }} />;
       case 'profile':
@@ -530,7 +578,7 @@ export default function MainScreen() {
       case 'networkVacancies':
         return <NetworkVacanciesScreen navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }} />;
       case 'avisos':
-        return <AvisosScreen navigation={{ goBack: handleBackNavigation }} />;
+        return <AvisosScreen navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }} />;
       case 'notifsettings':
         return <NotificationsSettingsScreen navigation={{ goBack: handleBackNavigation }} />;
       case 'historico':

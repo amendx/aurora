@@ -20,6 +20,7 @@ export const DEFAULT_RULES = {
   minRestMinutes: 0,              // descanso entre plantões: 0 = só avisa se o usuário ativar
   maxConsecutiveMinutes: 18 * 60, // 18h empilhadas (M+T ok; M+T+N=24h vira arriscado)
   maxConsecutiveDays: 5,          // dias seguidos trabalhados
+  eventBufferMinutes: 75,         // deslocamento mínimo entre plantão e compromisso/evento
 };
 
 // Paleta para o usuário marcar cor de cada compromisso (visual no calendário).

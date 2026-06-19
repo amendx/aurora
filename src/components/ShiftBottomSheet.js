@@ -31,12 +31,14 @@ import { useColors, Typography, Spacing, Shadows, BorderRadius } from '../consta
 import { useOffers } from '../contexts/OffersContext';
 import { useOpenings } from '../contexts/OpeningsContext';
 import { useShifts } from '../contexts/ShiftsContext';
+import { usePrivacy } from '../contexts/PrivacyContext';
 import { calculateShiftValueWithBreakdown, calculateShiftValue, getFullShiftConfig, computeShiftValue } from '../utils/ShiftValueCalculator';
 import { formatMoney, formatMoneyCompact, formatHourlyRate } from '../utils/MoneyFormatter';
 import HoursEditModal from './HoursEditModal';
 import TimeUtils from '../utils/TimeUtils';
 import { useGroups } from '../contexts/GroupsContext';
 import { AuthContext } from '../context/AuthContext';
+import { isViewOnly } from '../utils/userSource';
 import { isWithinDevolutionWindow, devolutionMsLeft } from '../utils/shiftTransferLog';
 import { getGroupVisibility } from '../utils/GroupVisibilityConfig';
 import { getGroupColors } from '../utils/GroupColorConfig';
@@ -262,6 +264,7 @@ const ShiftBottomSheet = ({
 
   // ── "Quem está também" state ────────────────────────────────────────────────
   const { user } = useContext(AuthContext);
+  const { valuesHidden } = usePrivacy();
   const { deleteManualShift, hoursReport } = useShifts();
   const { coworkersById, groupsById } = useGroups();
   const [deleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
@@ -947,7 +950,7 @@ const ShiftBottomSheet = ({
           </View>
           <View style={s.cardHeaderRight}>
             <Text style={s.valorLabel}>{hasRegisteredHours ? 'Valor efetivo' : 'Valor previsto'}</Text>
-            <Text style={[s.valorAmount, hasRegisteredHours && { fontSize: 24 }]}>R$ {getDisplayValue()}</Text>
+            <Text style={[s.valorAmount, hasRegisteredHours && { fontSize: 24 }]}>R$ {valuesHidden ? '••••' : getDisplayValue()}</Text>
           
           </View>
         </View>
@@ -1242,18 +1245,18 @@ const ShiftBottomSheet = ({
                   <Text style={s.breakdownLabel}>
                     {formatHourlyRate(breakdown.hourlyValue)} × {shift.splitHours.hoursThisMonth}h{breakdown.weekend && breakdown.isNaturalWeekend ? ' (FDS)' : ''}{breakdown.isFridayNight ? ' (Sexta N)' : ''}
                   </Text>
-                  <Text style={s.breakdownValue}>+ R$ {formatMoneyCompact((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth)}</Text>
+                  <Text style={s.breakdownValue}>+ R$ {valuesHidden ? '••••' : formatMoneyCompact((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth)}</Text>
                 </View>
                 {breakdown.loyaltyPercentage > 0 ? (
                   <View style={s.breakdownRow}>
                     <Text style={[s.breakdownLabel, { color: C.text.tertiary }]}>Fidelização +{breakdown.loyaltyPercentage}%</Text>
-                    <Text style={s.breakdownValue}>+ R$ {formatMoneyCompact(((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth * breakdown.loyaltyPercentage) / 100)}</Text>
+                    <Text style={s.breakdownValue}>+ R$ {valuesHidden ? '••••' : formatMoneyCompact(((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth * breakdown.loyaltyPercentage) / 100)}</Text>
                   </View>
                 ) : null}
                 {breakdown.generalBonusPercentage > 0 ? (
                   <View style={s.breakdownRow}>
                     <Text style={[s.breakdownLabel, { color: C.primary }]}>Bônus +{breakdown.generalBonusPercentage}%</Text>
-                    <Text style={[s.breakdownValue, { color: C.primary }]}>+ R$ {formatMoneyCompact(((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth * breakdown.generalBonusPercentage) / 100)}</Text>
+                    <Text style={[s.breakdownValue, { color: C.primary }]}>+ R$ {valuesHidden ? '••••' : formatMoneyCompact(((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth * breakdown.generalBonusPercentage) / 100)}</Text>
                   </View>
                 ) : null}
               </>
@@ -1263,18 +1266,18 @@ const ShiftBottomSheet = ({
                   <Text style={s.breakdownLabel}>
                     {formatHourlyRate(breakdown.hourlyValue)} × {breakdown.hours || 0}h{breakdown.weekend && breakdown.isNaturalWeekend ? ' (FDS)' : ''}{breakdown.isFridayNight ? ' (Sexta N)' : ''}
                   </Text>
-                  <Text style={s.breakdownValue}>+ R$ {formatMoneyCompact(breakdown.baseValue) || '0,00'}</Text>
+                  <Text style={s.breakdownValue}>+ R$ {valuesHidden ? '••••' : (formatMoneyCompact(breakdown.baseValue) || '0,00')}</Text>
                 </View>
                 {breakdown.loyaltyBonus > 0 ? (
                   <View style={s.breakdownRow}>
                     <Text style={[s.breakdownLabel, { color: C.text.tertiary }]}>Fidelização +{breakdown.loyaltyPercentage}%</Text>
-                    <Text style={s.breakdownValue}>+ R$ {formatMoneyCompact(breakdown.loyaltyBonus)}</Text>
+                    <Text style={s.breakdownValue}>+ R$ {valuesHidden ? '••••' : formatMoneyCompact(breakdown.loyaltyBonus)}</Text>
                   </View>
                 ) : null}
                 {breakdown.generalBonus > 0 ? (
                   <View style={s.breakdownRow}>
                     <Text style={[s.breakdownLabel, { color: C.primary }]}>Bônus +{breakdown.generalBonusPercentage}%</Text>
-                    <Text style={[s.breakdownValue, { color: C.primary }]}>+ R$ {formatMoneyCompact(breakdown.generalBonus)}</Text>
+                    <Text style={[s.breakdownValue, { color: C.primary }]}>+ R$ {valuesHidden ? '••••' : formatMoneyCompact(breakdown.generalBonus)}</Text>
                   </View>
                 ) : null}
               </>
@@ -1285,14 +1288,14 @@ const ShiftBottomSheet = ({
                   Horas extras · {TimeUtils.minutesToDisplay(Math.abs(hoursSummary.differenceMinutes))}
                 </Text>
                 <Text style={[s.breakdownValue, { color: hoursSummary.differenceMinutes > 0 ? C.money : C.error }]}>
-                  {hoursSummary.differenceMinutes > 0 ? '+ ' : '- '}R$ {formatMoneyCompact(Math.abs((hoursSummary.differenceMinutes / 60) * (breakdown.hourlyValue || 0) * (1 + (breakdown.loyaltyPercentage || 0) / 100 + (breakdown.generalBonusPercentage || 0) / 100)))}
+                  {hoursSummary.differenceMinutes > 0 ? '+ ' : '- '}R$ {valuesHidden ? '••••' : formatMoneyCompact(Math.abs((hoursSummary.differenceMinutes / 60) * (breakdown.hourlyValue || 0) * (1 + (breakdown.loyaltyPercentage || 0) / 100 + (breakdown.generalBonusPercentage || 0) / 100)))}
                 </Text>
               </View>
             ) : null}
             <View style={s.hairlineRow} />
             <View style={s.breakdownRow}>
               <Text style={s.breakdownTotalLabel}>{hasRegisteredHours ? 'Recebido' : 'Total'}</Text>
-              <Text style={s.breakdownTotalValue}>R$ {getDisplayValue()}</Text>
+              <Text style={s.breakdownTotalValue}>R$ {valuesHidden ? '••••' : getDisplayValue()}</Text>
             </View>
           </View>
         ) : null}
@@ -1457,7 +1460,8 @@ const ShiftBottomSheet = ({
               // então não podem ser cedidos/trocados. Ver Glossário em models/index.js.
               const isMovable = !sh?.isManual
                 && ['aurora', 'aurora_opening', 'received'].includes(sh?.source);
-              const canCedeOrSwap = !!onCede && !!onTrocar && isMovable && startTs > Date.now();
+              // Conta só-visualização (PlantãoAPI) não pode ceder/trocar.
+              const canCedeOrSwap = !isViewOnly(user) && !!onCede && !!onTrocar && isMovable && startTs > Date.now();
               // Devolver: shift recebido de aurora-group dentro da janela 2h.
               // Ver src/utils/shiftTransferLog.js + memory project-shift-transferlog.
               const canDevolve = sh?.source === 'received'

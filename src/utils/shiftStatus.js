@@ -2,9 +2,10 @@
 // + pendências já anotadas pelo caller. Tipos:
 //   confirmado      — meu plantão sem pendências
 //   a_confirmar     — placeholder; ainda não temos sinal pra disparar (TODO)
-//   em_troca        — troca proposta (envio ou recebimento) ou oferta de cessão direcionada pendente
+//   em_troca        — troca proposta (envio ou recebimento) pendente
 //   troca_recebida  — troca direcionada PRA MIM, ainda não respondida
 //   cedido          — cessão aberta ao grupo pendente (eu cedi)
+//   ofertado        — cessão direcionada a um colega pendente (eu ofereci)
 //   cobrindo        — recebi via cede/troca (source='received') e ainda está comigo
 //   cancelado       — sem trigger atual; reservado pra futuro
 //
@@ -16,6 +17,7 @@ export const SHIFT_STATUS = Object.freeze({
   EM_TROCA:       'em_troca',
   TROCA_RECEBIDA: 'troca_recebida',
   CEDIDO:         'cedido',
+  OFERTADO:       'ofertado',
   COBRINDO:       'cobrindo',
   CANCELADO:      'cancelado',
 });
@@ -26,6 +28,7 @@ export const SHIFT_STATUS_META = Object.freeze({
   em_troca:       { tone: 'info',   icon: 'swap',  label: 'Em troca',              desc: 'Proposta de troca enviada — aguardando resposta.' },
   troca_recebida: { tone: 'info',   icon: 'swap',  label: 'Troca proposta a você', desc: 'Um colega quer trocar este plantão com você.' },
   cedido:         { tone: 'warn',   icon: 'cede',  label: 'Cedido ao grupo',       desc: 'Disponível para alguém do grupo assumir.' },
+  ofertado:       { tone: 'warn',   icon: 'cede',  label: 'Cessão oferecida',      desc: 'Oferta enviada a um colega — aguardando resposta.' },
   cobrindo:       { tone: 'violet', icon: 'login', label: 'Cobrindo colega',       desc: 'Você está cobrindo este plantão.' },
   cancelado:      { tone: 'muted',  icon: 'x',     label: 'Cancelado',             desc: 'Este plantão foi cancelado.' },
 });
@@ -43,7 +46,7 @@ export function deriveShiftStatus(shift, currentUserId) {
     // role 'target' = troca proposta a mim. role 'initiator' = enviada.
     return shift._pendingSwapRole === 'target' ? SHIFT_STATUS.TROCA_RECEBIDA : SHIFT_STATUS.EM_TROCA;
   }
-  if (shift._pendingOffer) return SHIFT_STATUS.EM_TROCA;
+  if (shift._pendingOffer) return SHIFT_STATUS.OFERTADO;
   if (shift.source === 'received') {
     // Se não recebeu de si mesmo (rare edge), é cobrindo.
     if (shift.originUserId && String(shift.originUserId) !== String(currentUserId)) {

@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
 import WebClientApiService from '../services/WebClientApiService';
+import { isAuroraOnly } from '../utils/userSource';
 import Logger from '../utils/Logger';
 import { AuthContext } from '../context/AuthContext';
 import { StorageService } from '../utils/StorageService';
@@ -26,6 +27,56 @@ export const GroupsProvider = ({ children }) => {
   const [error, setError] = useState(null);
   const [hasLoadedFromApi, setHasLoadedFromApi] = useState(false);
   const loadingRef = React.useRef(false); // Evitar chamadas duplicadas
+  // Ids que cada fonte "possui" no mapa `groups` — permite que a hidratação de
+  // users/{uid}/groups e a assinatura de auroraGroups coexistam sem se sobrescrever
+  // (cada uma só adiciona/remove os seus ids; ninguém faz REPLACE total).
+  const usersGroupIdsRef = React.useRef(new Set());
+  const auroraGroupIdsRef = React.useRef(new Set());
+
+  /** Mapeia um doc top-level auroraGroups (shape da web) → shape de grupo do app. */
+  const normalizeAuroraGroup = (data) => {
+    if (!data || !data.id) return null;
+    const raw = data.color || '3FA9A7';
+    const color = String(raw).startsWith('#') ? raw : `#${raw}`;
+    const memberIds = Array.isArray(data.memberIds) ? data.memberIds.map(String) : [];
+    return {
+      id: data.id,
+      name: data.name || '',
+      color,
+      is_personal: false,
+      is_removed: !!data.inactive,
+      is_admin: false,
+      total_users: memberIds.length,
+      has_workingtime: true,
+      has_amount: data.hasAmount !== false,
+      institution: data.institutionId
+        ? { id: data.institutionId, name: data.institutionName || '' }
+        : null,
+      institutionId: data.institutionId ?? null,
+      institutionName: data.institutionName ?? null,
+      memberIds,
+      config: data.config || null,
+      leaderId: data.leaderId || null,
+      isAurora: true,
+      source: 'aurora',
+      isFromDaily: false,
+    };
+  };
+
+  // Aplica um conjunto de grupos de UMA fonte ao mapa, removendo os ids que a
+  // mesma fonte tinha antes e sumiram (add + remove), sem tocar nos ids das outras.
+  const mergeGroupSource = (idsRef, list) => {
+    const incoming = new Set(list.map((g) => String(g.id)));
+    const prev = idsRef.current;
+    setGroups((cur) => {
+      const next = { ...cur };
+      prev.forEach((id) => { if (!incoming.has(id)) delete next[id]; });
+      list.forEach((g) => { next[g.id] = { ...next[g.id], ...g }; });
+      return next;
+    });
+    idsRef.current = incoming;
+    return incoming;
+  };
 
   // Normalizar pessoa (coworker)
   const normalizePerson = (person) => {
@@ -155,7 +206,7 @@ export const GroupsProvider = ({ children }) => {
     // [WEBCLIENT-BRIDGE] — the `!user?.auroraOnlyMode` predicate exists só pra
     // pular o load da PlantaoAPI quando o webClient virou aurora-only. Remova
     // junto com o resto da bridge quando o webClient for desativado.
-    if (token && user?.source !== 'aurora' && !user?.auroraOnlyMode && !hasLoadedFromApi) {
+    if (token && !isAuroraOnly(user) && !hasLoadedFromApi) {
       Logger.info('🏢 Token disponível, agendando carga de grupos em background...');
       const timer = setTimeout(() => {
         loadGroupsBackground();
@@ -166,6 +217,13 @@ export const GroupsProvider = ({ children }) => {
 
   // Carregar grupos completos da API
   const loadGroups = async () => {
+    // Aurora-only (native ou migrado): NÃO chama PlantaoAPI. Grupos vêm
+    // de users/{uid}/groups via FirebaseAdapter. Defensa contra callers que
+    // pulam o gate (ex.: pull-to-refresh do GroupsScreen).
+    if (isAuroraOnly(user)) {
+      Logger.info('🏢 loadGroups skipped — usuário é aurora-only');
+      return;
+    }
     if (loadingRef.current) {
       Logger.info('🏢 Carga de grupos já em andamento, ignorando...');
       return;
@@ -288,6 +346,8 @@ export const GroupsProvider = ({ children }) => {
 
   // Carga silenciosa em background (sem mostrar loading na UI)
   const loadGroupsBackground = async () => {
+    // Mesma defesa do loadGroups — defensa redundante mas barata.
+    if (isAuroraOnly(user)) return;
     if (loadingRef.current || hasLoadedFromApi) return;
     try {
       loadingRef.current = true;
@@ -387,28 +447,58 @@ export const GroupsProvider = ({ children }) => {
   useEffect(() => {
     // [WEBCLIENT-BRIDGE] — `|| user?.auroraOnlyMode` permite que o webClient
     // migrado também hidratze grupos do Firestore. Removível com a bridge.
-    if ((user?.source !== 'aurora' && !user?.auroraOnlyMode) || !userId) return;
+    if (!isAuroraOnly(user) || !userId) return;
     let cancelled = false;
     (async () => {
       try {
         const { groups: gList, membersByGroupId: mbgi, persons } = await FirebaseAdapter.fetchAuroraGroupMembers(userId);
         if (cancelled) return;
-        // Aurora-only / aurora puro: Firestore é fonte autoritativa.
-        // REPLACE em vez de merge — evita lixo de sessões anteriores
-        // (ex.: grupos antigos do clone webClient sobrevivendo após seed limpo).
-        const groupsMap = {};
-        gList.forEach(g => { groupsMap[g.id] = g; });
-        setGroups(groupsMap);
+        // MERGE por-fonte (não REPLACE total): users/{uid}/groups é UMA fonte e
+        // auroraGroups (assinatura) é a outra. mergeGroupSource remove só os ids
+        // desta fonte que sumiram (limpa lixo de sessões antigas) sem apagar os
+        // grupos vindos da assinatura de auroraGroups.
+        mergeGroupSource(usersGroupIdsRef, gList);
         LocalCache.saveGroups(userId, gList).catch(() => {});
-        setMembersByGroupId(mbgi || {});
-        setCoworkers(persons || {});
-        Logger.info(`👥 Aurora graph hydrated (replace): ${gList.length} groups, ${Object.keys(mbgi).length} member-lists, ${Object.keys(persons).length} persons`);
+        setMembersByGroupId(prev => ({ ...prev, ...(mbgi || {}) }));
+        setCoworkers(prev => ({ ...prev, ...(persons || {}) }));
+        Logger.info(`👥 Aurora graph hydrated (merge): ${gList.length} groups, ${Object.keys(mbgi).length} member-lists, ${Object.keys(persons).length} persons`);
       } catch (err) {
         Logger.warn(`Aurora group hydration falhou: ${err?.message}`);
       }
     })();
     return () => { cancelled = true; };
   }, [userId, user?.source]);
+
+  // Real-time: grupos cross-user em que o médico foi adicionado por um gestor na
+  // web (top-level auroraGroups). Reflete na hora — sem refresh — adições e
+  // remoções de membership. Só usuários Firebase-authed (aurora) podem ler.
+  useEffect(() => {
+    if (!isAuroraOnly(user) || !userId) return;
+    const unsub = FirebaseAdapter.subscribeAuroraGroups(
+      userId,
+      (rawList) => {
+        const list = rawList.map(normalizeAuroraGroup).filter(Boolean);
+        const prevIds = new Set(auroraGroupIdsRef.current); // antes do merge
+        const incoming = mergeGroupSource(auroraGroupIdsRef, list);
+        // Membership: cada membro vira 'assist' (capaz de receber escala). Perfis
+        // (coworkers) ficam best-effort — resolvidos por outros caminhos.
+        setMembersByGroupId((prev) => {
+          const next = { ...prev };
+          prevIds.forEach((id) => { if (!incoming.has(id)) delete next[id]; });
+          list.forEach((g) => {
+            next[g.id] = (g.memberIds || []).map((uid) => ({
+              userId: String(uid),
+              memberType: 'assist',
+            }));
+          });
+          return next;
+        });
+        Logger.info(`👥 auroraGroups (realtime): ${list.length} grupos`);
+      },
+      (err) => Logger.warn(`auroraGroups subscription: ${err?.message}`),
+    );
+    return () => { try { unsub && unsub(); } catch (_) {} };
+  }, [userId, user?.source, user?.auroraOnlyMode]);
 
   // Obter grupos do usuário
   const getUserGroups = () => {

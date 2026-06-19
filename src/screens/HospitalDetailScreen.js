@@ -10,6 +10,9 @@ import { useColors, Typography, Spacing, BorderRadius, Shadows } from '../consta
 import { AuthContext } from '../context/AuthContext';
 import LocalCache from '../services/LocalCache';
 import WebClientApiService from '../services/WebClientApiService';
+import FirebaseAdapter from '../services/firebase/FirebaseAdapter';
+import { formatMoney } from '../utils/MoneyFormatter';
+import { isAuroraOnly } from '../utils/userSource';
 import Logger from '../utils/Logger';
 
 const DEFAULT_LOYALTY_TIERS = [
@@ -36,6 +39,11 @@ export default function HospitalDetailScreen({ navigation, institution: instProp
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  // Config publicado pelo gestor (institutions/{id}.config) — fonte de verdade.
+  const [published, setPublished] = useState(null);
+  // Quando o hospital define valores, o médico NÃO edita por padrão; só se ativar.
+  const [estimateEnabled, setEstimateEnabled] = useState(false);
+
   // Loyalty (lives under institutionLoyalty[instId] — pre-existing slot)
   const [autoFromHours, setAutoFromHours] = useState(true);
   const [loyaltyOptions, setLoyaltyOptions] = useState(DEFAULT_LOYALTY_TIERS);
@@ -60,11 +68,29 @@ export default function HospitalDetailScreen({ navigation, institution: instProp
     if (!inst?.id) { setLoading(false); return; }
     loadDetail();
     loadSavedCfg();
+    loadPublished();
   }, []);
+
+  // Busca o config oficial publicado pelo gestor na web. Fonte de verdade: quando
+  // existe, os valores do hospital têm prioridade e os ajustes do médico viram
+  // estimativa. institutions/{id} é leitura pública (rules).
+  const loadPublished = async () => {
+    if (!instId) return;
+    try {
+      const map = await FirebaseAdapter.getHospitalConfigs([instId]);
+      setPublished(map?.[instId] || null);
+    } catch (e) {
+      Logger.warn('HospitalDetailScreen: erro ao carregar config publicado', e?.message);
+    }
+  };
 
   const loadDetail = async () => {
     setLoading(true);
     try {
+      // Aurora-only: PlantaoAPI não tem o doc dessa institution; pula. O detalhe
+      // já vem do que o app conhece (inst props) ou de institutions/{id} no Firestore
+      // — caller resolve o que mostrar quando detail = null.
+      if (isAuroraOnly(user)) { setLoading(false); return; }
       const res = await WebClientApiService.getInstitution(token, inst.id);
       if (res.success && res.data) setDetail(res.data);
     } catch (e) {
@@ -194,6 +220,9 @@ export default function HospitalDetailScreen({ navigation, institution: instProp
   const updateBonusField = (k, v) => setBonus(prev => ({ ...prev, [k]: v }));
 
   const d = detail || inst || {};
+  // Sem config do hospital → médico define os próprios valores (real). Com config
+  // → seções editáveis ficam ocultas até ele ativar "Personalizar (estimativa)".
+  const showEditable = !published || estimateEnabled;
 
   return (
     <View style={[s.root, { backgroundColor: C.background.secondary }]}>
@@ -231,8 +260,95 @@ export default function HospitalDetailScreen({ navigation, institution: instProp
           )}
         </View>
 
+        {/* ── Valores oficiais publicados pelo gestor (fonte de verdade) ── */}
+        {published && (
+          <>
+            <Text style={[s.sectionLabel, { color: C.text.tertiary }]}>Definido pelo hospital</Text>
+            <View style={[s.card, { backgroundColor: C.background.elevated, borderColor: C.primary + '55' }]}>
+              <View style={[s.pubHeader, { backgroundColor: C.accentSoft }]}>
+                <Ico name="shield-checkmark-outline" size={15} color={C.primary} />
+                <Text style={[s.pubHeaderText, { color: C.primary }]}>Valores oficiais — definidos pelo gestor</Text>
+              </View>
+              <View style={{ padding: 14 }}>
+                {/* Valores por hora */}
+                <Text style={[s.pubGroupLabel, { color: C.text.primary }]}>Valores por hora</Text>
+
+                <Text style={[s.pubMiniLabel, { color: C.text.tertiary }]}>Durante a semana</Text>
+                <View style={s.rateRowWrap}>
+                  <RateChip C={C} icon="sunny-outline" label="Dia"   value={published.hourValues?.weekday?.day} />
+                  <RateChip C={C} icon="moon-outline"  label="Noite" value={published.hourValues?.weekday?.night} />
+                </View>
+
+                <Text style={[s.pubMiniLabel, { color: C.text.tertiary, marginTop: 12 }]}>Fim de semana</Text>
+                <View style={s.rateRowWrap}>
+                  <RateChip C={C} icon="sunny-outline" label="Dia"   value={published.hourValues?.weekend?.day} />
+                  <RateChip C={C} icon="moon-outline"  label="Noite" value={published.hourValues?.weekend?.night} />
+                </View>
+
+                {/* Regras */}
+                <View style={s.badgeRow}>
+                  <Badge C={C} icon="partly-sunny-outline"
+                    text={published.fridayNightAsWeekend ? 'Sex. noite conta como FDS' : 'Sex. noite = semana'} />
+                  {published.bonusEnabled ? (
+                    <Badge C={C} icon="sparkles-outline" tone="warn"
+                      text={`Bônus +${published.bonus?.percentage || 0}% · ${monthShort(published.bonus?.startMonth)}–${monthShort(published.bonus?.endMonth)}`} />
+                  ) : null}
+                </View>
+
+                {/* Fidelização */}
+                <Text style={[s.pubGroupLabel, { color: C.text.primary, marginTop: 16 }]}>Fidelização por horas</Text>
+                {published.loyalty?.autoFromHours ? (
+                  (published.loyalty.loyaltyOptions || []).length ? (
+                    <View style={s.tierRow}>
+                      {published.loyalty.loyaltyOptions.map((t, i) => (
+                        <View key={i} style={[s.tierCell, { flex: 1, backgroundColor: C.accentSoft + '70', borderColor: C.primary + '30' }]}>
+                          <Text style={[s.tierPct, { color: C.primary }]}>+{t.percentage}%</Text>
+                          <Text style={[s.tierHours, { color: C.text.tertiary }]}>{t.minHours}h+</Text>
+                        </View>
+                      ))}
+                    </View>
+                  ) : (
+                    <Text style={[s.pubEmpty, { color: C.text.tertiary }]}>Sem faixas definidas</Text>
+                  )
+                ) : (
+                  <View style={[s.tierCell, { alignSelf: 'flex-start', paddingHorizontal: 20, backgroundColor: C.accentSoft + '70', borderColor: C.primary + '30' }]}>
+                    <Text style={[s.tierPct, { color: C.primary }]}>+{published.loyalty?.manualPercentage || 0}%</Text>
+                    <Text style={[s.tierHours, { color: C.text.tertiary }]}>fixo</Text>
+                  </View>
+                )}
+              </View>
+            </View>
+            {/* Toggle-mestre: por padrão o médico não edita; só se quiser estimar. */}
+            <View style={[s.card, { backgroundColor: C.background.elevated, borderColor: C.border.light }]}>
+              <View style={s.toggleRow}>
+                <View style={[s.toggleIcon, { backgroundColor: C.accentSoft }]}>
+                  <Ico name="create-outline" size={16} color={C.primary} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={[s.toggleLabel, { color: C.text.primary }]}>Personalizar (estimativa)</Text>
+                  <Text style={[s.toggleHint, { color: C.text.tertiary }]}>
+                    {estimateEnabled
+                      ? 'Seus ajustes valem só como estimativa local — não alteram os valores oficiais.'
+                      : 'O app usa os valores oficiais do hospital. Ative para simular outros valores.'}
+                  </Text>
+                </View>
+                <Switch
+                  value={estimateEnabled}
+                  onValueChange={setEstimateEnabled}
+                  trackColor={{ false: C.border.medium, true: C.primary }}
+                  thumbColor="#fff"
+                />
+              </View>
+            </View>
+          </>
+        )}
+
+        {showEditable && (
+        <>
         {/* Loyalty section label */}
-        <Text style={[s.sectionLabel, { color: C.text.tertiary }]}>Fidelização</Text>
+        <Text style={[s.sectionLabel, { color: C.text.tertiary }]}>
+          {published ? 'Fidelização (estimativa)' : 'Fidelização'}
+        </Text>
 
         <View style={[s.card, { backgroundColor: C.background.elevated, borderColor: C.border.light }]}>
           {/* Auto toggle */}
@@ -450,17 +566,21 @@ export default function HospitalDetailScreen({ navigation, institution: instProp
             </>
           )}
         </View>
+        </>
+        )}
       </ScrollView>
 
-      {/* Save button */}
-      <View style={[s.footer, { paddingBottom: Spacing.md, backgroundColor: C.background.secondary, borderTopColor: C.border.light }]}>
-        <Pressable style={[s.saveBtn, { backgroundColor: C.primary }]} onPress={handleSave} disabled={saving}>
-          {saving
-            ? <ActivityIndicator size="small" color="#fff" />
-            : <Text style={s.saveBtnText}>Salvar</Text>
-          }
-        </Pressable>
-      </View>
+      {/* Save button — só quando há seções editáveis visíveis */}
+      {showEditable && (
+        <View style={[s.footer, { paddingBottom: Spacing.md, backgroundColor: C.background.secondary, borderTopColor: C.border.light }]}>
+          <Pressable style={[s.saveBtn, { backgroundColor: C.primary }]} onPress={handleSave} disabled={saving}>
+            {saving
+              ? <ActivityIndicator size="small" color="#fff" />
+              : <Text style={s.saveBtnText}>Salvar</Text>
+            }
+          </Pressable>
+        </View>
+      )}
     </View>
   );
 }
@@ -473,6 +593,29 @@ const monthShort = (v) => {
   if (typeof v === 'string' && v.includes('-')) v = parseInt(v.slice(-2), 10);
   const n = parseInt(v, 10);
   return n >= 1 && n <= 12 ? MONTH_SHORT[n - 1] : '—';
+};
+
+// Hour-rate tile (sol/lua) for the manager-published "Definido pelo hospital" card.
+const RateChip = ({ C, icon, label, value }) => (
+  <View style={[s.rateChip, { backgroundColor: C.background.secondary, borderColor: C.border.light }]}>
+    <View style={s.rateChipHead}>
+      <Ico name={icon} size={13} color={C.text.tertiary} />
+      <Text style={[s.rateChipLabel, { color: C.text.tertiary }]}>{label}</Text>
+    </View>
+    <Text style={[s.rateChipValue, { color: C.text.primary }]}>{formatMoney(value)}</Text>
+    <Text style={[s.rateChipUnit, { color: C.text.tertiary }]}>por hora</Text>
+  </View>
+);
+
+// Small rounded chip for boolean rules (sexta-noite, bônus).
+const Badge = ({ C, icon, text, tone }) => {
+  const col = tone === 'warn' ? C.warning : C.primary;
+  return (
+    <View style={[s.badge, { backgroundColor: col + '18', borderColor: col + '33' }]}>
+      <Ico name={icon} size={12} color={col} />
+      <Text style={[s.badgeText, { color: col }]}>{text}</Text>
+    </View>
+  );
 };
 
 const RateRow = ({ C, label, hint, value, onChangeText }) => (
@@ -524,6 +667,22 @@ const s = StyleSheet.create({
 
   infoRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14, paddingVertical: 12 },
   infoText: { flex: 1, fontSize: 14, fontFamily: Typography.fontFamily.regular },
+
+  pubHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 14, paddingVertical: 10 },
+  pubHeaderText: { fontSize: 12, fontWeight: '700' },
+  pubGroupLabel: { fontSize: 13.5, fontWeight: '800', letterSpacing: -0.2, marginBottom: 10 },
+  pubMiniLabel: { fontSize: 10.5, fontWeight: '700', letterSpacing: 0.6, textTransform: 'uppercase', marginBottom: 8 },
+  rateRowWrap: { flexDirection: 'row', gap: 10 },
+  rateChip: { flex: 1, padding: 12, borderRadius: 12, borderWidth: 0.5 },
+  rateChipHead: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 6 },
+  rateChipLabel: { fontSize: 11, fontWeight: '700' },
+  rateChipValue: { fontSize: 19, fontWeight: '800', letterSpacing: -0.4 },
+  rateChipUnit: { fontSize: 10, marginTop: 1 },
+  badgeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 14 },
+  badge: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, borderWidth: 0.5 },
+  badgeText: { fontSize: 11.5, fontWeight: '700' },
+  tierRow: { flexDirection: 'row', gap: 6 },
+  pubEmpty: { fontSize: 12.5 },
 
   sectionLabel: {
     fontSize: 11.5, fontWeight: '600', textTransform: 'uppercase',

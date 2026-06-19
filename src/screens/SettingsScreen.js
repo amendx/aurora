@@ -6,6 +6,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AuthContext } from '../context/AuthContext';
+import { isViewOnly } from '../utils/userSource';
 import { useTheme } from '../contexts/ThemeContext';
 import { useGroups } from '../contexts/GroupsContext';
 import { useShifts } from '../contexts/ShiftsContext';
@@ -86,6 +87,7 @@ const SettingsScreen = ({ navigation }) => {
   const hasWebClient = !!(user?.data?.id || user?.webClientToken);
   const isAuroraNative = user?.source === 'aurora';
   const auroraOnly = !!user?.auroraOnlyMode;
+  const viewOnly = isViewOnly(user);
 
   const handleLogout = () => {
     Alert.alert('Sair da Conta', 'Tem certeza que deseja sair?', [
@@ -391,10 +393,14 @@ const SettingsScreen = ({ navigation }) => {
       <View style={s.card}>
         <Row icon="person-outline"        label="Perfil"                  hint="Foto, nome, informações"      onPress={() => navigation?.navigate?.('Profile')} />
         <Row icon="people-outline"        label="Grupos"                  hint="Seus grupos e equipes"         onPress={() => navigation?.navigate?.('GroupsScreen')} />
+        {!viewOnly && (
+          <Row icon="repeat-outline"        label="Minhas escalas fixas"    hint="Entregar ou transferir temporariamente" onPress={() => navigation?.navigate?.('MinhasEscalasFixas')} />
+        )}
         <Row icon="eye-outline"           label="Visibilidade de equipes" hint="Quem aparece no seu plantão"   onPress={() => navigation?.navigate?.('GroupVisibilityScreen')} />
-        <Row icon="notifications-outline" label="Notificações"            hint="Ofertas, trocas e atualizações" onPress={() => navigation?.navigate?.('NotificationsSettingsScreen')} />
-        <Row icon="swap-horizontal-outline" label="Histórico"              hint="Cessões e trocas, pendentes e passadas" onPress={() => navigation?.navigate?.('Historico')} />
-        <Row icon="terminal-outline"      label="Minhas ações"            hint="Log da sessão (debug)"           onPress={() => navigation?.navigate?.('ActivityLog')} last />
+        {!viewOnly && (
+          <Row icon="notifications-outline" label="Notificações"            hint="Ofertas, trocas e atualizações" onPress={() => navigation?.navigate?.('NotificationsSettingsScreen')} />
+        )}
+        <Row icon="swap-horizontal-outline" label="Histórico"              hint="Cessões e trocas, pendentes e passadas" onPress={() => navigation?.navigate?.('Historico')} last />
       </View>
 
       {/* [WEBCLIENT-BRIDGE] — Inteiro este bloco só existe pra migração
@@ -422,22 +428,26 @@ const SettingsScreen = ({ navigation }) => {
         </View>
       </View>
 
-      <SL top>Manutenção</SL>
-      <View style={s.card}>
-        <Pressable
-          style={({ pressed }) => [s.row, pressed && s.rowPressed]}
-          onPress={handlePurgeTimeEntries}
-        >
-          <View style={[s.rowIcon, { backgroundColor: C.error + '14' }]}>
-            <Ionicons name="time-outline" size={16} color={C.error} />
+      {!viewOnly && (
+        <>
+          <SL top>Manutenção</SL>
+          <View style={s.card}>
+            <Pressable
+              style={({ pressed }) => [s.row, pressed && s.rowPressed]}
+              onPress={handlePurgeTimeEntries}
+            >
+              <View style={[s.rowIcon, { backgroundColor: C.error + '14' }]}>
+                <Ionicons name="time-outline" size={16} color={C.error} />
+              </View>
+              <View style={s.rowBody}>
+                <Text style={s.rowLabel}>Limpar horas registradas</Text>
+                <Text style={s.rowHint}>Use se as horas/ganhos mostram valores que não são seus</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
+            </Pressable>
           </View>
-          <View style={s.rowBody}>
-            <Text style={s.rowLabel}>Limpar horas registradas</Text>
-            <Text style={s.rowHint}>Use se as horas/ganhos mostram valores que não são seus</Text>
-          </View>
-          <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
-        </Pressable>
-      </View>
+        </>
+      )}
 
       <SL top>Plantões & valores</SL>
       <View style={s.card}>
@@ -445,10 +455,12 @@ const SettingsScreen = ({ navigation }) => {
         {/* Global "Valores e bônus" (ConfigScreen) intentionally hidden — per-hospital
             is now the primary path. Re-enable this Row to roll back to the global UI. */}
         {/* <Row icon="cash-outline"          label="Valores e bônus" hint="Hora-base, fidelização, FDS" onPress={() => navigation?.navigate?.('ConfigScreen')} /> */}
+        <Row icon="trending-up-outline"   label="Estimativa de valores" hint="Simule a fidelização do mês"   onPress={() => navigation?.navigate?.('Estimativa')} />
         <Row icon="document-text-outline" label="Relatórios"      hint="Histórico e exportação"            onPress={() => navigation?.navigate?.('Reports')} last />
       </View>
 
-      {!isAuroraNative && (
+      {/* "Usar Aurora como fonte" oculto por hora (WEBCLIENT-BRIDGE). */}
+      {false && !isAuroraNative && (
         <>
           <SL top>Fonte dos plantões</SL>
           <View style={s.card}>

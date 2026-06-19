@@ -21,9 +21,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useShifts } from '../contexts/ShiftsContext';
 import { useOpenings } from '../contexts/OpeningsContext';
 import { useOffers } from '../contexts/OffersContext';
+import { usePrivacy } from '../contexts/PrivacyContext';
 import { useGroups } from '../contexts/GroupsContext';
 import { useColors, Typography, Spacing, BorderRadius, Shadows } from '../constants/DesignSystem';
-import { getFullShiftConfig, calculateShiftValueSync, roundCurrency, getShiftPeriod, shouldUseWeekendValue } from '../utils/ShiftValueCalculator';
+import { getFullShiftConfig, calculateShiftValueSync, roundCurrency, getShiftPeriod, getShiftHours, shouldUseWeekendValue } from '../utils/ShiftValueCalculator';
 import ShiftBottomSheet from '../components/ShiftBottomSheet';
 import CederFlowSheet from './CederFlowSheet';
 import TrocarFlowSheet from './TrocarFlowSheet';
@@ -31,10 +32,17 @@ import TrocaDetailSheet from './TrocaDetailSheet';
 import CessaoDetailSheet from './CessaoDetailSheet';
 import AddManualShiftModal from '../components/AddManualShiftModal';
 import { AuthContext } from '../context/AuthContext';
+import { isViewOnly } from '../utils/userSource';
 import { getGroupColors } from '../utils/GroupColorConfig';
 import { movementVisual } from '../utils/MovementColors';
 import TodayCoworkersService from '../services/TodayCoworkersService';
 import { deriveShiftStatus, SHIFT_STATUS_META, statusTone, SHIFT_STATUS } from '../utils/shiftStatus';
+
+// Horas do plantão p/ exibição: usa durationMinutes quando existe (manuais/
+// openings), senão cai pra duração padrão do turno (M/T=6h, N/D=12h). Plantões
+// vindos do webClient não trazem durationMinutes — sem fallback davam "0h".
+const shiftHoursOf = (sh) =>
+  sh?.durationMinutes ? Math.round(sh.durationMinutes / 60 * 10) / 10 : getShiftHours(sh?.label);
 
 const WEEKDAYS_PT = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
 const MONTHS_FULL_PT = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
@@ -86,9 +94,11 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
   const { daysWithShifts, hoursReport } = useShifts();
   const { myCededOpenings, refresh: refreshOpenings, cancelCedeOpening } = useOpenings();
   const { swapsSent, swapsReceived, offersSent, cancelSwap, cancelOffer } = useOffers();
+  const { valuesHidden } = usePrivacy();
   const { coworkersById } = useGroups();
   const { deleteManualShift, restoreShiftLocally } = useShifts();
   const { user } = useContext(AuthContext);
+  const viewOnly = isViewOnly(user);
 
   useEffect(() => { refreshOpenings?.(true); }, [refreshOpenings]);
 
@@ -321,65 +331,67 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
     return `${wd}, ${selectedDate.getDate()} de ${MONTHS_FULL_PT[selectedDate.getMonth()]}`;
   };
 
-  // Cálculo de valor reaproveitado pelo FocusCard e pelo CompactRow.
-  // Mantém regras de loyalty/bonus/horas-extras como antes.
-  const computeShiftValue = (shift, index) => {
+  // Decompõe o valor de um plantão em base + fidelização + bônus + horas extras.
+  // Reaproveitado pelo FocusCard (exibe a composição) e por computeShiftValue.
+  const computeValueParts = (shift, index) => {
     const baseValue = calculateShiftValueSync(shift, shift.date, savedValues);
-    return (() => {
-      let mult = 1;
-      const monthlyHours = hoursReport?.realHours || 0;
-      if (fullConfig?.loyaltyEnabled && fullConfig.loyaltyOptions?.length) {
-        const tier = fullConfig.loyaltyOptions
-          .filter(o => o.minHours <= monthlyHours)
-          .sort((a, b) => b.minHours - a.minHours)[0];
-        if (tier) mult += tier.percentage / 100;
+    let loyaltyPct = 0;
+    let bonusPct = 0;
+    const monthlyHours = hoursReport?.realHours || 0;
+    if (fullConfig?.loyaltyEnabled && fullConfig.loyaltyOptions?.length) {
+      const tier = fullConfig.loyaltyOptions
+        .filter(o => o.minHours <= monthlyHours)
+        .sort((a, b) => b.minHours - a.minHours)[0];
+      if (tier) loyaltyPct = tier.percentage;
+    }
+    if (fullConfig?.bonusEnabled && fullConfig.bonus) {
+      const month = new Date(shift.date + 'T00:00:00').getMonth() + 1;
+      if (month >= fullConfig.bonus.startMonth && month <= fullConfig.bonus.endMonth) {
+        bonusPct = parseFloat(fullConfig.bonus.percentage) || 0;
       }
-      if (fullConfig?.bonusEnabled && fullConfig.bonus) {
-        const month = new Date(shift.date + 'T00:00:00').getMonth() + 1;
-        if (month >= fullConfig.bonus.startMonth && month <= fullConfig.bonus.endMonth) {
-          mult += (parseFloat(fullConfig.bonus.percentage) || 0) / 100;
-        }
+    }
+    const mult = 1 + loyaltyPct / 100 + bonusPct / 100;
+    const loyaltyValue = roundCurrency(baseValue * loyaltyPct / 100);
+    const bonusValue = roundCurrency(baseValue * bonusPct / 100);
+
+    // extra hours from registered real hours
+    const realEntry = dayRealHours[index];
+    let extraValue = 0;
+    if (realEntry?.startTime && realEntry?.endTime) {
+      const toMin = t => { const [h, m] = t.replace('h', ':').split(':').map(Number); return h * 60 + (m || 0); };
+      const scheduledMin = (() => {
+        const parts = (shift.time || '').split(/\s*[–-]\s*/);
+        if (parts.length < 2) return 0;
+        const s = toMin(parts[0].replace(/\s*\([^)]*\)/, '').trim());
+        let e = toMin(parts[1].replace(/\s*\([^)]*\)/, '').trim());
+        if (e < s) e += 1440;
+        return e - s;
+      })();
+      const realStart = toMin(realEntry.startTime);
+      let realEnd = toMin(realEntry.endTime);
+      if (realEnd < realStart) realEnd += 1440;
+      const extraMin = (realEnd - realStart) - scheduledMin;
+      if (extraMin > 0 && savedValues) {
+        const period = getShiftPeriod(shift.label);
+        const useWe = shouldUseWeekendValue(shift.date, shift.label, fullConfig?.fridayNightAsWeekend);
+        const hourly = parseFloat((useWe ? savedValues.weekend : savedValues.weekday)?.[period]) || 0;
+        extraValue = roundCurrency((extraMin / 60) * hourly * mult);
       }
-      // extra hours from registered real hours
-      const realEntry = dayRealHours[index];
-      let extraValue = 0;
-      if (realEntry?.startTime && realEntry?.endTime) {
-        const toMin = t => { const [h, m] = t.replace('h', ':').split(':').map(Number); return h * 60 + (m || 0); };
-        const scheduledMin = (() => {
-          const parts = (shift.time || '').split(/\s*[–-]\s*/);
-          if (parts.length < 2) return 0;
-          const s = toMin(parts[0].replace(/\s*\([^)]*\)/, '').trim());
-          let e = toMin(parts[1].replace(/\s*\([^)]*\)/, '').trim());
-          if (e < s) e += 1440;
-          return e - s;
-        })();
-        const realStart = toMin(realEntry.startTime);
-        let realEnd = toMin(realEntry.endTime);
-        if (realEnd < realStart) realEnd += 1440;
-        const extraMin = (realEnd - realStart) - scheduledMin;
-        if (extraMin > 0 && savedValues) {
-          const period = getShiftPeriod(shift.label);
-          const useWe = shouldUseWeekendValue(shift.date, shift.label, fullConfig?.fridayNightAsWeekend);
-          const hourly = parseFloat((useWe ? savedValues.weekend : savedValues.weekday)?.[period]) || 0;
-          extraValue = roundCurrency((extraMin / 60) * hourly * mult);
-        }
-      }
-      return roundCurrency(baseValue * mult) + extraValue;
-    })();
+    }
+
+    const total = roundCurrency(baseValue * mult) + extraValue;
+    return { baseValue: roundCurrency(baseValue), loyaltyPct, loyaltyValue, bonusPct, bonusValue, extraValue, total };
   };
+
+  // Cálculo de valor reaproveitado pelo FocusCard e pelo CompactRow.
+  const computeShiftValue = (shift, index) => computeValueParts(shift, index).total;
 
   // Handler central: roteia ações do FocusCard pro fluxo certo.
   // Pra ações de risco (ceder/trocar/excluir + cancelar pendentes), abre
-  // ConfirmSheet que nomeia o plantão antes. Pra "registrar horas" e
-  // "ver interessados", dispara direto.
+  // ConfirmSheet que nomeia o plantão antes. "Registrar horas" dispara direto.
   const handleShiftAction = (shift, action) => {
     if (action === 'registrar_horas' || action === 'confirmar_presenca') {
       openShiftDetail(shift);
-      return;
-    }
-    if (action === 'ver_interessados') {
-      // TODO: rotear pra TrocasAbertasScreen filtrada pela cessão deste shift.
-      fireDone('ver_interessados');
       return;
     }
     // Ações de risco: ceder/trocar/excluir + cancelar pendentes — passam pela
@@ -441,7 +453,7 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
       const target = swap.targetUserName || 'colega';
       return { text: `Você e ${target} estão trocando`, onPress: () => setDetailSwap({ swap, mode: 'sent' }) };
     }
-    if (status === SHIFT_STATUS.EM_TROCA && offer) {
+    if (status === SHIFT_STATUS.OFERTADO && offer) {
       const to = offer.toUserName || 'colega';
       return { text: `Oferecido a ${to} — aguardando resposta`, onPress: null };
     }
@@ -450,9 +462,7 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
       return { text: `${initiator} quer trocar com você`, onPress: () => setDetailSwap({ swap, mode: 'received' }) };
     }
     if (status === SHIFT_STATUS.CEDIDO && opening) {
-      const interested = Array.isArray(opening.interests) ? opening.interests.length : 0;
-      const txt = interested > 0 ? `${interested} interessado${interested === 1 ? '' : 's'}` : 'Aguardando interessado';
-      return { text: txt, onPress: () => setDetailCessao(opening) };
+      return { text: 'Cedido ao grupo · aguardando colega', onPress: () => setDetailCessao(opening) };
     }
     if (status === SHIFT_STATUS.COBRINDO) {
       const origin = shift?.originUserName || coworkersById?.[shift?.originUserId]?.name || 'colega';
@@ -532,7 +542,7 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
           {status && <View style={{ marginTop: 4 }}>{renderStatusChip(status)}</View>}
         </View>
         <View style={{ alignItems: 'flex-end' }}>
-          {value > 0 ? <Text style={[s.compactRowValue, { color: C.money }]}>{fmtBRLk(value)}</Text> : null}
+          {value > 0 ? <Text style={[s.compactRowValue, { color: C.money }]}>{valuesHidden ? 'R$ ••••' : fmtBRLk(value)}</Text> : null}
           <Ionicons name="chevron-down" size={14} color={C.text.tertiary} style={{ marginTop: 2 }} />
         </View>
       </Pressable>
@@ -545,11 +555,21 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
       const info = statusTone('info', C);
       return (
         <Pressable
-          onPress={() => handleShiftAction(shift, shift._pendingOffer ? 'cancelar_oferta' : 'cancelar_troca')}
+          onPress={() => handleShiftAction(shift, 'cancelar_troca')}
           style={({ pressed }) => [s.actionBtnSecondary, { borderColor: info.line }, pressed && { opacity: 0.8 }]}
         >
           <Ionicons name="swap-horizontal" size={15} color={info.fg} />
-          <Text style={[s.actionBtnSecondaryText, { color: info.fg }]}>Cancelar {shift._pendingOffer ? 'cessão' : 'troca'}</Text>
+          <Text style={[s.actionBtnSecondaryText, { color: info.fg }]}>Cancelar troca</Text>
+        </Pressable>
+      );
+    }
+    if (status === SHIFT_STATUS.OFERTADO) {
+      return (
+        <Pressable
+          onPress={() => handleShiftAction(shift, 'cancelar_oferta')}
+          style={({ pressed }) => [s.actionBtnSecondary, { borderColor: C.error + '55' }, pressed && { opacity: 0.8 }]}
+        >
+          <Text style={[s.actionBtnSecondaryText, { color: C.error }]}>Cancelar cessão</Text>
         </Pressable>
       );
     }
@@ -563,25 +583,15 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
       );
     }
     if (status === SHIFT_STATUS.CEDIDO) {
-      const opening = shift._pendingCede;
-      const interested = Array.isArray(opening?.interests) ? opening.interests.length : 0;
+      // Cessão ao grupo é "primeiro a pegar leva" — sem leilão/interessados.
+      // Única ação: cancelar enquanto ninguém assumiu.
       return (
-        <View style={{ flexDirection: 'row', gap: 9 }}>
-          <Pressable
-            onPress={() => handleShiftAction(shift, 'ver_interessados')}
-            style={({ pressed }) => [s.actionBtnPrimary, { flex: 1.3, backgroundColor: C.primary }, pressed && { opacity: 0.85 }]}
-          >
-            <Text style={s.actionBtnPrimaryText}>
-              Ver interessados{interested > 0 ? ` · ${interested}` : ''}
-            </Text>
-          </Pressable>
-          <Pressable
-            onPress={() => handleShiftAction(shift, 'cancelar_cessao')}
-            style={({ pressed }) => [s.actionBtnSecondary, { flex: 1, borderColor: C.border.light }, pressed && { opacity: 0.8 }]}
-          >
-            <Text style={[s.actionBtnSecondaryText, { color: C.text.secondary }]}>Cancelar cessão</Text>
-          </Pressable>
-        </View>
+        <Pressable
+          onPress={() => handleShiftAction(shift, 'cancelar_cessao')}
+          style={({ pressed }) => [s.actionBtnSecondary, { borderColor: C.error + '55' }, pressed && { opacity: 0.8 }]}
+        >
+          <Text style={[s.actionBtnSecondaryText, { color: C.error }]}>Cancelar cessão</Text>
+        </Pressable>
       );
     }
     // confirmado / cobrindo / a_confirmar — primário "Registrar horas" + menu 3-pontos
@@ -590,6 +600,7 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
       <FocusActionPrimary
         shift={shift}
         primaryConfirm={primaryConfirm}
+        viewOnly={viewOnly}
         onPrimary={() => handleShiftAction(shift, primaryConfirm ? 'confirmar_presenca' : 'registrar_horas')}
         onMenuAction={(act) => handleShiftAction(shift, act)}
         C={C}
@@ -605,13 +616,22 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
     const badgeColor = SHIFT_TYPE_COLOR[typeKey] || C.primary;
     const labelTxt = LABEL_MAP[shift.label] || LABEL_MAP[typeKey] || shift.label || 'Plantão';
     const timeStr = parseShiftTime(shift.time) || `${shift.startTime || ''}${shift.endTime ? '–' + shift.endTime : ''}`;
-    const hours = Math.round((shift.durationMinutes || 0) / 60 * 10) / 10;
-    const rate = hours > 0 && value > 0 ? roundCurrency(value / hours) : null;
+    const hours = shiftHoursOf(shift);
+    // Composição do valor: base (hora × horas) + fidelização + bônus + extras.
+    const parts = computeValueParts(shift, index);
+    const rate = hours > 0 && parts.baseValue > 0 ? roundCurrency(parts.baseValue / hours) : null;
     const hospitalName = shift.group?.institution?.name || shift.group?.institutionName || shift.hospitalName || '';
     const groupName = shift.group?.name || '';
     const originName = shift.originUserName
       || coworkersById?.[shift.originUserId]?.name
       || (shift.originUserId ? `Doutor#${String(shift.originUserId).slice(0, 6)}` : null);
+    // Colegas no mesmo plantão — precomputado p/ hoje (TodayCoworkersService) com
+    // fallback pro snapshot que veio da API (originalData.coworkers).
+    let coworkers = TodayCoworkersService.getCoworkers(shift.id);
+    if ((!coworkers || coworkers.length === 0) && shift?.originalData?.coworkers?.length > 0) {
+      coworkers = shift.originalData.coworkers;
+    }
+    coworkers = coworkers || [];
 
     return (
       <View
@@ -647,7 +667,7 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
                 <>
                   <Text style={[s.focusValueLabel, { color: C.text.tertiary }]}>VALOR PREVISTO</Text>
                   <Text style={[s.focusValueText, { color: C.money, fontFamily: Typography.fontFamily.display }]} numberOfLines={1}>
-                    {fmtBRLk(value)}
+                    {valuesHidden ? 'R$ ••••' : fmtBRLk(value)}
                   </Text>
                 </>
               ) : null}
@@ -685,18 +705,72 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
             </View>
           )}
 
+          {/* Colegas no plantão — toca p/ abrir a equipe do dia/grupo */}
+          {coworkers.length > 0 && (
+            <Pressable
+              style={({ pressed }) => [s.focusInfoRow, pressed && { opacity: 0.6 }]}
+              disabled={!shift.group?.id || !navigation?.navigate}
+              onPress={() => navigation?.navigate?.('GroupDayTeam', {
+                date: new Date(shift.date + 'T00:00:00'),
+                groupIds: [String(shift.group.id)],
+              })}
+            >
+              <Ionicons name="people-outline" size={16} color={C.text.secondary} />
+              <Text style={[s.focusInfoLabel, { color: C.text.secondary }]}>Equipe</Text>
+              <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 6 }}>
+                <View style={s.coworkerStack}>
+                  {coworkers.slice(0, 4).map((p, i) => (
+                    <View key={p.id || i} style={[s.coworkerAvatar, { marginLeft: i === 0 ? 0 : -5, borderColor: C.background.card }]}>
+                      {p.photo
+                        ? <Image source={{ uri: p.photo }} style={s.coworkerAvatarImg} />
+                        : <View style={[s.coworkerAvatarFallback, { backgroundColor: C.accentSoft }]}>
+                            <Text style={[s.coworkerAvatarInitial, { color: C.primary }]}>{(p.name || '?').charAt(0).toUpperCase()}</Text>
+                          </View>}
+                    </View>
+                  ))}
+                  {coworkers.length > 4 && (
+                    <View style={[s.coworkerAvatar, s.coworkerAvatarOverflow, { marginLeft: -5, backgroundColor: C.background.secondary, borderColor: C.background.card }]}>
+                      <Text style={[s.coworkerAvatarOverflowText, { color: C.text.secondary }]}>+{coworkers.length - 4}</Text>
+                    </View>
+                  )}
+                </View>
+                {!!shift.group?.id && navigation?.navigate && (
+                  <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
+                )}
+              </View>
+            </Pressable>
+          )}
+
           {/* Composição do valor */}
           {value > 0 && rate && hours > 0 && (
             <View style={[s.compositionCard, { backgroundColor: C.background.secondary, borderColor: C.border.light }]}>
               <Text style={[s.compositionLabel, { color: C.text.tertiary }]}>COMPOSIÇÃO DO VALOR</Text>
               <View style={s.compositionRow}>
-                <Text style={[s.compositionLine, { color: C.text.secondary }]}>{fmtBRLk(rate)}/h × {hours}h</Text>
-                <Text style={[s.compositionLine, { color: C.text.primary }]}>+ {fmtBRLk(value)}</Text>
+                <Text style={[s.compositionLine, { color: C.text.secondary }]}>{valuesHidden ? '••••' : fmtBRLk(rate)}/h × {hours}h</Text>
+                <Text style={[s.compositionLine, { color: C.text.primary }]}>{valuesHidden ? 'R$ ••••' : fmtBRLk(parts.baseValue)}</Text>
               </View>
+              {parts.loyaltyPct > 0 && (
+                <View style={[s.compositionRow, { marginTop: 6 }]}>
+                  <Text style={[s.compositionLine, { color: C.text.secondary }]}>Fidelização +{parts.loyaltyPct}%</Text>
+                  <Text style={[s.compositionLine, { color: C.money }]}>+ {valuesHidden ? 'R$ ••••' : fmtBRLk(parts.loyaltyValue)}</Text>
+                </View>
+              )}
+              {parts.bonusPct > 0 && (
+                <View style={[s.compositionRow, { marginTop: 6 }]}>
+                  <Text style={[s.compositionLine, { color: C.text.secondary }]}>Bônus +{parts.bonusPct}%</Text>
+                  <Text style={[s.compositionLine, { color: C.money }]}>+ {valuesHidden ? 'R$ ••••' : fmtBRLk(parts.bonusValue)}</Text>
+                </View>
+              )}
+              {parts.extraValue > 0 && (
+                <View style={[s.compositionRow, { marginTop: 6 }]}>
+                  <Text style={[s.compositionLine, { color: C.text.secondary }]}>Horas extras</Text>
+                  <Text style={[s.compositionLine, { color: C.money }]}>+ {valuesHidden ? 'R$ ••••' : fmtBRLk(parts.extraValue)}</Text>
+                </View>
+              )}
               <View style={[s.hairline, { backgroundColor: C.border.light, marginVertical: 9 }]} />
               <View style={s.compositionRow}>
                 <Text style={[s.compositionTotal, { color: C.text.primary }]}>Total</Text>
-                <Text style={[s.compositionTotalValue, { color: C.money }]}>{fmtBRLk(value)}</Text>
+                <Text style={[s.compositionTotalValue, { color: C.money }]}>{valuesHidden ? 'R$ ••••' : fmtBRLk(value)}</Text>
               </View>
             </View>
           )}
@@ -785,7 +859,7 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
             status: deriveShiftStatus(sh, user?.id),
           }));
           const total = enriched.reduce((acc, e) => acc + (e.value || 0), 0);
-          const hours = enriched.reduce((acc, e) => acc + ((e.shift?.durationMinutes || 0) / 60), 0);
+          const hours = enriched.reduce((acc, e) => acc + shiftHoursOf(e.shift), 0);
           // NÃO reordena: cada card abre/fecha NA POSIÇÃO dele. Fallback foca o
           // primeiro. (Reordenar fazia os cards "trocarem de lugar".)
           const focusedId = focusedShiftId || enriched[0]?.shift?.id;
@@ -802,7 +876,7 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
                 <View style={{ alignItems: 'flex-end' }}>
                   <Text style={[s.daySummaryEyebrow, { color: C.text.tertiary }]}>TOTAL PREVISTO</Text>
                   <Text style={[s.daySummaryTotal, { color: C.money }]} numberOfLines={1}>
-                    {fmtBRLk(total) || 'R$ 0,00'}
+                    {valuesHidden ? 'R$ ••••' : (fmtBRLk(total) || 'R$ 0,00')}
                   </Text>
                 </View>
               </View>
@@ -913,9 +987,18 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
 // ────────────────────────────────────────────────────────────────────────────
 
 // Primário "Registrar horas" (ou "Confirmar presença" se a_confirmar) + menu 3-pontos.
-function FocusActionPrimary({ shift, primaryConfirm, onPrimary, onMenuAction, C, s }) {
+function FocusActionPrimary({ shift, primaryConfirm, viewOnly, onPrimary, onMenuAction, C, s }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const isManual = shift?.isManual === true;
+  // Conta só-visualização (Soffia/webClient) não cede/troca — só sobra excluir
+  // (manual). Sem itens → esconde o 3-pontos.
+  const menuItems = [
+    ...(viewOnly ? [] : [
+      { id: 'trocar',  label: 'Trocar plantão', icon: 'swap-horizontal', danger: false },
+      { id: 'ceder',   label: 'Ceder', icon: 'megaphone-outline', danger: false },
+    ]),
+    ...(isManual ? [{ id: 'excluir', label: 'Excluir', icon: 'trash-outline', danger: true }] : []),
+  ];
   return (
     <View style={{ position: 'relative' }}>
       <View style={{ flexDirection: 'row', gap: 9 }}>
@@ -928,26 +1011,24 @@ function FocusActionPrimary({ shift, primaryConfirm, onPrimary, onMenuAction, C,
             {primaryConfirm ? 'Confirmar presença' : 'Registrar horas'}
           </Text>
         </Pressable>
-        <Pressable
-          onPress={() => setMenuOpen(v => !v)}
-          style={({ pressed }) => [s.actionBtnDots, { backgroundColor: menuOpen ? C.background.secondary : C.background.card, borderColor: C.border.light }, pressed && { opacity: 0.85 }]}
-          hitSlop={6}
-        >
-          <Ionicons name="ellipsis-horizontal" size={18} color={C.text.secondary} />
-        </Pressable>
+        {menuItems.length > 0 && (
+          <Pressable
+            onPress={() => setMenuOpen(v => !v)}
+            style={({ pressed }) => [s.actionBtnDots, { backgroundColor: menuOpen ? C.background.secondary : C.background.card, borderColor: C.border.light }, pressed && { opacity: 0.85 }]}
+            hitSlop={6}
+          >
+            <Ionicons name="ellipsis-horizontal" size={18} color={C.text.secondary} />
+          </Pressable>
+        )}
       </View>
-      {menuOpen && (
+      {menuOpen && menuItems.length > 0 && (
         <>
           <Pressable onPress={() => setMenuOpen(false)} style={StyleSheet.absoluteFillObject} />
-          <View style={[s.actionMenu, { backgroundColor: C.background.card, borderColor: C.border.light }]}>
+          <View style={[s.actionMenu, { backgroundColor: C.background.elevated, borderColor: C.border.medium }]}>
             <Text style={[s.actionMenuTitle, { color: C.text.tertiary, borderBottomColor: C.border.light }]}>
               Ações neste plantão
             </Text>
-            {[
-              { id: 'trocar',  label: 'Trocar plantão', icon: 'swap-horizontal', danger: false },
-              { id: 'ceder',   label: 'Ceder ao grupo', icon: 'megaphone-outline', danger: false },
-              ...(isManual ? [{ id: 'excluir', label: 'Excluir', icon: 'trash-outline', danger: true }] : []),
-            ].map((a, i) => (
+            {menuItems.map((a, i) => (
               <Pressable
                 key={a.id}
                 onPress={() => { setMenuOpen(false); onMenuAction(a.id); }}
@@ -1059,7 +1140,6 @@ function DoneActionToast({ action, C, insetsBottom = 0 }) {
     cancelar_troca:  'Troca cancelada',
     cancelar_oferta: 'Cessão cancelada',
     cancelar_cessao: 'Cessão cancelada',
-    ver_interessados:'Abrindo interessados…',
     confirmar_presenca: 'Presença confirmada',
   })[action] || 'Feito';
   return (
@@ -1297,11 +1377,11 @@ const s = StyleSheet.create({
   },
   actionMenu: {
     position: 'absolute', bottom: 52, right: 0, width: 220, zIndex: 9,
-    borderRadius: 14, borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 14, borderWidth: 1,
     overflow: 'hidden',
     ...Platform.select({
-      ios: { shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 24, shadowOffset: { width: 0, height: 8 } },
-      android: { elevation: 8 },
+      ios: { shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 28, shadowOffset: { width: 0, height: 10 } },
+      android: { elevation: 12 },
     }),
   },
   actionMenuTitle: {

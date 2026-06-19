@@ -15,6 +15,7 @@ import { AuthContext } from '../context/AuthContext';
 import { useShifts } from '../contexts/ShiftsContext';
 import { useOffers } from '../contexts/OffersContext';
 import { useOpenings } from '../contexts/OpeningsContext';
+import { usePrivacy } from '../contexts/PrivacyContext';
 import { useColors, Typography, Spacing, Shadows } from '../constants/DesignSystem';
 import ShiftBottomSheet from '../components/ShiftBottomSheet';
 import CederFlowSheet from './CederFlowSheet';
@@ -24,6 +25,7 @@ import { getGroupColors } from '../utils/GroupColorConfig';
 import { movementVisual, shiftPending } from '../utils/MovementColors';
 import { registerScrollToTop } from '../utils/scrollToTopBus';
 import LocalCache from '../services/LocalCache';
+import { isAuroraOnly, isViewOnly } from '../utils/userSource';
 import { getShiftValues, getFullShiftConfig, calculateShiftValueSync, calculateShiftFinalValueSync } from '../utils/ShiftValueCalculator';
 import { getMonthTotalValue } from '../utils/MonthSummaryComputer';
 
@@ -80,7 +82,8 @@ const HomeScreen = ({ navigation }) => {
   const ctx = useShifts();
   const { loading, loadedFor, loadMonthlyShifts, refreshShifts, monthSummary: contextSummary, getMonthCache } = ctx;
   const { unreadCount: avisosUnread, offersReceived, swapsReceived, swapsSent, offersSent } = useOffers();
-  const { myCededOpenings } = useOpenings();
+  const { openings, myCededOpenings } = useOpenings();
+  const { valuesHidden, toggleValues } = usePrivacy();
 
   // Mapa de plantões com estado pendente — pra colorir/etiquetar o card condensado.
   // Cobre: troca que iniciei (shiftA.id), troca proposta a mim (shiftB.id), cessão direcionada que enviei (shiftSnapshot.id).
@@ -294,6 +297,9 @@ const HomeScreen = ({ navigation }) => {
             <Text style={s.headerGreeting}>Olá, {firstName}</Text>
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+            <Pressable onPress={toggleValues} hitSlop={8} style={s.bellBtn}>
+              <Ionicons name={valuesHidden ? 'eye-off-outline' : 'eye-outline'} size={22} color={C.text.primary} />
+            </Pressable>
             <Pressable
               onPress={() => navigation?.navigate?.('AvisosScreen')}
               hitSlop={8}
@@ -353,7 +359,7 @@ const HomeScreen = ({ navigation }) => {
         <View style={s.heroCard}>
           <Text style={s.heroLabel}>Ganhos previstos · {monthName}</Text>
           <Text style={s.heroValue}>
-            {loading ? '—' : projected != null ? fmtBRLk(projected) : '—'}
+            {loading ? '—' : projected != null ? (valuesHidden ? 'R$ ••••' : fmtBRLk(projected)) : '—'}
           </Text>
           <View style={s.heroSubRow}>
             {deltaPct != null && (
@@ -369,7 +375,7 @@ const HomeScreen = ({ navigation }) => {
               </View>
             )}
             {prevProjected != null && (
-              <Text style={s.heroDeltaRef}>vs. mês ant. · {fmtBRLk(prevProjected)}</Text>
+              <Text style={s.heroDeltaRef}>vs. mês ant. · {valuesHidden ? '••••' : fmtBRLk(prevProjected)}</Text>
             )}
           </View>
 
@@ -505,7 +511,7 @@ const HomeScreen = ({ navigation }) => {
 
         {/* Value column */}
         <View style={s.shiftValueCol}>
-          {value > 0 && <Text style={s.shiftValue}>{fmtBRLk(value)}</Text>}
+          {value > 0 && <Text style={s.shiftValue}>{valuesHidden ? 'R$ ••••' : fmtBRLk(value)}</Text>}
           <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
         </View>
       </Pressable>
@@ -545,12 +551,17 @@ const HomeScreen = ({ navigation }) => {
     || (offersReceived?.length || 0) > 0
     || (myCededOpenings || []).some(o => o.status === 'active' || !o.status);
 
+  // Bolinha de notificação na tile de Vagas: acende quando há vaga em aberto
+  // nos meus grupos pra assumir/demonstrar interesse.
+  const hasVagas = (openings?.length || 0) > 0;
+
   const renderActions = () => (
     <View style={s.actionsGrid}>
       {renderActionTile({ icon: 'document-text',  label: 'Relatórios', iconColor: C.money,   iconBg: C.moneySoft,  onPress: () => navigation?.navigate?.('Reports') })}
-      {/* [WEBCLIENT-BRIDGE] `|| user?.auroraOnlyMode` rotea o webClient migrado pro Openings aurora. */}
-      {renderActionTile({ icon: 'medkit',         label: 'Vagas',      iconColor: C.money,   iconBg: C.moneySoft,  onPress: () => navigation?.navigate?.((user?.source === 'aurora' || user?.auroraOnlyMode) ? 'OpeningsScreen' : 'NetworkVacanciesScreen') })}
-      {renderActionTile({ icon: 'swap-horizontal', label: 'Movimentações', iconColor: C.primary, iconBg: C.accentSoft, hasDot: hasMovimentacoes, onPress: () => navigation?.navigate?.('TrocasAbertas') })}
+      {/* [WEBCLIENT-BRIDGE] `|| user?.auroraOnlyMode` rotea o webClient migrado pro Openings aurora.
+          Conta só-visualização (PlantãoAPI) não vê Vagas/Movimentações. */}
+      {!isViewOnly(user) && renderActionTile({ icon: 'medkit',         label: 'Vagas',      iconColor: C.money,   iconBg: C.moneySoft,  hasDot: hasVagas, onPress: () => navigation?.navigate?.(isAuroraOnly(user) ? 'OpeningsScreen' : 'NetworkVacanciesScreen') })}
+      {!isViewOnly(user) && renderActionTile({ icon: 'swap-horizontal', label: 'Movimentações', iconColor: C.primary, iconBg: C.accentSoft, hasDot: hasMovimentacoes, onPress: () => navigation?.navigate?.('TrocasAbertas') })}
       {/* Aura (IA do Aurora): conselho de escala */}
       {renderActionTile({ icon: 'sparkles', label: 'Aura', iconColor: C.primary, iconBg: C.accentSoft, onPress: () => navigation?.navigate?.('AuraScreen') })}
     </View>

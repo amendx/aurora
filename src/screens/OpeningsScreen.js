@@ -1,14 +1,14 @@
 /**
- * OpeningsScreen — "Vagas"
+ * OpeningsScreen — "Vagas" (design: A / Por equipe)
  *
- * Layout segue o design em design/groups/vagas.html (ignorando fontes):
+ * Layout:
  *   1. Filter chips por grupo (Tudo + cada grupo) — pill row horizontal.
- *   2. "Minhas cessões abertas" — minhas cessões pendentes com Cancelar inline.
- *   3. "Por equipe" — vagas agrupadas por grupo, cada grupo com header
- *      "Nome · N vagas" + cards.
+ *   2. "No seu plantão · falta gente" — meus plantões com time incompleto.
+ *   3. "Minhas cessões abertas" — minhas cessões pendentes com Cancelar inline.
+ *   4. Banner "Plantões abertos pela coordenação da escala".
+ *   5. Seções por equipe (dot + nome + N vagas) com cards.
  *
- * Card: white, accent vertical (cor do grupo), day chip à esquerda,
- *       label do turno + horários, badge "N vaga(s)" à direita.
+ * Card: dia (accent da cor do grupo) | turno + horário | pill "N vagas" + R$ valor.
  */
 
 import { useEffect, useState, useCallback, useMemo, useContext } from 'react';
@@ -16,7 +16,6 @@ import {
   View, Text, ScrollView, Pressable, ActivityIndicator,
   RefreshControl, StyleSheet, Alert,
 } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useColors, Typography, Spacing, BorderRadius, Shadows } from '../constants/DesignSystem';
 import { AuthContext } from '../context/AuthContext';
@@ -24,17 +23,11 @@ import { useOpenings } from '../contexts/OpeningsContext';
 import { useShifts } from '../contexts/ShiftsContext';
 import { useGroups } from '../contexts/GroupsContext';
 import GroupScheduleService from '../services/GroupScheduleService';
+import { getFullShiftConfig, calculateShiftFinalValueSync } from '../utils/ShiftValueCalculator';
 import Logger from '../utils/Logger';
 import VagaDetailSheet from './VagaDetailSheet';
 import CederFlowSheet from './CederFlowSheet';
 
-// Cores por turno (já no design system, replico só pra clareza local).
-const SHIFT_COLORS = (C) => ({
-  M: C.primary,  // morning — teal
-  T: C.warning,  // afternoon — amber
-  N: C.info,     // night — blue
-  D: C.info,     // carryover night
-});
 const SHIFT_NAMES  = { M: 'Manhã', T: 'Tarde', N: 'Noite', D: 'Noite' };
 const WEEKDAY_PT   = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
 const LABEL_DURATIONS = { M: 360, T: 360, N: 720, D: 720 };
@@ -82,45 +75,87 @@ const _monthKeysBetween = (a, b) => {
   return [...out];
 };
 
-// ── Card padrão de vaga ──────────────────────────────────────────────────────
-// Toque abre o detalhe (VagaDetailSheet); não assume direto.
-function VagaCard({ item, onPress, C, s }) {
+const fmtBRL = (n) => `R$ ${Number(n || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+const normalizeColor = (c, fb) => c ? (String(c).startsWith('#') ? c : `#${c}`) : fb;
+
+// Valor estimado (base + fidelização + bônus) — síncrono, com config pré-carregada.
+const computeValue = (item, valueCfg) => {
+  const dateStr = item.dateKey || item.date || (item.startISO || '').slice(0, 10);
+  if (!dateStr || !item.label) return null;
+  const v = calculateShiftFinalValueSync({ label: item.label, group: item.group }, dateStr, valueCfg);
+  return Number.isFinite(v) ? v : null;
+};
+
+// ── Linha de plantão (vaga ou falta) ─────────────────────────────────────────
+// Toque abre o detalhe (VagaDetailSheet). Layout: dia | turno+horário | vagas+valor.
+function CardRow({ weekday, dayNum, accent, shiftName, timeText, slots, value, teamLabel, fixa, directed, amber, onPress, C, s }) {
+  return (
+    <Pressable onPress={onPress} style={[s.card, amber && { borderColor: C.warning + '55' }]}>
+      <View style={s.cardDayCol}>
+        <View style={[s.cardAccent, { backgroundColor: accent }]} />
+        <Text style={s.cardWk}>{weekday}</Text>
+        <Text style={s.cardDayNum}>{dayNum}</Text>
+      </View>
+      <View style={s.cardMid}>
+        <View style={s.cardShiftLine}>
+          <Text style={s.cardShiftName} numberOfLines={1}>{shiftName}</Text>
+          {fixa && (
+            <View style={[s.cardTeamChip, { backgroundColor: C.accentSoft, flexDirection: 'row', alignItems: 'center', gap: 3 }]}>
+              <Ionicons name="repeat" size={10} color={C.primary} />
+              <Text style={[s.cardTeamChipText, { color: C.primary }]}>Escala fixa</Text>
+            </View>
+          )}
+          {directed && (
+            <View style={[s.cardTeamChip, { backgroundColor: C.accentSoft }]}>
+              <Text style={[s.cardTeamChipText, { color: C.primary }]}>Para você</Text>
+            </View>
+          )}
+          {!!teamLabel && (
+            <View style={[s.cardTeamChip, { backgroundColor: accent + '1A' }]}>
+              <Text style={[s.cardTeamChipText, { color: accent }]} numberOfLines={1}>{teamLabel}</Text>
+            </View>
+          )}
+        </View>
+        {!!timeText && <Text style={s.cardTime}>{timeText}</Text>}
+      </View>
+      <View style={s.cardRight}>
+        <View style={s.cardVagaPill}>
+          <Ionicons name="people-outline" size={11} color={C.primary} />
+          <Text style={s.cardVagaText}>{slots} {slots === 1 ? 'vaga' : 'vagas'}</Text>
+        </View>
+        <View style={s.cardValueRow}>
+          {value != null && <Text style={s.cardValue}>{fmtBRL(value)}</Text>}
+          <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
+        </View>
+      </View>
+    </Pressable>
+  );
+}
+
+function VagaCard({ item, onPress, valueCfg, C, s }) {
   const startDate = item.startISO ? new Date(item.startISO) : null;
   const endDate   = item.endISO   ? new Date(item.endISO)   : null;
   const labelKey  = String(item.label || '').charAt(0).toUpperCase();
-  const shiftColor = SHIFT_COLORS(C)[labelKey] || C.primary;
   const shiftName  = SHIFT_NAMES[labelKey] || item.label || 'Plantão';
   const hours = item.durationMinutes ? Math.round(item.durationMinutes / 60) : null;
-  const slotsLeft = item.availableSlots || 0;
-
+  const timeText = startDate
+    ? `${fmtTime(startDate)}${endDate ? ' – ' + fmtTime(endDate) : ''}${hours != null ? ' · ' + hours + 'h' : ''}`
+    : '';
   return (
-    <Pressable onPress={() => onPress(item)} style={s.vagaCard}>
-      <View style={[s.vagaStrip, { backgroundColor: shiftColor }]} />
-      <View style={s.vagaDayCol}>
-        <Text style={[s.vagaDay, { color: C.text.tertiary }]}>{fmtDay(startDate)}</Text>
-        <Text style={[s.vagaDayNum, { color: C.text.primary }]}>{fmtDayNum(startDate)}</Text>
-      </View>
-      <View style={s.vagaMid}>
-        <Text style={[s.vagaShiftName, { color: shiftColor }]}>{shiftName}</Text>
-        <Text style={[s.vagaTime, { color: C.text.secondary }]}>
-          {startDate ? fmtTime(startDate) : ''}{endDate ? ' – ' + fmtTime(endDate) : ''}
-        </Text>
-        {hours != null && (
-          <Text style={[s.vagaDuration, { color: C.text.tertiary }]}>{hours}h de plantão</Text>
-        )}
-      </View>
-      <View style={s.vagaRight}>
-        <View style={[s.vagaSlotsBadge, { backgroundColor: C.accentSoft }]}>
-          <Text style={[s.vagaSlotsText, { color: C.primary }]}>{slotsLeft}</Text>
-        </View>
-        <Text style={[s.vagaSlotsLabel, { color: C.text.tertiary }]}>
-          {slotsLeft === 1 ? 'vaga' : 'vagas'}
-        </Text>
-      </View>
-      <View style={s.vagaChevron}>
-        <Ionicons name="chevron-forward" size={16} color={C.text.tertiary} />
-      </View>
-    </Pressable>
+    <CardRow
+      weekday={fmtDay(startDate)}
+      dayNum={fmtDayNum(startDate)}
+      accent={normalizeColor(item.group?.color, C.primary)}
+      shiftName={shiftName}
+      timeText={timeText}
+      slots={item.availableSlots || 0}
+      value={computeValue(item, valueCfg)}
+      fixa={item.kind === 'admin_fixed'}
+      directed={!!item.targetUserId}
+      onPress={() => onPress(item)}
+      C={C} s={s}
+    />
   );
 }
 
@@ -163,50 +198,33 @@ function MyCedeCard({ item, onCancel, C, s }) {
 }
 
 // ── Card "Falta gente com você" (plantão seu, time incompleto) ───────────────
-function FaltaCard({ item, onPress, onChamar, C, s }) {
+function FaltaCard({ item, onPress, valueCfg, C, s }) {
   const { start, end } = parseSlotTimes(item.time || item.labelRaw);
   const startDate = new Date(`${item.date}T00:00:00`);
   const labelKey = String(item.label || '').charAt(0).toUpperCase();
-  const shiftColor = SHIFT_COLORS(C)[labelKey] || C.primary;
   const shiftName = SHIFT_NAMES[labelKey] || item.label || 'Plantão';
-  const missing = item.available || 0;
-
+  const hours = Math.round((LABEL_DURATIONS[labelKey] ?? 360) / 60);
+  const timeText = (start && end) ? `${start} – ${end} · ${hours}h` : `${hours}h`;
   return (
-    <Pressable onPress={() => onPress(item)} style={[s.faltaCard, { borderColor: C.warning + '33' }]}>
-      <View style={s.faltaTopRow}>
-        <Ionicons name="person-circle-outline" size={14} color={C.warning} />
-        <Text style={[s.faltaTopText, { color: C.warning }]}>no seu plantão · você está escalada</Text>
-      </View>
-      <View style={s.faltaBody}>
-        <View style={[s.vagaDayCol, { width: 46 }]}>
-          <Text style={[s.vagaDay, { color: C.text.tertiary }]}>{fmtDay(startDate)}</Text>
-          <Text style={[s.vagaDayNum, { color: C.text.primary }]}>{fmtDayNum(startDate)}</Text>
-        </View>
-        <View style={s.vagaMid}>
-          <Text style={[s.vagaShiftName, { color: shiftColor }]}>{shiftName}</Text>
-          {!!(start && end) && (
-            <Text style={[s.vagaTime, { color: C.text.secondary }]}>{start} – {end}</Text>
-          )}
-          <Text style={[s.vagaDuration, { color: C.text.tertiary }]} numberOfLines={1}>{item.group?.name || ''}</Text>
-        </View>
-      </View>
-      <View style={s.faltaFooter}>
-        <Text style={[s.faltaFooterText, { color: C.text.secondary }]}>
-          Falta <Text style={{ color: C.warning, fontFamily: Typography.fontFamily.bold }}>{missing} {missing === 1 ? 'colega' : 'colegas'}</Text> no seu plantão.
-        </Text>
-        <Pressable onPress={() => onChamar(item)} style={[s.chamarBtn, { backgroundColor: C.primary }]} hitSlop={6}>
-          <Ionicons name="person-add-outline" size={13} color="#fff" />
-          <Text style={s.chamarBtnText}>Chamar</Text>
-        </Pressable>
-      </View>
-    </Pressable>
+    <CardRow
+      weekday={fmtDay(startDate)}
+      dayNum={fmtDayNum(startDate)}
+      accent={normalizeColor(item.group?.color, C.warning)}
+      shiftName={shiftName}
+      timeText={timeText}
+      teamLabel={item.group?.name || ''}
+      slots={item.available || 0}
+      value={computeValue(item, valueCfg)}
+      amber
+      onPress={() => onPress(item)}
+      C={C} s={s}
+    />
   );
 }
 
 // ── Tela ─────────────────────────────────────────────────────────────────────
 export default function OpeningsScreen() {
   const C = useColors();
-  const insets = useSafeAreaInsets();
   const s = makeStyles(C);
   const {
     openings, myCededOpenings, loading, error, refresh,
@@ -221,10 +239,12 @@ export default function OpeningsScreen() {
   const [faltaGente, setFaltaGente] = useState([]);     // plantões meus c/ time incompleto
   const [faltaDetail, setFaltaDetail] = useState(null); // opening-like p/ detalhe falta
   const [chamarShift, setChamarShift] = useState(null); // shift p/ sugerir a um colega
+  const [valueCfg, setValueCfg] = useState(null);       // config de valores p/ estimativa
 
   const selfId = String(user?.id || '');
 
   useEffect(() => { refresh(true); }, [refresh]);
+  useEffect(() => { getFullShiftConfig().then(setValueCfg).catch(() => setValueCfg(null)); }, []);
 
   // Carrega "Falta gente com você": meus plantões nos próximos 7 dias cujo turno
   // tem vaga em aberto no grupo (eu escalada + slot.available > 0).
@@ -239,7 +259,8 @@ export default function OpeningsScreen() {
         for (const mk of _monthKeysBetween(today, limit)) {
           const res = await GroupScheduleService.getMultipleMonths({
             groups: ctxGroups, monthKey: mk, token,
-            userSource: user?.source, currentUserId: user?.id,
+            userSource: user?.source, auroraOnlyMode: user?.auroraOnlyMode === true,
+            currentUserId: user?.id,
           });
           for (const g of ctxGroups) {
             const days = res[String(g.id)]?.days || {};
@@ -422,13 +443,16 @@ export default function OpeningsScreen() {
 
             {faltaGente.length > 0 && (
               <>
-                <Text style={s.sectionLabel}>Falta gente com você</Text>
+                <View style={s.sectionHead}>
+                  <View style={[s.sectionDot, { backgroundColor: C.warning }]} />
+                  <Text style={s.sectionName}>No seu plantão · falta gente</Text>
+                </View>
                 {faltaGente.map(item => (
                   <FaltaCard
                     key={item.key}
                     item={item}
                     onPress={openFaltaDetail}
-                    onChamar={handleChamar}
+                    valueCfg={valueCfg}
                     C={C}
                     s={s}
                   />
@@ -464,20 +488,23 @@ export default function OpeningsScreen() {
               </View>
             ) : (
               <>
-                <Text style={[s.sectionLabel, { marginTop: (myActive.length > 0 || faltaGente.length > 0) ? Spacing.lg : 0 }]}>
-                  Por equipe
-                </Text>
+                <View style={[s.coordBanner, { marginTop: (myActive.length > 0 || faltaGente.length > 0) ? Spacing.lg : 0 }]}>
+                  <View style={s.coordIcon}>
+                    <Ionicons name="megaphone-outline" size={14} color={C.primary} />
+                  </View>
+                  <Text style={s.coordText}>
+                    Plantões abertos pela <Text style={s.coordBold}>coordenação da escala</Text> · pegue para preencher.
+                  </Text>
+                </View>
                 {byGroup.map(g => {
                   const gc = String(g.color).startsWith('#') ? g.color : `#${g.color}`;
                   const totalVagas = g.items.reduce((acc, o) => acc + (o.availableSlots || 0), 0);
                   return (
                     <View key={g.key} style={s.groupSection}>
-                      <View style={s.groupHeaderRow}>
-                        <View style={[s.groupHeaderDot, { backgroundColor: gc }]} />
-                        <Text style={[s.groupHeaderName, { color: C.text.primary }]} numberOfLines={1}>
-                          {g.name}
-                        </Text>
-                        <Text style={[s.groupHeaderCount, { color: C.text.tertiary }]}>
+                      <View style={s.sectionHead}>
+                        <View style={[s.sectionDot, { backgroundColor: gc }]} />
+                        <Text style={[s.sectionName, { flex: 1 }]} numberOfLines={1}>{g.name}</Text>
+                        <Text style={s.sectionCount}>
                           {totalVagas} vaga{totalVagas !== 1 ? 's' : ''}
                         </Text>
                       </View>
@@ -485,7 +512,7 @@ export default function OpeningsScreen() {
                         <Text style={s.groupEmptyRow}>Nenhuma vaga aberta</Text>
                       ) : (
                         g.items.map(item => (
-                          <VagaCard key={item.id} item={item} onPress={setDetailVaga} C={C} s={s} />
+                          <VagaCard key={item.id} item={item} onPress={setDetailVaga} valueCfg={valueCfg} C={C} s={s} />
                         ))
                       )}
                     </View>
@@ -553,89 +580,77 @@ const makeStyles = (C) => StyleSheet.create({
     color: C.text.tertiary, marginBottom: Spacing.md, marginTop: 2,
   },
 
-  // Section header
+  // Coordenação banner
+  coordBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    backgroundColor: C.accentSoft,
+    borderRadius: 12, borderWidth: 0.5, borderColor: C.primary + '33',
+    paddingVertical: 10, paddingHorizontal: 12, marginBottom: Spacing.md,
+  },
+  coordIcon: {
+    width: 26, height: 26, borderRadius: 13,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: C.background.elevated,
+  },
+  coordText: { flex: 1, fontSize: 11.5, fontFamily: Typography.fontFamily.regular, color: C.text.secondary },
+  coordBold: { fontFamily: Typography.fontFamily.bold, color: C.text.primary },
+
+  // Section label simples (ex.: "Minhas cessões abertas")
   sectionLabel: {
     fontSize: 11.5, fontFamily: Typography.fontFamily.semiBold,
     color: C.text.tertiary, textTransform: 'uppercase', letterSpacing: 0.8,
     marginBottom: Spacing.sm,
   },
 
-  // Falta gente card
-  faltaCard: {
-    backgroundColor: C.background.elevated,
-    borderRadius: 14, borderWidth: 0.5, padding: 12, marginBottom: 8,
-    ...Shadows.small,
+  // Section header (dot + nome UPPERCASE + contagem)
+  sectionHead: {
+    flexDirection: 'row', alignItems: 'center', gap: 7,
+    marginBottom: Spacing.sm,
   },
-  faltaTopRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 8 },
-  faltaTopText: {
-    fontSize: 10.5, fontFamily: Typography.fontFamily.semiBold,
-    textTransform: 'uppercase', letterSpacing: 0.4,
+  sectionDot: { width: 8, height: 8, borderRadius: 4 },
+  sectionName: {
+    fontSize: 11, fontFamily: Typography.fontFamily.bold,
+    color: C.text.primary, textTransform: 'uppercase', letterSpacing: 1,
   },
-  faltaBody: { flexDirection: 'row', alignItems: 'center' },
-  faltaFooter: {
-    flexDirection: 'row', alignItems: 'center', gap: 10,
-    marginTop: 10, paddingTop: 10, borderTopWidth: 0.5, borderTopColor: C.border.light,
-  },
-  faltaFooterText: { flex: 1, fontSize: 12.5, fontFamily: Typography.fontFamily.regular },
-  chamarBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 5,
-    paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999,
-  },
-  chamarBtnText: { color: '#fff', fontSize: 12.5, fontFamily: Typography.fontFamily.bold },
+  sectionCount: { fontSize: 11, fontFamily: Typography.fontFamily.semiBold, color: C.text.tertiary },
 
   // Group section
   groupSection: { marginBottom: Spacing.md },
-  groupHeaderRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 8,
-    paddingVertical: 6, marginBottom: 6,
-  },
-  groupHeaderDot: { width: 10, height: 10, borderRadius: 5 },
-  groupHeaderName: { flex: 1, fontSize: 15, fontFamily: Typography.fontFamily.bold },
-  groupHeaderCount: { fontSize: 11.5, fontFamily: Typography.fontFamily.semiBold },
   groupEmptyRow: {
     fontSize: 12.5, fontFamily: Typography.fontFamily.regular,
     color: C.text.tertiary, paddingVertical: 6, paddingLeft: 18,
   },
 
-  // Vaga card
-  vagaCard: {
-    flexDirection: 'row', alignItems: 'stretch',
+  // Card de plantão (vaga / falta)
+  card: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
     backgroundColor: C.background.elevated,
     borderRadius: 14, borderWidth: 0.5, borderColor: C.border.light,
-    overflow: 'hidden', marginBottom: 8,
+    paddingVertical: 11, paddingHorizontal: 13, marginBottom: 9,
     ...Shadows.small,
   },
-  vagaStrip: { width: 4 },
-  vagaDayCol: {
-    width: 50, alignItems: 'center', justifyContent: 'center',
-    paddingVertical: 12, gap: 1,
+  cardDayCol: { width: 34, alignItems: 'center', gap: 2 },
+  cardAccent: { width: 18, height: 3, borderRadius: 2 },
+  cardWk: {
+    fontSize: 9.5, fontFamily: Typography.fontFamily.bold,
+    color: C.text.tertiary, textTransform: 'uppercase', letterSpacing: 0.5,
   },
-  vagaDay: {
-    fontSize: 10, fontFamily: Typography.fontFamily.semiBold,
-    textTransform: 'uppercase', letterSpacing: 0.4,
+  cardDayNum: { fontSize: 21, fontFamily: Typography.fontFamily.bold, color: C.text.primary, letterSpacing: -0.5, lineHeight: 24 },
+  cardMid: { flex: 1, gap: 3 },
+  cardShiftLine: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+  cardShiftName: { fontSize: 14.5, fontFamily: Typography.fontFamily.bold, color: C.text.primary },
+  cardTeamChip: { paddingVertical: 3, paddingHorizontal: 8, borderRadius: 999 },
+  cardTeamChipText: { fontSize: 10, fontFamily: Typography.fontFamily.bold, letterSpacing: 0.3, maxWidth: 130 },
+  cardTime: { fontSize: 11, fontFamily: Typography.fontFamily.regular, color: C.text.tertiary },
+  cardRight: { alignItems: 'flex-end', gap: 5 },
+  cardVagaPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    backgroundColor: C.accentSoft, borderRadius: 999,
+    paddingVertical: 3, paddingHorizontal: 9,
   },
-  vagaDayNum: { fontSize: 22, fontFamily: Typography.fontFamily.bold, lineHeight: 26 },
-  vagaMid: {
-    flex: 1, paddingVertical: 12, paddingHorizontal: 4,
-    justifyContent: 'center', gap: 2,
-  },
-  vagaShiftName: { fontSize: 14, fontFamily: Typography.fontFamily.bold },
-  vagaTime: { fontSize: 12.5, fontFamily: Typography.fontFamily.regular },
-  vagaDuration: { fontSize: 11, fontFamily: Typography.fontFamily.regular },
-  vagaRight: {
-    alignItems: 'center', justifyContent: 'center',
-    paddingHorizontal: 14, gap: 2,
-  },
-  vagaSlotsBadge: {
-    minWidth: 32, height: 32, borderRadius: 16,
-    alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8,
-  },
-  vagaSlotsText: { fontSize: 15, fontFamily: Typography.fontFamily.bold },
-  vagaSlotsLabel: {
-    fontSize: 10, fontFamily: Typography.fontFamily.semiBold,
-    textTransform: 'uppercase', letterSpacing: 0.4,
-  },
-  vagaChevron: { justifyContent: 'center', paddingRight: 10 },
+  cardVagaText: { fontSize: 11, fontFamily: Typography.fontFamily.bold, color: C.primary, letterSpacing: -0.1 },
+  cardValueRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  cardValue: { fontSize: 12, fontFamily: Typography.fontFamily.bold, color: C.money, letterSpacing: 0.1 },
 
   // My cede card (cessão que eu abri)
   myCedeCard: {

@@ -253,6 +253,10 @@ export function fromFirestore(doc) {
     targetUserId: doc.targetUserId || null,       // null = ao grupo; uid = direcionada
     recurrenceId: doc.recurrenceId || null,       // só pra kind='admin_fixed'
     restrictedToGroupId: doc.restrictedToGroupId || null,
+    // Audiência da web: 'todos' (qualquer membro do grupo) | 'selecionados'
+    // (apenas eligibleUserIds). Antes era ignorado pelo app — agora filtra.
+    audience: doc.audience || null,
+    eligibleUserIds: Array.isArray(doc.eligibleUserIds) ? doc.eligibleUserIds.map(String) : null,
     originShiftId: doc.originShiftId || null,
     originUserId: doc.originUserId || null,
     originUserName: doc.originUserName || null,

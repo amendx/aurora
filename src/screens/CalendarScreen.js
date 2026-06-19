@@ -16,7 +16,7 @@ import { AuthContext } from '../context/AuthContext';
 import { useShifts } from '../contexts/ShiftsContext';
 import { useOffers } from '../contexts/OffersContext';
 import { useOpenings } from '../contexts/OpeningsContext';
-import { movementVisual } from '../utils/MovementColors';
+import { usePrivacy } from '../contexts/PrivacyContext';
 import { registerScrollToTop } from '../utils/scrollToTopBus';
 import { useColors, Typography, Spacing, Shadows } from '../constants/DesignSystem';
 import Logger from '../utils/Logger';
@@ -262,6 +262,16 @@ const CalendarScreen = ({ navigation }) => {
   useEffect(() => {
     if (calendarMode !== 'groups' || activeGroups.length === 0) return;
     let cancelled = false;
+    const liveUnsub = GroupScheduleService.subscribeMultipleMonths({
+      groups: activeGroups,
+      monthKey: viewMonthKey,
+      currentUserId: userId,
+      onChange: (result) => {
+        const hasAny = Object.values(result || {}).some(r => Object.keys(r?.days || {}).length > 0);
+        if (!cancelled && hasAny) setGroupSchedules(result);
+      },
+      onError: (err) => Logger.warn(`[CalendarScreen] group live: ${err?.message}`),
+    });
     setGroupLoading(true);
     (async () => {
       try {
@@ -270,7 +280,9 @@ const CalendarScreen = ({ navigation }) => {
           monthKey: viewMonthKey,
           token,
           userSource: user?.source,
+          auroraOnlyMode: user?.auroraOnlyMode === true,
           currentUserId: userId,
+          force: true,
         });
         await GroupScheduleService.enrichWithPendingOffers(result, userId);
         await GroupScheduleService.enrichWithPendingSwaps(result, userId);  // CalendarScreen: Firestore-only (no OffersContext access here)
@@ -281,8 +293,11 @@ const CalendarScreen = ({ navigation }) => {
         if (!cancelled) setGroupLoading(false);
       }
     })();
-    return () => { cancelled = true; };
-  }, [calendarMode, viewMonthKey, activeGroups.map(g => g.id).join(','), token, user?.source]);
+    return () => {
+      cancelled = true;
+      liveUnsub?.();
+    };
+  }, [calendarMode, viewMonthKey, activeGroups.map(g => g.id).join(','), token, user?.source, userId]);
 
   // ── Calculated data ───────────────────────────────────────────────────────────
   const today = useMemo(() => { const d = new Date(); d.setHours(0,0,0,0); return d; }, []);
@@ -319,6 +334,7 @@ const CalendarScreen = ({ navigation }) => {
   // no calendário. Modo pessoal só. Prioridade: troca > oferta > cessão.
   const { swapsSent, swapsReceived, offersSent } = useOffers();
   const { myCededOpenings } = useOpenings();
+  const { valuesHidden } = usePrivacy();
   const pendingByDay = useMemo(() => {
     const byShift = {};
     (swapsSent || []).forEach(sw => { if (sw?.status === 'pending' && sw.shiftA?.id) byShift[String(sw.shiftA.id)] = { kind: 'swap', role: 'initiator' }; });
@@ -588,7 +604,6 @@ const CalendarScreen = ({ navigation }) => {
       const hasVacancy = inGroupMode && !!groupEntry?.hasVacancy;
       const hasPendingForMe = inGroupMode && !!groupEntry?.hasPendingForMe;
       const dayPending = !inGroupMode ? pendingByDay[day] : null;
-      const dayPendingColor = dayPending ? movementVisual(C, dayPending.kind, dayPending.role).color : null;
       const colIndex = (firstDayOfWeek + day - 1) % 7;
       const isWeekend = colIndex === 0 || colIndex === 6;
       const showSkeleton = (inGroupMode ? groupLoading : (loading || isNavigating));
@@ -613,6 +628,7 @@ const CalendarScreen = ({ navigation }) => {
           style={({ pressed }) => [
             s.dayCell,
             cellBg && { backgroundColor: cellBg, borderRadius: 8 },
+            dayPending && !isToday && { borderWidth: 2, borderColor: C.movement, borderRadius: 8 },
             pressed && { opacity: 0.7 },
           ]}
         >
@@ -635,14 +651,14 @@ const CalendarScreen = ({ navigation }) => {
                     ))}
                   </View>
                 )}
-                {inGroupMode && hasVacancy && !isToday && (
-                  <View style={[s.vacancyBadge, { backgroundColor: C.warning }]} />
+                {inGroupMode && hasVacancy && (
+                  <View style={[s.vacancyBadge, { backgroundColor: isToday ? '#fff' : C.warning }]} />
                 )}
                 {inGroupMode && hasPendingForMe && !isToday && (
                   <View style={[s.pendingBadge, { backgroundColor: C.primary }]} />
                 )}
-                {dayPendingColor && (
-                  <View style={[s.pendingBadge, { backgroundColor: isToday ? '#fff' : dayPendingColor }]} />
+                {dayPending && isToday && (
+                  <View style={[s.pendingBadge, { backgroundColor: '#fff' }]} />
                 )}
               </>
             )
@@ -669,11 +685,8 @@ const CalendarScreen = ({ navigation }) => {
       { key: 'N', label: 'Noite' },
       { key: 'multi', label: 'Múltiplos', color: C.primary + '24', border: C.primary + '60' },
     ];
-    // Ações pendentes presentes neste mês (modo pessoal) → legenda por cor.
-    const pendingKinds = calendarMode === 'groups'
-      ? []
-      : [...new Set(Object.values(pendingByDay).map(p => p.kind))];
-    const PEND_LABEL = { swap: 'Em troca', offer: 'Oferecido', cede: 'Cedido' };
+    // Plantões alterados (troca/cessão/oferta) presentes neste mês → única legenda.
+    const hasPending = calendarMode !== 'groups' && Object.keys(pendingByDay).length > 0;
     return (
       <View style={s.legend}>
         {items.map(({ key, label, color, border }) => {
@@ -686,15 +699,12 @@ const CalendarScreen = ({ navigation }) => {
             </View>
           );
         })}
-        {pendingKinds.map(kind => {
-          const color = movementVisual(C, kind, 'sender').color;
-          return (
-            <View key={`p-${kind}`} style={s.legendItem}>
-              <View style={[s.dot, { backgroundColor: color }]} />
-              <Text style={s.legendLabel}>{PEND_LABEL[kind] || 'Pendente'}</Text>
-            </View>
-          );
-        })}
+        {hasPending && (
+          <View style={s.legendItem}>
+            <View style={[s.legendSwatch, { backgroundColor: 'transparent', borderColor: C.movement, borderWidth: 2 }]} />
+            <Text style={s.legendLabel}>Alterado</Text>
+          </View>
+        )}
       </View>
     );
   };
@@ -712,7 +722,7 @@ const CalendarScreen = ({ navigation }) => {
       <View style={s.summaryTopRow}>
         <Text style={s.summaryEarningsLabel}>Ganhos previstos</Text>
         <Text style={s.summaryEarnings}>
-          {loading ? '—' : projected != null ? fmtBRLk(projected) : '—'}
+          {loading ? '—' : projected != null ? (valuesHidden ? 'R$ ••••' : fmtBRLk(projected)) : '—'}
         </Text>
       </View>
       <View style={s.summaryDivider} />
@@ -824,7 +834,7 @@ const CalendarScreen = ({ navigation }) => {
 
         {/* Value column */}
         <View style={s.compactValueCol}>
-          {value > 0 && <Text style={s.compactValue}>{fmtBRLk(value)}</Text>}
+          {value > 0 && <Text style={s.compactValue}>{valuesHidden ? 'R$ ••••' : fmtBRLk(value)}</Text>}
           <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
         </View>
       </Pressable>

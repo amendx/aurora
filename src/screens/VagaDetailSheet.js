@@ -4,14 +4,13 @@
  * Layout (design: DETALHES DA VAGA):
  *   - banner "no seu plantão" (só falta gente)
  *   - card do plantão: day chip + turno + horário + grupo
- *   - card Hospital / Setor / Faltam
+ *   - card Hospital / Cedido por / Faltam
  *   - card "Quem já está escalado": stack de avatares + vagas em aberto + resumo
  *   - card "Composição do valor": horas × R$/h, fidelização/bônus, total
  *
- * Três tipos de vaga (mesmo layout, CTA diferente):
+ * Dois tipos de vaga (mesmo layout, CTA diferente):
  *   - falta   → "Chamar colega" (sugere a um colega)
  *   - cede    → "Pegar plantão" (primeiro a pegar leva)
- *   - escala  → "Tenho interesse" (escalista escolhe) + lista de interessados
  */
 
 import { useState, useEffect, useContext, useMemo } from 'react';
@@ -23,8 +22,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useColors, Typography, BorderRadius } from '../constants/DesignSystem';
 import { AuthContext } from '../context/AuthContext';
+import { isViewOnly } from '../utils/userSource';
 import { useGroups } from '../contexts/GroupsContext';
-import { useOpenings, isInterestVaga } from '../contexts/OpeningsContext';
 import GroupScheduleService from '../services/GroupScheduleService';
 import { calculateShiftValueWithBreakdown } from '../utils/ShiftValueCalculator';
 import Logger from '../utils/Logger';
@@ -39,7 +38,6 @@ const fmtTime = (d) => d?.toLocaleTimeString('pt-BR', { hour: '2-digit', minute:
 const fmtFullDate = (d) =>
   d ? `${WEEKDAY_PT[d.getDay()]}, ${d.getDate()} de ${MONTHS_PT[d.getMonth()]}` : '';
 const fmtBRL = (n) => `R$ ${Number(n || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const _councilStr = (c) => (typeof c === 'string' ? c : (c?.state || c?.uf || ''));
 const _initials = (name = '') =>
   name.split(' ').filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase() || '?';
 
@@ -50,18 +48,10 @@ export default function VagaDetailSheet({ visible, opening, onClose, onClaim, mo
   const s = makeStyles(C);
   const { user, token } = useContext(AuthContext);
   const { groupsById } = useGroups();
-  const { registerInterest, withdrawInterest } = useOpenings();
 
   const [team, setTeam] = useState(null);   // assignments[] | null = loading
   const [claiming, setClaiming] = useState(false);
-  const [interests, setInterests] = useState(opening?.interests || []);
-  const [interestBusy, setInterestBusy] = useState(false);
   const [valueBreakdown, setValueBreakdown] = useState(null);
-
-  const interestMode = isInterestVaga(opening);
-  const iAmInterested = interests.some(i => String(i.userId) === String(user?.id));
-
-  useEffect(() => { setInterests(opening?.interests || []); }, [opening?.id]);
 
   const startDate = opening?.startISO ? new Date(opening.startISO) : null;
   const endDate = opening?.endISO ? new Date(opening.endISO) : null;
@@ -73,12 +63,17 @@ export default function VagaDetailSheet({ visible, opening, onClose, onClaim, mo
   const firstSlotId = opening?.slots?.[0]?.slotId;
   const groupName = opening?.group?.name || '—';
   const institution = opening?.group?.institution?.name || '';
-  const sector = opening?.sector || opening?.group?.sector || null;
+  // Quem passou/abriu o plantão: cessão de colega → nome do médico; vaga aberta
+  // pela coordenação (admin) → "Coordenação da escala"; falta gente → é o seu plantão.
+  const isAdminVaga = opening?.kind === 'admin_temp' || opening?.kind === 'admin_fixed'
+    || (opening?.createdByRole && opening.createdByRole !== 'doctor');
+  const passedByLabel = isFalta ? 'Plantão' : (isAdminVaga ? 'Aberto por' : 'Cedido por');
+  const passedByName = isFalta ? 'Você' : (opening?.originUserName || (isAdminVaga ? 'Coordenação da escala' : 'Colega'));
   const gc = opening?.group?.color
     ? (String(opening.group.color).startsWith('#') ? opening.group.color : `#${opening.group.color}`)
     : shiftColor;
   const selfId = String(user?.id || '');
-  const subtitle = isFalta ? 'no seu plantão' : interestMode ? 'vaga de escala' : 'aberta ao grupo';
+  const subtitle = isFalta ? 'no seu plantão' : 'aberta ao grupo';
 
   // Resolve full group from context (members/source), fallback to opening snapshot.
   const group = useMemo(() => {
@@ -104,6 +99,7 @@ export default function VagaDetailSheet({ visible, opening, onClose, onClaim, mo
         const res = await GroupScheduleService.getMonth({
           group, monthKey, token,
           userSource: user?.source,
+          auroraOnlyMode: user?.auroraOnlyMode === true,
           currentUserId: user?.id,
         });
         const day = res?.days?.[dateStr];
@@ -156,25 +152,6 @@ export default function VagaDetailSheet({ visible, opening, onClose, onClaim, mo
         },
       ],
     );
-  };
-
-  const handleInterest = async () => {
-    setInterestBusy(true);
-    const selfUid = String(user?.id);
-    if (iAmInterested) {
-      setInterests(prev => prev.filter(i => String(i.userId) !== selfUid));
-      await withdrawInterest(opening.id);
-    } else {
-      setInterests(prev => [...prev, {
-        userId: selfUid,
-        name: user?.name || user?.full_name || 'Você',
-        council: user?.council || '',
-        photo: user?.photo || null,
-        at: new Date().toISOString(),
-      }]);
-      await registerInterest(opening.id, { name: user?.name || user?.full_name, council: user?.council, photo: user?.photo });
-    }
-    setInterestBusy(false);
   };
 
   if (!visible || !opening) return null;
@@ -279,11 +256,11 @@ export default function VagaDetailSheet({ visible, opening, onClose, onClaim, mo
             </View>
           </View>
 
-          {/* Card Hospital / Setor / Faltam */}
+          {/* Card Hospital / Cedido por / Faltam */}
           <View style={s.card}>
             {renderInfoRow('business-outline', 'Hospital', institution || '—')}
             <View style={s.infoDivider} />
-            {renderInfoRow('location-outline', 'Setor', sector || '—')}
+            {renderInfoRow('person-outline', passedByLabel, passedByName)}
             <View style={s.infoDivider} />
             {renderInfoRow(
               'people-outline',
@@ -305,40 +282,6 @@ export default function VagaDetailSheet({ visible, opening, onClose, onClaim, mo
               </View>
             )}
           </View>
-
-          {/* Interessados (vaga de escala) */}
-          {interestMode && (
-            <View style={s.card}>
-              <Text style={s.cardEyebrow}>
-                {interests.length > 0
-                  ? `${interests.length} ${interests.length === 1 ? 'interessado' : 'interessados'}`
-                  : 'Interessados'}
-              </Text>
-              {interests.length === 0 ? (
-                <Text style={s.emptyTeam}>Seja o primeiro a demonstrar interesse.</Text>
-              ) : (
-                interests.map((it, i) => {
-                  const isMe = String(it.userId) === selfId;
-                  const council = _councilStr(it.council);
-                  return (
-                    <View key={`int-${it.userId}-${i}`} style={s.personRow}>
-                      {it.photo
-                        ? <Image source={{ uri: it.photo }} style={s.avatar} />
-                        : <View style={[s.avatar, s.avatarFallback]}>
-                            <Text style={s.avatarInitials}>{_initials(it.name)}</Text>
-                          </View>}
-                      <View style={{ flex: 1 }}>
-                        <Text style={s.personName} numberOfLines={1}>
-                          {it.name}{isMe ? <Text style={s.youTag}>  • você</Text> : null}
-                        </Text>
-                        {!!council && <Text style={s.personMeta} numberOfLines={1}>{council}</Text>}
-                      </View>
-                    </View>
-                  );
-                })
-              )}
-            </View>
-          )}
 
           {/* Composição do valor */}
           {vb && (
@@ -369,36 +312,18 @@ export default function VagaDetailSheet({ visible, opening, onClose, onClaim, mo
           )}
         </ScrollView>
 
-        {/* CTA */}
+        {/* CTA — conta só-visualização (PlantãoAPI) só fecha, não pega/chama */}
         <View style={s.ctaRow}>
-          <Pressable style={s.secondaryBtn} onPress={onClose}>
+          <Pressable style={[s.secondaryBtn, isViewOnly(user) && { flex: 1 }]} onPress={onClose}>
             <Text style={[s.secondaryBtnText, { color: C.text.secondary }]}>Fechar</Text>
           </Pressable>
-          {isFalta ? (
+          {isViewOnly(user) ? null : isFalta ? (
             <Pressable
               style={[s.primaryBtn, { backgroundColor: C.primary, flex: 2 }]}
               onPress={() => { onChamar?.(opening); onClose?.(); }}
             >
               <Ionicons name="person-add-outline" size={16} color="#fff" />
               <Text style={s.primaryBtnText}>Chamar colega</Text>
-            </Pressable>
-          ) : interestMode ? (
-            <Pressable
-              style={[s.primaryBtn, {
-                flex: 2,
-                backgroundColor: iAmInterested ? C.background.secondary : C.primary,
-                borderWidth: iAmInterested ? 0.5 : 0, borderColor: C.border.light,
-              }]}
-              onPress={handleInterest}
-              disabled={interestBusy}
-            >
-              {interestBusy ? (
-                <ActivityIndicator color={iAmInterested ? C.text.secondary : '#fff'} />
-              ) : (
-                <Text style={[s.primaryBtnText, iAmInterested && { color: C.text.secondary }]}>
-                  {iAmInterested ? 'Remover interesse' : 'Tenho interesse'}
-                </Text>
-              )}
             </Pressable>
           ) : (
             <Pressable
@@ -479,16 +404,6 @@ const makeStyles = (C) => StyleSheet.create({
   stackInitials: { color: '#fff', fontSize: 11, fontFamily: Typography.fontFamily.bold },
   stackOpen: { backgroundColor: C.warning + '14', borderStyle: 'dashed', borderColor: C.warning + '88' },
   escaladoSummary: { flex: 1, fontSize: 12.5, fontFamily: Typography.fontFamily.semiBold, color: C.text.secondary },
-
-  // Interessados list
-  emptyTeam: { fontSize: 13, fontFamily: Typography.fontFamily.regular, color: C.text.tertiary, paddingVertical: 4 },
-  personRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 7 },
-  avatar: { width: 40, height: 40, borderRadius: 10, backgroundColor: C.background.secondary },
-  avatarFallback: { alignItems: 'center', justifyContent: 'center', backgroundColor: C.primary + '22' },
-  avatarInitials: { fontSize: 13, fontWeight: '700', color: C.primary },
-  personName: { fontSize: 14, fontFamily: Typography.fontFamily.semiBold, color: C.text.primary },
-  youTag: { fontSize: 11, fontFamily: Typography.fontFamily.regular, color: C.text.tertiary },
-  personMeta: { fontSize: 11, fontFamily: Typography.fontFamily.regular, color: C.text.tertiary, marginTop: 1 },
 
   // Composição do valor
   valRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 5 },

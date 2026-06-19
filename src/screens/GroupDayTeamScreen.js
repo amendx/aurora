@@ -14,9 +14,10 @@ import CederFlowSheet from './CederFlowSheet';
 import TrocarFlowSheet from './TrocarFlowSheet';
 
 const MONTHS_FULL_PT = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
-const SHIFT_TYPE_COLOR = { M: '#3FA9A7', T: '#97CAFC', N: '#5B6FBF', D: '#5B6FBF' };
-const LABEL_NAME = { M: 'Manhã', T: 'Tarde', N: 'Noite', D: 'Noite' };
-const TURN_ORDER = ['M', 'T', 'N', 'D'];
+// FN = sexta noite (+20%) do aurora-web; tratada como noite no visual.
+const SHIFT_TYPE_COLOR = { M: '#3FA9A7', T: '#97CAFC', N: '#5B6FBF', D: '#5B6FBF', FN: '#E08A00' };
+const LABEL_NAME = { M: 'Manhã', T: 'Tarde', N: 'Noite', D: 'Noite', FN: 'Sex. Noite' };
+const TURN_ORDER = ['M', 'T', 'N', 'D', 'FN'];
 
 const dateOnly = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -68,6 +69,25 @@ const GroupDayTeamScreen = ({ navigation, date, groupIds }) => {
 
   useEffect(() => {
     let cancelled = false;
+    const localSwapsForLive = [...(swapsSent || []), ...(swapsReceived || [])];
+    const liveUnsub = GroupScheduleService.subscribeMultipleMonths({
+      groups,
+      monthKey,
+      currentUserId: userId,
+      localSwaps: localSwapsForLive,
+      onChange: (result) => {
+        if (cancelled) return;
+        const day = {};
+        let hasAny = false;
+        for (const g of groups) {
+          const gid = String(g.id);
+          day[gid] = result[gid]?.days?.[dateStr] || null;
+          if (day[gid]) hasAny = true;
+        }
+        if (hasAny) setPerGroup(day);
+      },
+      onError: (err) => Logger.warn(`[GroupDayTeamScreen] live: ${err?.message}`),
+    });
     (async () => {
       setLoading(true);
       try {
@@ -76,7 +96,9 @@ const GroupDayTeamScreen = ({ navigation, date, groupIds }) => {
           monthKey,
           token,
           userSource: user?.source,
+          auroraOnlyMode: user?.auroraOnlyMode === true,
           currentUserId: userId,
+          force: true,
         });
         await GroupScheduleService.enrichWithPendingOffers(result, userId);
         // Pass local OffersContext swaps as source-of-truth — immediate after proposeSwap,
@@ -96,7 +118,10 @@ const GroupDayTeamScreen = ({ navigation, date, groupIds }) => {
         if (!cancelled) setLoading(false);
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      liveUnsub?.();
+    };
   }, [dateStr, monthKey, groups.map(g => g.id).join(','), token, user?.source, userId, reloadCounter,
       // Re-run when local swap/offer state changes so badges and buttons reflect the latest pending state.
       swapsSent.length, swapsReceived.length, offersSent.length, offersReceived.length]);
@@ -230,10 +255,11 @@ const GroupDayTeamScreen = ({ navigation, date, groupIds }) => {
     const isLoading = responding && (
       pending?.offerId === responding || swap?.swapId === responding
     );
-    // Ceder/Trocar só fazem sentido para plantões aurora (pessoa existe na base).
-    // WebClient ou ids não resolvidos → sem ação. Respostas a ofertas/trocas
-    // pendentes continuam (já são transações aurora existentes).
-    const canAct = assignment.source === 'aurora';
+    // Ceder/Trocar só fazem sentido para plantões aurora (pessoa existe na base)
+    // E que tenham um shiftId real pra agir. Na fase A do aurora-web os
+    // assignments vêm com shiftId=null (escala projetada, sem doc de shift por
+    // usuário) → view-only até a fase B preencher os ids.
+    const canAct = assignment.source === 'aurora' && !!assignment.shiftId;
     // Defensive: council pode estar como objeto em caches antigos.
     const councilText = typeof assignment.person?.council === 'string'
       ? assignment.person.council

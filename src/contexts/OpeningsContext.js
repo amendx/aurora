@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { AuthContext } from '../context/AuthContext';
+import { isViewOnly } from '../utils/userSource';
 import { useGroups } from './GroupsContext';
 import LocalCache from '../services/LocalCache';
 import FirebaseAdapter from '../services/firebase/FirebaseAdapter';
@@ -8,6 +9,7 @@ import { collection, query, where, onSnapshot } from '../services/firebase/fdb';
 import { fromFirestore } from '../utils/OpeningNormalizer';
 import NotificationService from '../services/NotificationService';
 import Logger from '../utils/Logger';
+import { fmtDateBR } from '../utils/formatDate';
 import { makeLogEntry, appendLog, TRANSFER_LOG_TYPES } from '../utils/shiftTransferLog';
 
 const OpeningsContext = createContext();
@@ -16,6 +18,15 @@ const OpeningsContext = createContext();
 // decide remotamente. Vaga AVULSA (admin_temp) é "primeiro a pegar leva" — vai
 // pelo claim normal, não por interesse. Cessão (cede) também é claim.
 export const isInterestVaga = (o) => o?.kind === 'admin_fixed';
+
+// Audiência: quando o escalista publica "para selecionados", a vaga só vale para
+// os uids em eligibleUserIds. 'todos'/ausente (e cessões) → qualquer membro do grupo.
+export const isEligibleForUser = (o, uid) => {
+  if (o?.audience === 'selecionados' && Array.isArray(o.eligibleUserIds) && o.eligibleUserIds.length) {
+    return o.eligibleUserIds.map(String).includes(String(uid));
+  }
+  return true;
+};
 
 export const useOpenings = () => {
   const ctx = useContext(OpeningsContext);
@@ -75,6 +86,7 @@ export const OpeningsProvider = ({ children }) => {
           if (o.claimable) mine.push(o);
         } else {
           if (o.restrictedToGroupId && !groupIds.includes(String(o.restrictedToGroupId))) continue;
+          if (!isEligibleForUser(o, userId)) continue; // respeita audiência 'selecionados'
           if (o.claimable) claimable.push(o);
         }
       }
@@ -178,6 +190,7 @@ export const OpeningsProvider = ({ children }) => {
         seen.add(o.id);
         if (o.originUserId && String(o.originUserId) === String(userId)) return; // já em mine
         if (o.restrictedToGroupId && !groupIds.includes(String(o.restrictedToGroupId))) return;
+        if (!isEligibleForUser(o, userId)) return; // respeita audiência 'selecionados'
         claimable.push(o);
       });
 
@@ -203,6 +216,7 @@ export const OpeningsProvider = ({ children }) => {
    * the claimant's new shift + flips the slot status.
    */
   const claimOpening = useCallback(async (openingId, slotId) => {
+    if (isViewOnly(user)) return { success: false, reason: 'view_only' };
     const opening = openings.find(o => o.id === openingId);
     if (!opening || !opening.claimable) return { success: false, reason: 'not_claimable' };
     // Vaga de escala (admin) não é "primeiro a pegar": o médico demonstra
@@ -216,7 +230,7 @@ export const OpeningsProvider = ({ children }) => {
       if (isCedeBacked) {
         NotificationService.notify(opening.originUserId, 'offer_outcome', {
           title: 'Plantão cedido foi assumido',
-          body: `${opening.group?.name || 'Grupo'} · ${opening.dateKey || ''}`,
+          body: `${opening.group?.name || 'Grupo'} · ${fmtDateBR(opening.dateKey || (opening.startISO || '').slice(0, 10))}`,
           payload: { openingId, outcome: 'accepted' },
         }).catch(() => {});
       }
@@ -288,6 +302,7 @@ export const OpeningsProvider = ({ children }) => {
    * remotamente entre os interessados — não há claim direto aqui.
    */
   const registerInterest = useCallback(async (openingId, person) => {
+    if (isViewOnly(user)) return { success: false, reason: 'view_only' };
     const interest = {
       userId: String(userId),
       name: person?.name || person?.full_name || 'Colega',

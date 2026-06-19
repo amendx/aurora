@@ -8,22 +8,30 @@ import LocalCache, { isMonthStale } from '../services/LocalCache';
 // global-only behaviour by switching this import back to '../utils/MonthSummaryComputer'.
 import { computeMonthSummary } from '../utils/MonthSummaryComputerV2';
 import { buildHybridConfig, isPastMonthKey } from '../utils/HospitalConfigResolver';
+import { applyPublishedHospitalConfigs, collectInstIds } from '../utils/PublishedHospitalConfig';
 
 /**
- * Build the config to recompute a month's summary with. For past months, the
- * bonus + loyalty come from the prior saved summary's snapshot (frozen) while
- * the hour values + friday-night rule come from the current config (live).
- * For current/future months, the live config is used wholesale.
+ * Build the config to recompute a month's summary with.
+ *
+ * First overlays the manager-published hospital configs (institutions/{id}.config,
+ * the SOURCE OF TRUTH for money at each hospital) onto the live config, so both
+ * current and past months price each shift with its hospital's published rates.
+ *
+ * Then, for past months, bonus + loyalty come from the prior saved summary's
+ * snapshot (frozen) while hour values + friday-night rule stay live (retroactive
+ * by design — buildHybridConfig). Current/future months use the live config.
  */
-const _resolveSummaryConfig = async (userId, fullMonthKey, liveConfig) => {
-  if (!isPastMonthKey(fullMonthKey)) return liveConfig;
+const _resolveSummaryConfig = async (userId, fullMonthKey, liveConfig, daysWithShifts) => {
+  const instIds = collectInstIds(daysWithShifts);
+  const live = await applyPublishedHospitalConfigs(liveConfig, instIds);
+  if (!isPastMonthKey(fullMonthKey)) return live;
   try {
     const prior = await LocalCache.getSummary(userId, fullMonthKey);
     const snap = prior?.financialConfigSnapshot;
-    if (!snap) return liveConfig; // first-time fetch of this past month — no snapshot yet
-    return buildHybridConfig(liveConfig, snap);
+    if (!snap) return live; // first-time fetch of this past month — no snapshot yet
+    return buildHybridConfig(live, snap);
   } catch (_) {
-    return liveConfig;
+    return live;
   }
 };
 import { getFullShiftConfig } from '../utils/ShiftValueCalculator';
@@ -33,6 +41,7 @@ import { AuthContext } from '../context/AuthContext';
 import TodayCoworkersService from '../services/TodayCoworkersService';
 import FirebaseAdapter from '../services/firebase/FirebaseAdapter';
 import { makeLogEntry, TRANSFER_LOG_TYPES } from '../utils/shiftTransferLog';
+import { isAuroraOnly } from '../utils/userSource';
 
 // Context para gerenciar dados dos plantões globalmente (APENAS MONTHLY)
 const ShiftsContext = createContext({});
@@ -239,7 +248,7 @@ export const ShiftsProvider = ({ children }) => {
     // userRef pra sempre ler o user mais recente — após setAuroraOnlyMode(true),
     // callers podem chamar antes de ShiftsContext re-renderizar.
     const _user = userRef.current;
-    if (_user?.source === 'aurora' || _user?.auroraOnlyMode) {
+    if (isAuroraOnly(_user)) {
       const fullMonthKey = `${year}-${String(month).padStart(2, '0')}`;
       const memKey = `${year}-${month}`;
 
@@ -316,7 +325,7 @@ export const ShiftsProvider = ({ children }) => {
           getFullShiftConfig(),
           LocalCache.getTimeEntries(userId, fullMonthKey),
         ]);
-        const financialConfig = await _resolveSummaryConfig(userId, fullMonthKey, liveConfig);
+        const financialConfig = await _resolveSummaryConfig(userId, fullMonthKey, liveConfig, daysWithShifts);
         auroraMonthSummary = computeMonthSummary(userId, fullMonthKey, daysWithShifts, timeEntries || {}, financialConfig);
         await LocalCache.saveSummary(userId, fullMonthKey, auroraMonthSummary);
       } catch (_) {}
@@ -869,7 +878,7 @@ export const ShiftsProvider = ({ children }) => {
             getFullShiftConfig(),
             LocalCache.getTimeEntries(userId, fullMonthKey),
           ]);
-          const financialConfig = await _resolveSummaryConfig(userId, fullMonthKey, liveConfig);
+          const financialConfig = await _resolveSummaryConfig(userId, fullMonthKey, liveConfig, displayDays);
           webClientMonthSummary = computeMonthSummary(
             userId, fullMonthKey, displayDays, timeEntries || {}, financialConfig
           );
@@ -930,7 +939,7 @@ export const ShiftsProvider = ({ children }) => {
     // Aurora (ou [WEBCLIENT-BRIDGE] modo aurora-only): o branch aurora do
     // loadMonthlyShifts sempre re-hidrata do Firestore.
     const _user = userRef.current;
-    if (_user?.source === 'aurora' || _user?.auroraOnlyMode) {
+    if (isAuroraOnly(_user)) {
       return loadMonthlyShifts(month, year, true);
     }
     if (!token || !userId) {
@@ -1134,7 +1143,7 @@ export const ShiftsProvider = ({ children }) => {
         getFullShiftConfig(),
         LocalCache.getTimeEntries(userId, fullMonthKey),
       ]);
-      const financialConfig = await _resolveSummaryConfig(userId, fullMonthKey, liveConfig);
+      const financialConfig = await _resolveSummaryConfig(userId, fullMonthKey, liveConfig, cached.daysWithShifts);
       const summary = computeMonthSummary(
         userId, fullMonthKey, cached.daysWithShifts, timeEntries || {}, financialConfig
       );
@@ -1198,7 +1207,7 @@ export const ShiftsProvider = ({ children }) => {
 
     // [WEBCLIENT-BRIDGE] `!user?.auroraOnlyMode` evita disparar getCurrentMonthData
     // (caminho PlantaoAPI) quando webClient migrou pra aurora-only.
-    if (token && userId && user?.source !== 'aurora' && !user?.auroraOnlyMode && loadedForUserIdRef.current !== userId) {
+    if (token && userId && !isAuroraOnly(user) && loadedForUserIdRef.current !== userId) {
       Logger.info('🔄 Token disponível, carregando dados do mês atual...');
       loadedForUserIdRef.current = userId;
       getCurrentMonthData();
@@ -1330,7 +1339,7 @@ export const ShiftsProvider = ({ children }) => {
         const fullMonthKey = `${prev.currentYear}-${String(prev.currentMonth).padStart(2, '0')}`;
         Promise.all([getFullShiftConfig(), LocalCache.getTimeEntries(userId, fullMonthKey)])
           .then(async ([liveCfg, te]) => {
-            const cfg = await _resolveSummaryConfig(userId, fullMonthKey, liveCfg);
+            const cfg = await _resolveSummaryConfig(userId, fullMonthKey, liveCfg, updatedDays);
             const s = computeMonthSummary(userId, fullMonthKey, updatedDays, te || {}, cfg);
             LocalCache.saveSummary(userId, fullMonthKey, s);
             setShiftsData(p => ({ ...p, monthSummary: s }));

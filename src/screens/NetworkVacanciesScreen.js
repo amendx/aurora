@@ -9,6 +9,7 @@ import { useColors, Spacing, BorderRadius, Shadows, Typography } from '../consta
 import { AuthContext } from '../context/AuthContext';
 import { useGroups } from '../contexts/GroupsContext';
 import WebClientApiService from '../services/WebClientApiService';
+import { isAuroraOnly } from '../utils/userSource';
 import LocalCache from '../services/LocalCache';
 import { getGroupVisibility } from '../utils/GroupVisibilityConfig';
 import {
@@ -143,6 +144,10 @@ export default function NetworkVacanciesScreen({ navigation }) {
 
   const load = useCallback(async (force = false) => {
     if (!visibility.loaded) return;
+    // Aurora-only: vagas vêm de openings/* (OpeningsContext), não da PlantaoAPI.
+    // HomeScreen já roteia esses users pra OpeningsScreen, mas dá pra abrir
+    // NetworkVacanciesScreen via outros caminhos — gate defensivo.
+    if (isAuroraOnly(user)) { setItems([]); setLoading(false); return; }
     if (!token) { setItems([]); setLoading(false); return; }
     if (groupList.length === 0) { setItems([]); setLoading(false); return; }
 

@@ -11,8 +11,9 @@
  */
 
 import React, { useState, useEffect, useMemo, useCallback, useContext } from 'react';
-import { View, Text, ScrollView, Pressable, StyleSheet, ActivityIndicator } from 'react-native';
+import { View, Text, ScrollView, Pressable, StyleSheet, ActivityIndicator, useColorScheme } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useColors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
@@ -20,6 +21,7 @@ import { AuthContext } from '../context/AuthContext';
 import { useShifts } from '../contexts/ShiftsContext';
 import { useOpenings } from '../contexts/OpeningsContext';
 import { loadAvailability } from '../utils/AvailabilityConfig';
+import { isAuroraOnly, isViewOnly } from '../utils/userSource';
 import {
   rankOpenings,
   analyzeSchedule,
@@ -40,12 +42,29 @@ const TURNOS = [
 ];
 const TURNO_RANK = { M: 0, T: 1, N: 2 };
 
+// ícone por tipo de alerta do motor (deixa o motivo visual)
+const RULE_ICON = {
+  block: 'lock-closed', overlap: 'alert-circle', rest: 'bed', consecutiveHours: 'hourglass',
+  consecutiveDays: 'calendar', weekend: 'sunny', blockOverflow: 'warning',
+  adjacent: 'information-circle', invalid: 'help-circle',
+};
+const ruleIcon = (rule) => RULE_ICON[rule] || 'ellipse';
+
 const WEEKDAYS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
-const WEEKDAYS_MIN = ['D', 'S', 'T', 'Q', 'Q', 'S', 'S'];
+const WEEKDAYS_FULL = ['domingo', 'segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado'];
 const MONTH_NAMES = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
 
-// cor da bolinha por tipo de plantão
-const SHIFT_TYPE_COLOR = { M: '#3FA9A7', T: '#97CAFC', N: '#5B6FBF', D: '#5B6FBF', FN: '#E08A00' };
+// cor por tipo de plantão — claro/escuro só ajusta legibilidade.
+// D (vira-noite) herda Noite; FN (feriado) herda âmbar.
+const SHIFT_COLORS = {
+  light: { M: '#3FA9A7', T: '#4C8BD0', N: '#5B6FBF', NE: '#E08A00' },
+  dark:  { M: '#54BDB7', T: '#7FB4F0', N: '#8590E0', NE: '#E0A33C' },
+};
+const shiftColor = (t, dark) => {
+  const k = t === 'D' ? 'N' : (t === 'FN' || t === 'NE') ? 'NE' : t;
+  const m = SHIFT_COLORS[dark ? 'dark' : 'light'];
+  return m[k] || m.M;
+};
 
 const _todayKey = () => {
   const d = new Date();
@@ -62,6 +81,7 @@ export default function AuraScreen({ navigation }) {
   const C = useColors();
   const insets = useSafeAreaInsets();
   const s = makeStyles(C);
+  const dark = useColorScheme() === 'dark';
 
   const { user } = useContext(AuthContext);
   const userId = user?.id;
@@ -196,9 +216,13 @@ export default function AuraScreen({ navigation }) {
     return map;
   }, [config, existingIntervals, greenAllowed, belowTarget, viewMonth, viewYear]);
 
-  // dias com pelo menos um turno livre seguro (pra completar horas)
+  // dias com pelo menos um turno livre seguro (pra completar horas).
+  // Com "evitar FDS" ligado, os dias de fim de semana (status WEEKEND) não contam
+  // como livres — o usuário escolheu evitá-los.
   const availableDaysCount = useMemo(
-    () => Object.values(dayStatus).filter(st => (st.safeTurnos?.length || 0) > 0).length,
+    () => Object.values(dayStatus).filter(
+      st => (st.safeTurnos?.length || 0) > 0 && st.status !== DAY_STATUS.WEEKEND,
+    ).length,
     [dayStatus],
   );
 
@@ -277,6 +301,34 @@ export default function AuraScreen({ navigation }) {
   const reasonColor = (severity) =>
     severity === 'block' ? C.error : severity === 'warn' ? C.warning : C.text.secondary;
 
+  // ── Barra do dia selecionado (chips) ──────────────────────────────────────
+  const selDayObj = new Date(`${testDate}T00:00:00`);
+  const selDayNum = selDayObj.getDate();
+  const selWeekdayName = WEEKDAYS_FULL[selDayObj.getDay()];
+  const selMonthName = MONTH_NAMES[selDayObj.getMonth()];
+  const selBlocked = dayStatus[testDate]?.status === DAY_STATUS.FULL;
+  const dayBarChips = useMemo(() => {
+    const out = [];
+    if (selDayFolga) out.push({ key: 'folga', label: 'Folga', color: C.warning });
+    selDayTypes.forEach(t => out.push({ key: `t${t}`, label: `Plantão ${TURNOS.find(x => x.key === t)?.label || t}`, color: shiftColor(t, dark) }));
+    selDayBlocks.forEach(b => out.push({ key: `b${b.id}`, label: `${b.label}${b.mode === 'time' ? ` ${b.startTime}–${b.endTime}` : ''}`, color: b.color || C.warning }));
+    selDayEvents.forEach(e => out.push({ key: `e${e.id}`, label: e.label, color: e.color || C.info }));
+    if (openingByDate[testDate]) out.push({ key: 'vaga', label: 'Vaga aberta', color: C.money });
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [testDate, selDayFolga, selDayTypes, selDayBlocks, selDayEvents, openingByDate, dark]);
+
+  // ── SectionTitle: kicker mono + título ────────────────────────────────────
+  const SectionTitle = ({ kicker, title, right }) => (
+    <View style={s.sectionTitle}>
+      <View style={{ flex: 1 }}>
+        {!!kicker && <Text style={s.sectionKicker}>{kicker}</Text>}
+        <Text style={s.sectionHeading}>{title}</Text>
+      </View>
+      {right}
+    </View>
+  );
+
   if (loadingCfg && !config) {
     return (
       <View style={[s.root, s.center]}>
@@ -293,58 +345,68 @@ export default function AuraScreen({ navigation }) {
     >
       {/* Intro */}
       <View style={s.intro}>
-        <Ionicons name="sparkles" size={18} color={C.primary} />
+        <View style={s.introIcon}>
+          <Ionicons name="sparkles" size={20} color={C.primary} />
+        </View>
         <Text style={s.introText}>
-          Análise da sua escala para evitar sobrecarga.
+          <Text style={s.introStrong}>Análise da sua escala</Text> para evitar sobrecarga.
         </Text>
       </View>
 
-      {/* Parâmetros (bloqueios, folgas, meta) */}
-      <Pressable style={s.manageBtn} onPress={() => navigation?.navigate?.('AuraAvailabilityScreen')}>
-        <Ionicons name="options-outline" size={18} color={C.primary} />
-        <Text style={s.manageText}>Parâmetros · bloqueios, folgas e meta</Text>
-        <Ionicons name="chevron-forward" size={18} color={C.text.tertiary} />
+      {/* Parâmetros */}
+      <Pressable style={s.paramRow} onPress={() => navigation?.navigate?.('AuraAvailabilityScreen')}>
+        <View style={s.paramIcon}><Ionicons name="options-outline" size={17} color={C.text.secondary} /></View>
+        <View style={{ flex: 1 }}>
+          <Text style={s.paramTitle}>Parâmetros</Text>
+          <Text style={s.paramSub}>bloqueios, folgas e meta</Text>
+        </View>
+        <Ionicons name="chevron-forward" size={17} color={C.text.tertiary} />
       </Pressable>
 
       {/* Panorama */}
       <View style={s.card}>
-        <Text style={s.cardTitle}>Panorama do mês</Text>
         <View style={s.statsRow}>
-          <View style={s.stat}>
-            <Text style={s.statValue}>{analysis?.shiftCount ?? 0}</Text>
-            <Text style={s.statLabel}>plantões</Text>
-          </View>
-          <View style={s.stat}>
-            <Text style={s.statValue}>{analysis?.maxConsecutiveDays ?? 0}</Text>
-            <Text style={s.statLabel}>dias seguidos (máx)</Text>
-          </View>
-          <View style={s.stat}>
-            <Text style={[s.statValue, availableDaysCount > 0 && { color: C.money }]}>{availableDaysCount}</Text>
-            <Text style={s.statLabel}>dias livres</Text>
-          </View>
+          {[
+            { v: analysis?.shiftCount ?? 0, l: 'plantões', money: false },
+            { v: analysis?.maxConsecutiveDays ?? 0, l: 'máx. seguidos', money: false },
+            { v: availableDaysCount, l: 'dias livres', money: availableDaysCount > 0 },
+          ].map((st, i) => (
+            <View key={i} style={[s.stat, i > 0 && s.statDivider]}>
+              <Text style={[s.statValue, st.money && { color: C.money }]}>{st.v}</Text>
+              <Text style={s.statLabel}>{st.l}</Text>
+            </View>
+          ))}
         </View>
-        {(analysis?.restAlerts || []).map((a, i) => (
-          <View key={i} style={s.alertRow}>
-            <Ionicons name="alert-circle" size={14} color={C.warning} />
-            <Text style={s.alertText}>{a}</Text>
+        {(analysis?.restAlerts || []).length > 0 && (
+          <View style={s.alertsWrap}>
+            {(analysis?.restAlerts || []).map((a, i) => (
+              <View key={i} style={s.alertRow}>
+                <Ionicons name="bed-outline" size={16} color={C.warning} />
+                <Text style={s.alertText}>{a}</Text>
+              </View>
+            ))}
           </View>
-        ))}
+        )}
       </View>
 
-      {/* Calendário do mês */}
-      <View style={s.card}>
+      {/* Calendário */}
+      <SectionTitle kicker="Sua escala" title="Calendário" />
+      <View style={s.heroCard}>
+        {/* header mês */}
         <View style={s.calHeader}>
-          <Pressable hitSlop={10} onPress={() => shiftMonth(-1)}><Ionicons name="chevron-back" size={20} color={C.primary} /></Pressable>
+          <Pressable onPress={() => shiftMonth(-1)} style={s.calNavBtn}><Ionicons name="chevron-back" size={18} color={C.text.secondary} /></Pressable>
           <Text style={s.calTitle}>{MONTH_NAMES[viewMonth - 1]} {viewYear}</Text>
-          <Pressable hitSlop={10} onPress={() => shiftMonth(1)}><Ionicons name="chevron-forward" size={20} color={C.primary} /></Pressable>
+          <Pressable onPress={() => shiftMonth(1)} style={s.calNavBtn}><Ionicons name="chevron-forward" size={18} color={C.text.secondary} /></Pressable>
         </View>
 
+        {/* dias da semana */}
         <View style={s.calWeekRow}>
-          {WEEKDAYS_MIN.map((w, i) => (
-            <Text key={i} style={s.calWeekday}>{w}</Text>
+          {WEEKDAYS.map((w, i) => (
+            <Text key={i} style={[s.calWeekday, (i === 0 || i === 6) && { color: C.info }]}>{w}</Text>
           ))}
         </View>
 
+        {/* grade — status comunicado por "piso" colorido + tinte ultrassuave */}
         {weeks.map((week, wi) => (
           <View key={wi} style={s.calRow}>
             {week.map((dk, di) => {
@@ -356,30 +418,27 @@ export default function AuraScreen({ navigation }) {
               const hasOpening = !!openingByDate[dk];
               const selected = dk === testDate;
               const today = dk === _todayKey();
-              const bg = status === DAY_STATUS.FOLGA ? C.warningSoft
-                : status === DAY_STATUS.FULL ? C.error + '1F'
-                : status === DAY_STATUS.GOOD ? C.moneySoft
-                : status === DAY_STATUS.WEEKEND ? C.info + '24'
+              const sc = status === DAY_STATUS.FOLGA ? C.warning
+                : status === DAY_STATUS.FULL ? C.error
+                : status === DAY_STATUS.GOOD ? C.money
+                : status === DAY_STATUS.WEEKEND ? C.info
                 : null;
               return (
                 <Pressable key={di} onPress={() => setTestDate(dk)} style={s.calCell}>
                   <View style={[
                     s.calDay,
-                    bg && { backgroundColor: bg },
-                    today && !selected && { borderColor: C.border.medium, borderWidth: 1 },
-                    selected && { backgroundColor: C.primary, borderColor: C.primary, borderWidth: 1 },
+                    sc && !selected && { backgroundColor: sc + (dark ? '22' : '14') },
+                    today && !selected && s.calToday,
+                    selected && { backgroundColor: C.primary },
                   ]}>
-                    <Text style={[s.calDayNum, selected && { color: '#fff' }]}>{d.getDate()}</Text>
+                    {sc && !selected && <View style={[s.calFloor, { backgroundColor: sc }]} />}
+                    {hasOpening && <View style={[s.calVagaRing, { borderColor: selected ? '#fff' : C.money }]} />}
+                    {dayBlocks.length > 0 && <View style={[s.calCompSquare, { backgroundColor: selected ? '#fff' : (dayBlocks[0].color || C.warning) }]} />}
+                    <Text style={[s.calDayNum, (today || selected) && { fontFamily: Typography.fontFamily.bold }, selected && { color: '#fff' }]}>{d.getDate()}</Text>
                     <View style={s.calDots}>
                       {types.slice(0, 3).map((t, k) => (
-                        <View key={`s${k}`} style={[s.calDot, { backgroundColor: selected ? '#fff' : (SHIFT_TYPE_COLOR[t] || C.primary) }]} />
+                        <View key={k} style={[s.calDot, { backgroundColor: selected ? 'rgba(255,255,255,0.9)' : shiftColor(t, dark) }]} />
                       ))}
-                      {dayBlocks.slice(0, 2).map((b, k) => (
-                        <View key={`b${k}`} style={[s.calDot, s.calDotBlock, { backgroundColor: selected ? '#fff' : (b.color || C.warning) }]} />
-                      ))}
-                      {hasOpening && status === DAY_STATUS.GOOD && (
-                        <View style={[s.calDot, s.calVagaDot, { borderColor: selected ? '#fff' : C.money }]} />
-                      )}
                     </View>
                   </View>
                 </Pressable>
@@ -388,171 +447,221 @@ export default function AuraScreen({ navigation }) {
           </View>
         ))}
 
+        {/* legenda */}
         <View style={s.calLegend}>
-          <View style={[s.calSwatch, { backgroundColor: C.moneySoft }]} /><Text style={s.calLegendText}>pode completar</Text>
-          <View style={[s.calSwatch, { backgroundColor: C.error + '1F', marginLeft: Spacing.sm }]} /><Text style={s.calLegendText}>cheio</Text>
-          <View style={[s.calSwatch, { backgroundColor: C.warningSoft, marginLeft: Spacing.sm }]} /><Text style={s.calLegendText}>folga</Text>
-          {config?.avoidWeekend && (<>
-            <View style={[s.calSwatch, { backgroundColor: C.info + '24', marginLeft: Spacing.sm }]} /><Text style={s.calLegendText}>FDS</Text>
-          </>)}
-          <View style={[s.calDot, s.calVagaDot, { borderColor: C.money, marginLeft: Spacing.sm }]} /><Text style={s.calLegendText}>vaga aberta</Text>
+          {[['completar', 'pode completar', C.money], ['cheio', 'cheio', C.error], ['folga', 'folga', C.warning], ['fds', 'fim de semana', C.info]].map(([k, lbl, c]) => (
+            <View key={k} style={s.legendItem}>
+              <View style={[s.legendSwatch, { backgroundColor: c + (dark ? '22' : '14') }]}>
+                <View style={[s.legendSwatchFloor, { backgroundColor: c }]} />
+              </View>
+              <Text style={s.legendText}>{lbl}</Text>
+            </View>
+          ))}
+          <View style={s.legendItem}>
+            <View style={[s.calVagaRing, s.legendRing, { borderColor: C.money }]} />
+            <Text style={s.legendText}>vaga aberta</Text>
+          </View>
         </View>
 
-        {/* O que tem no dia selecionado (legenda abaixo do calendário) */}
-        <View style={s.selDayBar}>
-          <Text style={s.selDayLabel}>{_fmtDate(testDate)}:</Text>
-          {!(selDayTypes.length > 0 || selDayBlocks.length > 0 || selDayEvents.length > 0 || selDayFolga) ? (
-            selDayBlockReason
-              ? <Text style={[s.selDayEmpty, { color: C.error, fontStyle: 'normal' }]}>Bloqueado: {selDayBlockReason}</Text>
-              : <Text style={s.selDayEmpty}>sem eventos</Text>
+        {/* barra do dia selecionado */}
+        <View style={s.dayBar}>
+          <View style={s.dayBarHead}>
+            <Ionicons name="calendar-outline" size={14} color={C.primary} />
+            <Text style={s.dayBarTitle}>{selDayNum} de {selMonthName.toLowerCase()} · {selWeekdayName}</Text>
+          </View>
+          {dayBarChips.length > 0 ? (
+            <View style={s.dayBarChips}>
+              {dayBarChips.map(c => (
+                <View key={c.key} style={[s.dayChip, { backgroundColor: c.color + (dark ? '22' : '18') }]}>
+                  <View style={[s.dayChipDot, { backgroundColor: c.color }]} />
+                  <Text style={[s.dayChipText, { color: c.color }]}>{c.label}</Text>
+                </View>
+              ))}
+            </View>
+          ) : selBlocked ? (
+            <Text style={s.dayBarBlocked}>{selDayBlockReason || 'Dia cheio — sem espaço para encaixar plantão.'}</Text>
           ) : (
-            <>
-            {selDayFolga && (
-              <View style={s.selDayChip}>
-                <View style={[s.selDayDot, { backgroundColor: C.warning }]} />
-                <Text style={s.selDayChipText}>Folga</Text>
-              </View>
-            )}
-            {selDayTypes.map(t => (
-              <View key={`t${t}`} style={s.selDayChip}>
-                <View style={[s.selDayDot, { backgroundColor: SHIFT_TYPE_COLOR[t] || C.primary }]} />
-                <Text style={s.selDayChipText}>Plantão {TURNOS.find(x => x.key === t)?.label || t}</Text>
-              </View>
-            ))}
-            {selDayBlocks.map(b => (
-              <View key={b.id} style={s.selDayChip}>
-                <View style={[s.selDayDot, { backgroundColor: b.color || C.warning }]} />
-                <Text style={s.selDayChipText}>{b.label}{b.mode === 'time' ? ` ${b.startTime}–${b.endTime}` : ''}</Text>
-              </View>
-            ))}
-            {selDayEvents.map(e => (
-              <View key={e.id} style={s.selDayChip}>
-                <View style={[s.selDayDot, { backgroundColor: e.color || C.info }]} />
-                <Text style={s.selDayChipText}>{e.label}{e.mode === 'time' ? ` ${e.startTime}–${e.endTime}` : ` (${(e.turnos || []).map(t => TURNOS.find(x => x.key === t)?.label || t).join(', ')})`}</Text>
-              </View>
-            ))}
-            </>
+            <Text style={s.dayBarEmpty}>Sem eventos neste dia.</Text>
           )}
         </View>
       </View>
 
-      {/* Testar encaixe no dia selecionado */}
-      <View style={s.card}>
-        <Text style={s.cardTitle}>Simular plantão</Text>
-        <Text style={s.cardHint}>Em {_fmtDate(testDate)} — toque nos turnos que quer testar.</Text>
+      {/* Simular */}
+      <View style={s.heroCard2}>
+        <SectionTitle kicker="Testar" title="Simular plantão" />
+        <Text style={s.simHint}>Escolha turnos para ver se cabem no dia <Text style={s.simHintStrong}>{_fmtDate(testDate)}</Text>.</Text>
 
         <View style={s.turnoRow}>
           {TURNOS.map(t => {
             const active = testTurnos.includes(t.key);
             const occupied = selDayTypes.includes(t.key);
+            const c = shiftColor(t.key, dark);
             return (
-              <Pressable key={t.key} onPress={() => toggleTestTurno(t.key)} style={[s.turnoChip, active && { backgroundColor: C.primary, borderColor: C.primary }]}>
+              <Pressable key={t.key} onPress={() => toggleTestTurno(t.key)} style={[s.turnoChip, active && { backgroundColor: c, borderColor: 'transparent' }]}>
                 <Text style={[s.turnoText, active && { color: '#fff' }]}>{t.label}</Text>
-                {occupied && <Text style={[s.turnoTag, active && { color: '#fff' }]}>já tem</Text>}
+                {occupied && <Text style={[s.turnoTag, active && { color: 'rgba(255,255,255,0.85)' }]}>já tem</Text>}
               </Pressable>
             );
           })}
         </View>
 
-        {testResults.map(r => {
-          const v = verdictStyle(r.verdict);
-          return (
-            <View key={r.turno} style={[s.turnoResult, { borderLeftColor: v.color }]}>
-              <View style={s.turnoResultHead}>
-                <Text style={s.turnoResultLabel}>{r.label}</Text>
-                <View style={[s.turnoResultPill, { backgroundColor: v.bg }]}>
-                  <Ionicons name={v.icon} size={13} color={v.color} />
-                  <Text style={[s.turnoResultPillText, { color: v.color }]}>{v.text}</Text>
+        {testTurnos.length === 0 ? (
+          <Text style={s.simEmpty}>Selecione um turno acima para simular.</Text>
+        ) : (
+          <View style={{ gap: 10 }}>
+            {testResults.map(r => {
+              const v = verdictStyle(r.verdict);
+              const c = shiftColor(r.turno, dark);
+              const headIcon = v.icon === 'checkmark-circle' ? 'checkmark' : v.icon === 'alert-circle' ? 'warning' : 'close';
+              return (
+                <View key={r.turno} style={[s.verdictCard, { borderColor: v.color + (dark ? '55' : '40') }]}>
+                  <View style={[s.verdictHead, { backgroundColor: v.bg }]}>
+                    <View style={[s.verdictHeadIcon, { backgroundColor: v.color }]}>
+                      <Ionicons name={headIcon} size={14} color="#fff" />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[s.verdictTurno, { color: v.color }]}>{r.label.toUpperCase()}</Text>
+                      <Text style={s.verdictLabel}>{v.text}</Text>
+                    </View>
+                    <View style={[s.verdictDot, { backgroundColor: c }]} />
+                  </View>
+                  <View style={s.verdictBody}>
+                    {r.violations.length === 0 ? (
+                      <View style={s.reasonRow}>
+                        <Ionicons name="checkmark-circle" size={15} color={C.money} />
+                        <View style={{ flex: 1 }}>
+                          <Text style={[s.reasonTitle, { color: C.money }]}>Sem conflitos</Text>
+                          <Text style={s.reasonSub}>encaixa tranquilo no seu dia</Text>
+                        </View>
+                      </View>
+                    ) : r.violations.map((vi, i) => (
+                      <View key={i} style={[s.reasonRow, i > 0 && s.reasonDivider]}>
+                        <Ionicons name={ruleIcon(vi.rule)} size={15} color={reasonColor(vi.severity)} style={{ marginTop: 1 }} />
+                        <Text style={[s.reasonTitle, { flex: 1, color: reasonColor(vi.severity) }]}>{vi.message}</Text>
+                      </View>
+                    ))}
+                  </View>
                 </View>
-              </View>
-              {(r.violations || []).map((vi, i) => (
-                <Text key={i} style={[s.resultReason, { color: reasonColor(vi.severity) }]}>• {vi.message}</Text>
-              ))}
-            </View>
-          );
-        })}
+              );
+            })}
+          </View>
+        )}
       </View>
 
-
-      {/* Bater a meta de horas */}
+      {/* Bater a meta */}
       {targetHours > 0 && (
         <View style={s.card}>
-          <Text style={s.cardTitle}>Bater a meta</Text>
-          {gapMin === 0 ? (
-            <Text style={[s.cardHint, { color: C.money }]}>
-              Meta de {targetHours}h batida — {formatMinutes(scheduledMin)} agendadas. 🎉
-            </Text>
-          ) : (
-            <>
-              <Text style={s.cardHint}>
-                {formatMinutes(scheduledMin)} de {targetHours}h · faltam {formatMinutes(gapMin)}.
-              </Text>
-              <View style={s.progressTrack}>
-                <View style={[s.progressFill, { width: `${Math.min(100, (scheduledMin / (targetHours * 60)) * 100)}%` }]} />
+          <SectionTitle kicker="Meta de horas" title="Bater a meta" right={<Ionicons name="locate" size={18} color={C.primary} />} />
+
+          <View style={s.metaRow}>
+            <View style={{ flexDirection: 'row', alignItems: 'baseline' }}>
+              <Text style={s.metaBig}>{formatMinutes(scheduledMin)}</Text>
+              <Text style={s.metaOf}> / {targetHours}h</Text>
+            </View>
+            {gapMin > 0 ? (
+              <View style={s.metaGapPill}>
+                <Text style={[s.metaGapText, { color: C.warning }]}>faltam {formatMinutes(gapMin)}</Text>
               </View>
-              {suggestions.length === 0 ? (
-                <Text style={[s.cardHint, { marginTop: Spacing.sm }]}>
-                  Nenhum dia livre seguro neste mês — reveja seus compromissos.
-                </Text>
-              ) : (
-                <>
-                  <Text style={[s.cardHint, { marginTop: Spacing.sm }]}>Dias bons pra completar:</Text>
-                  {suggestions.slice(0, 8).map(({ dateKey, safeTurnos, opening }) => (
-                    <Pressable key={dateKey} style={s.suggestRow} onPress={() => setTestDate(dateKey)}>
-                      <View style={[s.suggestDot, { backgroundColor: C.money }]} />
-                      <Text style={s.suggestDate}>{_fmtDate(dateKey)}</Text>
-                      <Text style={s.suggestTurnos}>{safeTurnos.map(t => TURNOS.find(x => x.key === t)?.label || t).join(' / ')}</Text>
-                      {opening && (
-                        <View style={s.suggestVaga}>
-                          <Ionicons name="megaphone-outline" size={12} color={C.money} />
-                          <Text style={s.suggestVagaText}>vaga</Text>
+            ) : (
+              <View style={[s.metaGapPill, { backgroundColor: C.moneySoft }]}>
+                <Text style={[s.metaGapText, { color: C.money }]}>meta batida</Text>
+              </View>
+            )}
+          </View>
+          <View style={s.progressTrack}>
+            <LinearGradient
+              colors={[C.primary, C.money]}
+              start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+              style={[s.progressFill, { width: `${Math.min(100, (scheduledMin / (targetHours * 60)) * 100)}%` }]}
+            />
+          </View>
+
+          {gapMin > 0 && (
+            suggestions.length === 0 ? (
+              <View style={s.metaEmptyRow}>
+                <Ionicons name="alert-circle-outline" size={15} color={C.text.tertiary} />
+                <Text style={s.metaEmptyText}>Nenhum dia livre seguro neste mês — reveja seus compromissos.</Text>
+              </View>
+            ) : (
+              <>
+                <Text style={s.metaSubhead}>DIAS BONS PRA COMPLETAR</Text>
+                <View style={{ gap: 8 }}>
+                  {suggestions.slice(0, 8).map(({ dateKey, safeTurnos, opening }) => {
+                    const d = new Date(`${dateKey}T00:00:00`);
+                    return (
+                      <Pressable key={dateKey} style={[s.goodDay, dateKey === testDate && { borderColor: C.primary }]} onPress={() => { setTestDate(dateKey); if (safeTurnos?.length) setTestTurnos([...safeTurnos]); }}>
+                        <View style={s.goodDayDate}>
+                          <Text style={s.goodDayNum}>{d.getDate()}</Text>
+                          <Text style={s.goodDayWd}>{WEEKDAYS[d.getDay()]}</Text>
                         </View>
-                      )}
-                    </Pressable>
-                  ))}
-                  {ranked.some(r => r.evaluation.verdict !== VERDICT.BLOCKED) && (
-                    <Pressable style={s.suggestLink} onPress={() => navigation?.navigate?.((user?.source === 'aurora' || user?.auroraOnlyMode) ? 'OpeningsScreen' : 'NetworkVacanciesScreen')}>
-                      <Text style={s.suggestLinkText}>Ver vagas abertas</Text>
-                      <Ionicons name="chevron-forward" size={16} color={C.primary} />
-                    </Pressable>
-                  )}
-                </>
-              )}
-            </>
+                        <View style={s.goodDayTurnos}>
+                          {safeTurnos.map(t => {
+                            const c = shiftColor(t, dark);
+                            return (
+                              <View key={t} style={[s.goodDayChip, { backgroundColor: c + (dark ? '22' : '18') }]}>
+                                <Text style={[s.goodDayChipText, { color: c }]}>{TURNOS.find(x => x.key === t)?.label || t}</Text>
+                              </View>
+                            );
+                          })}
+                        </View>
+                        {opening && (
+                          <View style={s.goodDayVaga}>
+                            <View style={[s.calVagaRing, s.legendRing, { borderColor: C.money }]} />
+                            <Text style={s.goodDayVagaText}>vaga</Text>
+                          </View>
+                        )}
+                      </Pressable>
+                    );
+                  })}
+                </View>
+                {!isViewOnly(user) && ranked.some(r => r.evaluation.verdict !== VERDICT.BLOCKED) && (
+                  <Pressable style={s.metaLink} onPress={() => navigation?.navigate?.(isAuroraOnly(user) ? 'OpeningsScreen' : 'NetworkVacanciesScreen')}>
+                    <Text style={s.metaLinkText}>Ver vagas abertas</Text>
+                    <Ionicons name="arrow-forward" size={15} color={C.primary} />
+                  </Pressable>
+                )}
+              </>
+            )
           )}
         </View>
       )}
 
-
       {/* Vagas avaliadas */}
-      <View style={s.card}>
-        <Text style={s.cardTitle}>Vagas avaliadas</Text>
-        {ranked.length === 0 ? (
-          <Text style={s.cardHint}>Nenhuma vaga disponível nos seus grupos agora.</Text>
-        ) : (
-          ranked.map(({ opening, interval, evaluation }) => {
+      <SectionTitle kicker="Suas redes" title="Vagas avaliadas" right={ranked.length > 0 ? <Text style={s.vagaCount}>{ranked.length}</Text> : null} />
+      {ranked.length === 0 ? (
+        <View style={s.card}><Text style={s.cardHint}>Nenhuma vaga disponível nos seus grupos agora.</Text></View>
+      ) : (
+        <View style={{ gap: 9 }}>
+          {ranked.map(({ opening, interval, evaluation }) => {
             const v = verdictStyle(evaluation.verdict);
+            const d = interval?.dateKey ? new Date(`${interval.dateKey}T00:00:00`) : null;
+            const c = shiftColor(interval?.label, dark);
             return (
-              <View key={opening.id} style={s.vagaRow}>
-                <View style={[s.vagaBadge, { backgroundColor: v.bg }]}>
-                  <Text style={[s.vagaBadgeText, { color: v.color }]}>{interval?.label || '?'}</Text>
+              <View key={opening.id} style={s.vagaCard}>
+                <View style={s.goodDayDate}>
+                  <Text style={s.goodDayNum}>{d ? d.getDate() : '?'}</Text>
+                  <Text style={s.goodDayWd}>{d ? WEEKDAYS[d.getDay()] : ''}</Text>
                 </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.vagaDate}>{_fmtDate(interval?.dateKey)}</Text>
-                  <Text style={s.vagaGroup} numberOfLines={1}>{opening.group?.name || 'Plantão'}</Text>
+                <View style={s.vagaDivider} />
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <View style={s.vagaTitleRow}>
+                    <View style={[s.vagaTurnoDot, { backgroundColor: c }]} />
+                    <Text style={s.vagaTurno}>{TURNOS.find(x => x.key === interval?.label)?.label || interval?.label || 'Plantão'}</Text>
+                    <Text style={s.vagaGroup} numberOfLines={1}>· {opening.group?.name || 'Plantão'}</Text>
+                  </View>
                   {evaluation.violations?.[0] && (
-                    <Text style={[s.vagaReason, { color: reasonColor(evaluation.violations[0].severity) }]} numberOfLines={2}>{evaluation.violations[0].message}</Text>
+                    <Text style={[s.vagaReason, { color: reasonColor(evaluation.violations[0].severity) }]} numberOfLines={1}>{evaluation.violations[0].message}</Text>
                   )}
                 </View>
                 <View style={[s.vagaPill, { backgroundColor: v.bg }]}>
-                  <Ionicons name={v.icon} size={13} color={v.color} />
+                  <Ionicons name={v.icon} size={12} color={v.color} />
                   <Text style={[s.vagaPillText, { color: v.color }]}>{v.text}</Text>
                 </View>
               </View>
             );
-          })
-        )}
-      </View>
+          })}
+        </View>
+      )}
     </ScrollView>
   );
 }
@@ -561,11 +670,20 @@ const makeStyles = (C) => StyleSheet.create({
   root: { flex: 1, backgroundColor: C.background.secondary },
   center: { alignItems: 'center', justifyContent: 'center' },
 
-  intro: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm, marginBottom: Spacing.md },
-  introText: { flex: 1, fontSize: Typography.fontSize.subhead, fontFamily: Typography.fontFamily.regular, color: C.text.secondary },
+  // Intro
+  intro: { flexDirection: 'row', alignItems: 'center', gap: Spacing.element, paddingHorizontal: 2, marginBottom: Spacing.md },
+  introIcon: { width: 38, height: 38, borderRadius: BorderRadius.md, backgroundColor: C.accentSoft, alignItems: 'center', justifyContent: 'center' },
+  introText: { flex: 1, fontSize: Typography.fontSize.subhead, fontFamily: Typography.fontFamily.regular, color: C.text.secondary, lineHeight: 20 },
+  introStrong: { fontFamily: Typography.fontFamily.bold, color: C.text.primary },
 
+  // Section title (kicker mono + heading)
+  sectionTitle: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', marginHorizontal: 2, marginBottom: Spacing.element },
+  sectionKicker: { fontSize: 10, fontFamily: Typography.fontFamily.bold, letterSpacing: 1.2, textTransform: 'uppercase', color: C.text.tertiary },
+  sectionHeading: { fontSize: Typography.fontSize.headline, fontFamily: Typography.fontFamily.bold, color: C.text.primary, letterSpacing: -0.3, marginTop: 2 },
+
+  // Cards
   card: {
-    backgroundColor: C.background.elevated,
+    backgroundColor: C.background.card,
     borderRadius: BorderRadius.lg,
     borderWidth: 0.5,
     borderColor: C.border.light,
@@ -573,79 +691,138 @@ const makeStyles = (C) => StyleSheet.create({
     marginBottom: Spacing.md,
     ...Shadows.small,
   },
-  cardTitle: { fontSize: Typography.fontSize.headline, fontFamily: Typography.fontFamily.semiBold, color: C.text.primary },
-  cardHint: { fontSize: Typography.fontSize.footnote, fontFamily: Typography.fontFamily.regular, color: C.text.tertiary, marginTop: 2 },
+  heroCard: {
+    backgroundColor: C.background.card,
+    borderRadius: BorderRadius.xl,
+    borderWidth: 0.5,
+    borderColor: C.border.light,
+    paddingBottom: 4,
+    marginBottom: Spacing.md,
+    ...Shadows.medium,
+  },
+  heroCard2: {
+    backgroundColor: C.background.card,
+    borderRadius: BorderRadius.xl,
+    borderWidth: 0.5,
+    borderColor: C.border.light,
+    padding: Spacing.card,
+    marginBottom: Spacing.md,
+    ...Shadows.medium,
+  },
+  cardHint: { fontSize: Typography.fontSize.footnote, fontFamily: Typography.fontFamily.regular, color: C.text.tertiary },
 
-  statsRow: { flexDirection: 'row', marginTop: Spacing.md },
-  stat: { flex: 1, alignItems: 'center' },
-  statValue: { fontSize: Typography.fontSize.title2, fontFamily: Typography.fontFamily.bold, color: C.text.primary },
-  statLabel: { fontSize: Typography.fontSize.caption2, fontFamily: Typography.fontFamily.regular, color: C.text.tertiary, textAlign: 'center', marginTop: 2 },
-
-  alertRow: { flexDirection: 'row', alignItems: 'flex-start', gap: Spacing.xs, marginTop: Spacing.sm },
-  alertText: { flex: 1, fontSize: Typography.fontSize.footnote, color: C.text.secondary },
-
-  // Calendário
-  calHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: Spacing.md },
-  calTitle: { fontSize: Typography.fontSize.headline, fontFamily: Typography.fontFamily.semiBold, color: C.text.primary },
-  calWeekRow: { flexDirection: 'row', marginBottom: Spacing.xs },
-  calWeekday: { flex: 1, textAlign: 'center', fontSize: Typography.fontSize.caption2, color: C.text.tertiary, fontFamily: Typography.fontFamily.semiBold },
-  calRow: { flexDirection: 'row' },
-  calCell: { flex: 1, aspectRatio: 1, padding: 2, alignItems: 'center', justifyContent: 'center' },
-  calDay: { width: '100%', height: '100%', borderRadius: BorderRadius.sm, alignItems: 'center', justifyContent: 'center', borderWidth: 0, borderColor: 'transparent' },
-  calDayNum: { fontSize: Typography.fontSize.subhead, color: C.text.primary, fontFamily: Typography.fontFamily.regular },
-  calDots: { flexDirection: 'row', gap: 2, height: 6, marginTop: 2, alignItems: 'center' },
-  calDot: { width: 5, height: 5, borderRadius: 2.5 },
-  calDotBlock: { borderRadius: 1 }, // quadradinho pra diferenciar compromisso
-  calVagaDot: { width: 6, height: 6, borderRadius: 3, borderWidth: 1.5, backgroundColor: 'transparent' }, // anel = vaga aberta
-  calLegend: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: Spacing.md, flexWrap: 'wrap' },
-  calLegendText: { fontSize: Typography.fontSize.caption2, color: C.text.tertiary },
-  calSwatch: { width: 12, height: 12, borderRadius: 3 },
-
-  // O que tem no dia (legenda compacta abaixo do calendário)
-  selDayBar: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: Spacing.sm, marginTop: Spacing.md, paddingTop: Spacing.md, borderTopWidth: 0.5, borderTopColor: C.border.light },
-  selDayLabel: { fontSize: Typography.fontSize.footnote, fontFamily: Typography.fontFamily.semiBold, color: C.text.primary },
-  selDayChip: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: C.background.secondary, paddingHorizontal: Spacing.sm, paddingVertical: 3, borderRadius: BorderRadius.pill },
-  selDayDot: { width: 7, height: 7, borderRadius: 3.5 },
-  selDayChipText: { fontSize: Typography.fontSize.caption1, color: C.text.secondary },
-  selDayEmpty: { fontSize: Typography.fontSize.footnote, color: C.text.tertiary, fontStyle: 'italic' },
-
-  progressTrack: { height: 8, borderRadius: 4, backgroundColor: C.background.secondary, marginTop: Spacing.sm, overflow: 'hidden' },
-  progressFill: { height: '100%', borderRadius: 4, backgroundColor: C.money },
-  suggestRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm, paddingVertical: Spacing.xs, marginTop: Spacing.xs },
-  suggestDot: { width: 7, height: 7, borderRadius: 3.5 },
-  suggestDate: { fontSize: Typography.fontSize.subhead, color: C.text.primary, fontFamily: Typography.fontFamily.semiBold },
-  suggestTurnos: { flex: 1, fontSize: Typography.fontSize.footnote, color: C.text.secondary },
-  suggestVaga: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: C.moneySoft, paddingHorizontal: Spacing.sm, paddingVertical: 2, borderRadius: BorderRadius.pill },
-  suggestVagaText: { fontSize: Typography.fontSize.caption2, color: C.money, fontFamily: Typography.fontFamily.semiBold },
-  suggestLink: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, marginTop: Spacing.sm },
-  suggestLinkText: { fontSize: Typography.fontSize.subhead, color: C.primary, fontFamily: Typography.fontFamily.semiBold },
-
-  turnoRow: { flexDirection: 'row', gap: Spacing.sm, marginTop: Spacing.md },
-  turnoChip: { flex: 1, paddingVertical: Spacing.sm, borderRadius: BorderRadius.sm, borderWidth: 0.5, borderColor: C.border.light, alignItems: 'center', backgroundColor: C.background.primary },
-  turnoText: { fontSize: Typography.fontSize.subhead, fontFamily: Typography.fontFamily.semiBold, color: C.text.secondary },
-  turnoTag: { fontSize: Typography.fontSize.caption3, color: C.text.tertiary, marginTop: 1 },
-
-  turnoResult: { marginTop: Spacing.md, paddingLeft: Spacing.md, borderLeftWidth: 3 },
-  turnoResultHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  turnoResultLabel: { fontSize: Typography.fontSize.body, fontFamily: Typography.fontFamily.semiBold, color: C.text.primary },
-  turnoResultPill: { flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: Spacing.sm, paddingVertical: 3, borderRadius: BorderRadius.pill },
-  turnoResultPillText: { fontSize: Typography.fontSize.caption2, fontFamily: Typography.fontFamily.semiBold },
-  resultReason: { fontSize: Typography.fontSize.footnote, color: C.text.secondary, marginTop: Spacing.xs },
-
-  vagaRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm, marginTop: Spacing.md },
-  vagaBadge: { width: 34, height: 34, borderRadius: BorderRadius.sm, alignItems: 'center', justifyContent: 'center' },
-  vagaBadgeText: { fontSize: Typography.fontSize.body, fontFamily: Typography.fontFamily.bold },
-  vagaDate: { fontSize: Typography.fontSize.subhead, fontFamily: Typography.fontFamily.semiBold, color: C.text.primary },
-  vagaGroup: { fontSize: Typography.fontSize.footnote, color: C.text.secondary },
-  vagaReason: { fontSize: Typography.fontSize.caption1, marginTop: 1 },
-  vagaPill: { flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: Spacing.sm, paddingVertical: 4, borderRadius: BorderRadius.pill },
-  vagaPillText: { fontSize: Typography.fontSize.caption2, fontFamily: Typography.fontFamily.semiBold },
-
-  manageBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: Spacing.sm,
-    backgroundColor: C.background.elevated, borderRadius: BorderRadius.lg, borderWidth: 0.5, borderColor: C.border.light,
-    padding: Spacing.card, ...Shadows.small,
+  // Parâmetros
+  paramRow: {
+    flexDirection: 'row', alignItems: 'center', gap: Spacing.element,
+    backgroundColor: C.background.card, borderRadius: BorderRadius.md, borderWidth: 0.5, borderColor: C.border.light,
+    paddingVertical: 13, paddingHorizontal: 15, ...Shadows.small,
     marginBottom: Spacing.md,
   },
-  manageText: { flex: 1, fontSize: Typography.fontSize.body, fontFamily: Typography.fontFamily.semiBold, color: C.text.primary },
+  paramIcon: { width: 30, height: 30, borderRadius: 9, backgroundColor: C.background.secondary, alignItems: 'center', justifyContent: 'center' },
+  paramTitle: { fontSize: Typography.fontSize.subhead, fontFamily: Typography.fontFamily.bold, color: C.text.primary },
+  paramSub: { fontSize: Typography.fontSize.caption1, color: C.text.tertiary, marginTop: 1 },
+
+  // Panorama
+  statsRow: { flexDirection: 'row' },
+  stat: { flex: 1, alignItems: 'center' },
+  statDivider: { borderLeftWidth: 0.5, borderLeftColor: C.border.light },
+  statValue: { fontSize: Typography.fontSize.title2, fontFamily: Typography.fontFamily.bold, color: C.text.primary, letterSpacing: -0.6 },
+  statLabel: { fontSize: Typography.fontSize.caption2, fontFamily: Typography.fontFamily.semiBold, color: C.text.tertiary, textAlign: 'center', marginTop: 2 },
+  alertsWrap: { marginTop: Spacing.element, paddingTop: Spacing.element, borderTopWidth: 0.5, borderTopColor: C.border.light, gap: Spacing.sm },
+  alertRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm },
+  alertText: { flex: 1, fontSize: Typography.fontSize.footnote, color: C.text.secondary, lineHeight: 17 },
+
+  // Calendário
+  calHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: Spacing.md, paddingTop: 15, paddingBottom: Spacing.element },
+  calTitle: { fontSize: Typography.fontSize.callout, fontFamily: Typography.fontFamily.bold, color: C.text.primary, letterSpacing: -0.2 },
+  calNavBtn: { width: 34, height: 34, borderRadius: BorderRadius.sm, backgroundColor: C.background.secondary, alignItems: 'center', justifyContent: 'center' },
+  calWeekRow: { flexDirection: 'row', paddingHorizontal: 10, marginBottom: Spacing.xs },
+  calWeekday: { flex: 1, textAlign: 'center', fontSize: Typography.fontSize.caption3, color: C.text.tertiary, fontFamily: Typography.fontFamily.bold, letterSpacing: 0.3 },
+  calRow: { flexDirection: 'row', paddingHorizontal: 10 },
+  calCell: { flex: 1, aspectRatio: 1, padding: 1.5 },
+  calDay: { flex: 1, borderRadius: 11, alignItems: 'center', justifyContent: 'center', gap: 3, borderWidth: 1.5, borderColor: 'transparent', overflow: 'hidden' },
+  calToday: { borderColor: C.primary },
+  calFloor: { position: 'absolute', left: 7, right: 7, bottom: 4, height: 2.5, borderRadius: 2, opacity: 0.85 },
+  calVagaRing: { position: 'absolute', top: 4, right: 4, width: 8, height: 8, borderRadius: 4, borderWidth: 1.6, backgroundColor: 'transparent' },
+  calCompSquare: { position: 'absolute', top: 5, left: 5, width: 6, height: 6, borderRadius: 2 },
+  calDayNum: { fontSize: Typography.fontSize.subhead, color: C.text.primary, fontFamily: Typography.fontFamily.regular, lineHeight: 16 },
+  calDots: { flexDirection: 'row', gap: 3, height: 5, alignItems: 'center', justifyContent: 'center' },
+  calDot: { width: 5, height: 5, borderRadius: 2.5 },
+
+  // Legenda
+  calLegend: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', rowGap: 8, columnGap: 14, marginHorizontal: Spacing.md, marginTop: 4, paddingTop: Spacing.element, borderTopWidth: 0.5, borderTopColor: C.border.light },
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  legendSwatch: { width: 16, height: 8, borderRadius: 3, justifyContent: 'flex-end', overflow: 'hidden' },
+  legendSwatchFloor: { position: 'absolute', left: 2, right: 2, bottom: 1.5, height: 2, borderRadius: 1 },
+  legendRing: { position: 'relative', top: 0, right: 0, width: 9, height: 9, borderRadius: 4.5 },
+  legendText: { fontSize: Typography.fontSize.caption1, color: C.text.secondary, fontFamily: Typography.fontFamily.semiBold },
+
+  // Barra do dia selecionado
+  dayBar: { margin: Spacing.element, marginTop: Spacing.element, padding: 12, paddingHorizontal: 14, borderRadius: BorderRadius.md, backgroundColor: C.background.secondary, borderWidth: 0.5, borderColor: C.border.light },
+  dayBarHead: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm },
+  dayBarTitle: { fontSize: Typography.fontSize.footnote, fontFamily: Typography.fontFamily.bold, color: C.text.primary, textTransform: 'capitalize' },
+  dayBarChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 9 },
+  dayChip: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 9, paddingVertical: 4, borderRadius: BorderRadius.pill },
+  dayChipDot: { width: 5, height: 5, borderRadius: 2.5 },
+  dayChipText: { fontSize: Typography.fontSize.caption1, fontFamily: Typography.fontFamily.bold },
+  dayBarBlocked: { fontSize: Typography.fontSize.caption1, color: C.error, fontFamily: Typography.fontFamily.semiBold, marginTop: 9 },
+  dayBarEmpty: { fontSize: Typography.fontSize.caption1, color: C.text.tertiary, marginTop: 9 },
+
+  // Simular
+  simHint: { fontSize: Typography.fontSize.caption1, color: C.text.tertiary, marginTop: 2, marginBottom: Spacing.element, marginHorizontal: 2, lineHeight: 16 },
+  simHintStrong: { fontFamily: Typography.fontFamily.bold, color: C.text.secondary },
+  simEmpty: { fontSize: Typography.fontSize.footnote, color: C.text.tertiary, textAlign: 'center', paddingVertical: 24 },
+  turnoRow: { flexDirection: 'row', gap: Spacing.sm, marginBottom: Spacing.element },
+  turnoChip: { flex: 1, paddingVertical: 11, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: C.border.light, alignItems: 'center', backgroundColor: C.background.secondary },
+  turnoText: { fontSize: Typography.fontSize.subhead, fontFamily: Typography.fontFamily.bold, color: C.text.secondary },
+  turnoTag: { fontSize: Typography.fontSize.caption3, color: C.text.tertiary, marginTop: 1 },
+
+  // Verdict card
+  verdictCard: { borderWidth: 0.5, borderRadius: BorderRadius.lg, overflow: 'hidden' },
+  verdictHead: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 13, paddingVertical: 10 },
+  verdictHeadIcon: { width: 26, height: 26, borderRadius: BorderRadius.sm, alignItems: 'center', justifyContent: 'center' },
+  verdictTurno: { fontSize: Typography.fontSize.caption2, fontFamily: Typography.fontFamily.bold, letterSpacing: 0.5 },
+  verdictLabel: { fontSize: Typography.fontSize.subhead, fontFamily: Typography.fontFamily.bold, color: C.text.primary, letterSpacing: -0.2, marginTop: 1 },
+  verdictDot: { width: 9, height: 9, borderRadius: 4.5 },
+  verdictBody: { backgroundColor: C.background.card, paddingHorizontal: 13, paddingVertical: 5 },
+  reasonRow: { flexDirection: 'row', alignItems: 'flex-start', gap: Spacing.sm, paddingVertical: 8 },
+  reasonDivider: { borderTopWidth: 0.5, borderTopColor: C.border.light },
+  reasonTitle: { fontSize: Typography.fontSize.footnote, fontFamily: Typography.fontFamily.bold, color: C.text.primary, lineHeight: 17 },
+  reasonSub: { fontSize: Typography.fontSize.caption1, color: C.text.tertiary, marginTop: 1 },
+
+  // Meta
+  metaRow: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', marginTop: Spacing.element, marginBottom: 10 },
+  metaBig: { fontSize: Typography.fontSize.title1, fontFamily: Typography.fontFamily.bold, color: C.text.primary, letterSpacing: -1 },
+  metaOf: { fontSize: Typography.fontSize.callout, fontFamily: Typography.fontFamily.semiBold, color: C.text.tertiary },
+  metaGapPill: { flexDirection: 'row', alignItems: 'center', backgroundColor: C.warningSoft, paddingHorizontal: 11, paddingVertical: 5, borderRadius: BorderRadius.pill },
+  metaGapText: { fontSize: Typography.fontSize.caption1, fontFamily: Typography.fontFamily.bold },
+  progressTrack: { height: 9, borderRadius: 6, backgroundColor: C.background.secondary, marginBottom: Spacing.md, overflow: 'hidden' },
+  progressFill: { height: '100%', borderRadius: 6 },
+  metaSubhead: { fontSize: 10, fontFamily: Typography.fontFamily.bold, letterSpacing: 0.8, color: C.text.tertiary, marginHorizontal: 2, marginBottom: 9 },
+  metaEmptyRow: { flexDirection: 'row', alignItems: 'flex-start', gap: Spacing.xs, marginTop: Spacing.md },
+  metaEmptyText: { flex: 1, fontSize: Typography.fontSize.footnote, color: C.text.tertiary },
+
+  goodDay: { flexDirection: 'row', alignItems: 'center', gap: 11, paddingVertical: 9, paddingHorizontal: 11, borderRadius: BorderRadius.md, backgroundColor: C.background.secondary, borderWidth: 0.5, borderColor: C.border.light },
+  goodDayDate: { width: 34, alignItems: 'center' },
+  goodDayNum: { fontSize: Typography.fontSize.callout, fontFamily: Typography.fontFamily.bold, color: C.text.primary, lineHeight: 18 },
+  goodDayWd: { fontSize: Typography.fontSize.caption3, color: C.text.tertiary, marginTop: 1 },
+  goodDayTurnos: { flex: 1, flexDirection: 'row', gap: 6 },
+  goodDayChip: { paddingHorizontal: 9, paddingVertical: 3, borderRadius: BorderRadius.pill },
+  goodDayChipText: { fontSize: Typography.fontSize.caption1, fontFamily: Typography.fontFamily.bold },
+  goodDayVaga: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  goodDayVagaText: { fontSize: Typography.fontSize.caption2, color: C.money, fontFamily: Typography.fontFamily.bold },
+  metaLink: { flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 13 },
+  metaLinkText: { fontSize: Typography.fontSize.subhead, color: C.primary, fontFamily: Typography.fontFamily.bold },
+
+  // Vagas avaliadas
+  vagaCount: { fontSize: Typography.fontSize.footnote, color: C.text.tertiary, fontFamily: Typography.fontFamily.bold },
+  vagaCard: { flexDirection: 'row', alignItems: 'center', gap: Spacing.element, backgroundColor: C.background.card, borderRadius: BorderRadius.md, borderWidth: 0.5, borderColor: C.border.light, paddingVertical: 11, paddingHorizontal: 13, ...Shadows.small },
+  vagaDivider: { width: 1, alignSelf: 'stretch', backgroundColor: C.border.light },
+  vagaTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 7 },
+  vagaTurnoDot: { width: 7, height: 7, borderRadius: 3.5 },
+  vagaTurno: { fontSize: Typography.fontSize.subhead, fontFamily: Typography.fontFamily.bold, color: C.text.primary },
+  vagaGroup: { flex: 1, fontSize: Typography.fontSize.caption1, color: C.text.tertiary },
+  vagaReason: { fontSize: Typography.fontSize.caption1, marginTop: 3 },
+  vagaPill: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 9, paddingVertical: 4, borderRadius: BorderRadius.pill },
+  vagaPillText: { fontSize: Typography.fontSize.caption2, fontFamily: Typography.fontFamily.bold },
 });

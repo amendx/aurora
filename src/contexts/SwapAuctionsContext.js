@@ -14,6 +14,7 @@
 
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { AuthContext } from '../context/AuthContext';
+import { isViewOnly } from '../utils/userSource';
 import { useGroups } from './GroupsContext';
 import FirebaseAdapter from '../services/firebase/FirebaseAdapter';
 import Logger from '../utils/Logger';
@@ -117,6 +118,9 @@ export const SwapAuctionsProvider = ({ children }) => {
   useEffect(() => { refresh(); }, [refresh]);
 
   const createAuction = useCallback(async ({ shift, preferences }) => {
+    // Leilão (troca aberta ao grupo) descontinuado — criação desabilitada.
+    return { success: false, reason: 'disabled' };
+    // eslint-disable-next-line no-unreachable
     if (!userId || !shift?.id) return { success: false };
     const auctionId = `auc_${_id()}`;
     const expiresAt = shift.startISO || (shift.date ? `${shift.date}T00:00:00` : null);
@@ -148,6 +152,7 @@ export const SwapAuctionsProvider = ({ children }) => {
   }, [userId]);
 
   const submitBid = useCallback(async (auction, candidateShift) => {
+    if (isViewOnly(user)) return { success: false, reason: 'view_only' };
     if (!userId || !auction?.id || !candidateShift?.id) return { success: false };
     if (!isBidCompatible(auction, candidateShift)) {
       return { success: false, reason: 'incompatible' };
@@ -173,6 +178,7 @@ export const SwapAuctionsProvider = ({ children }) => {
   }, []);
 
   const acceptBid = useCallback(async (auction, bid) => {
+    if (isViewOnly(user)) return { success: false, reason: 'view_only' };
     if (!userId || !auction?.id || !bid?.id) return { success: false };
     if (String(auction.initiatorUserId) !== userId) return { success: false, reason: 'not_initiator' };
     const result = await FirebaseAdapter.acceptBid(

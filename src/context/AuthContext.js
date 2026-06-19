@@ -222,64 +222,85 @@ export const AuthProvider = ({ children }) => {
       }
 
       // ── Step 2: WebClient API (original PlantaoAPI users) ─────────────────
-      const result = await WebClientApiService.login(email, password);
-
-      let apiData = null;
-      if (result && result.message && result.data) {
-        apiData = result.data;
-      } else if (result && result.success && result.data) {
-        apiData = result.data.data || result.data;
-      }
-
-      if (!apiData) {
-        return { success: false, error: result?.error || 'Credenciais inválidas.' };
-      }
-
-      const extractedToken = apiData.token;
-      if (!extractedToken) {
-        return { success: false, error: 'Token não recebido pelo servidor.' };
-      }
-
-      const prevUserData = await StorageService.getUserData();
-      const wcUid = apiData.id || apiData.user_id;
-      const isFirstLogin = !prevUserData || prevUserData.id !== wcUid;
-      const fsFlags = await _loadFirestoreUserFlags(wcUid);
-
-      const userInfo = {
-        id: wcUid,
-        name: apiData.name || apiData.full_name || apiData.username || email,
-        email: apiData.email || email,
-        username: apiData.username || '',
-        role: apiData.role || '',
-        photo: apiData.photo || null,
-        council: apiData.council || { id: '', state: '' },
-        phone: apiData.phone || '',
-        is_premium: apiData.is_premium || false,
-        showOnboarding: fsFlags.showOnboarding != null
-          ? fsFlags.showOnboarding
-          : (isFirstLogin ? true : (prevUserData?.showOnboarding ?? false)),
-        auroraOnlyMode: fsFlags.auroraOnlyMode === true,
-        auroraSnapshotAt: fsFlags.auroraSnapshotAt || null,
-        // source intentionally absent — treated as 'webClient' everywhere
-      };
-
-      await StorageService.saveToken(extractedToken);
-      await StorageService.saveUserData(userInfo);
-      setToken(extractedToken);
-      setUser(userInfo);
-      setIsAuthenticated(true);
-      setThemeUserId(userInfo.id);
-      _fireMigration(userInfo.id);
-      _activateFirebase();
-      FirebaseAdapter.saveUser(userInfo.id, apiData, userInfo).catch(() => {});
-      syncCurrentMonthToFirebase(userInfo.id).catch(() => {});
-      hydratePastMonthsFromFirebase(userInfo.id, userInfo.source).catch(() => {});
-      TodayCoworkersService.compute(userInfo.id, extractedToken, userInfo.id).catch(() => {});
-
-      Logger.info(`✅ Login concluído — email: ${email} source: webClient`);
-      return { success: true };
+      return await _webClientLogin(email, password);
     } catch (error) {
       Logger.error('❌ Erro no processo de login:', error.message);
+      return { success: false, error: error.message };
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Login direto no PlantaoAPI, sem tentar Firebase antes. Usado pelo botão
+  // dedicado "Entrar com conta PlantãoAPI" (fluxo só-visualização) e como
+  // fallback do login() acima.
+  const _webClientLogin = async (email, password) => {
+    const result = await WebClientApiService.login(email, password);
+
+    let apiData = null;
+    if (result && result.message && result.data) {
+      apiData = result.data;
+    } else if (result && result.success && result.data) {
+      apiData = result.data.data || result.data;
+    }
+
+    if (!apiData) {
+      return { success: false, error: result?.error || 'Credenciais inválidas.' };
+    }
+
+    const extractedToken = apiData.token;
+    if (!extractedToken) {
+      return { success: false, error: 'Token não recebido pelo servidor.' };
+    }
+
+    const prevUserData = await StorageService.getUserData();
+    const wcUid = apiData.id || apiData.user_id;
+    const isFirstLogin = !prevUserData || prevUserData.id !== wcUid;
+    const fsFlags = await _loadFirestoreUserFlags(wcUid);
+
+    const userInfo = {
+      id: wcUid,
+      name: apiData.name || apiData.full_name || apiData.username || email,
+      email: apiData.email || email,
+      username: apiData.username || '',
+      role: apiData.role || '',
+      photo: apiData.photo || null,
+      council: apiData.council || { id: '', state: '' },
+      phone: apiData.phone || '',
+      is_premium: apiData.is_premium || false,
+      showOnboarding: fsFlags.showOnboarding != null
+        ? fsFlags.showOnboarding
+        : (isFirstLogin ? true : (prevUserData?.showOnboarding ?? false)),
+      auroraOnlyMode: fsFlags.auroraOnlyMode === true,
+      auroraSnapshotAt: fsFlags.auroraSnapshotAt || null,
+      // source intentionally absent — treated as 'webClient' (só-visualização)
+    };
+
+    await StorageService.saveToken(extractedToken);
+    await StorageService.saveUserData(userInfo);
+    setToken(extractedToken);
+    setUser(userInfo);
+    setIsAuthenticated(true);
+    setThemeUserId(userInfo.id);
+    _fireMigration(userInfo.id);
+    _activateFirebase();
+    FirebaseAdapter.saveUser(userInfo.id, apiData, userInfo).catch(() => {});
+    syncCurrentMonthToFirebase(userInfo.id).catch(() => {});
+    hydratePastMonthsFromFirebase(userInfo.id, userInfo.source).catch(() => {});
+    TodayCoworkersService.compute(userInfo.id, extractedToken, userInfo.id).catch(() => {});
+
+    Logger.info(`✅ Login concluído — email: ${email} source: webClient`);
+    return { success: true };
+  };
+
+  // Entrada dedicada PlantaoAPI (pula Firebase). Modo só-visualização.
+  const loginWebClient = async (email, password) => {
+    try {
+      setLoading(true);
+      Logger.info(`🔐 Login PlantãoAPI — email: ${email}`);
+      return await _webClientLogin(email, password);
+    } catch (error) {
+      Logger.error('❌ Erro no login PlantãoAPI:', error.message);
       return { success: false, error: error.message };
     } finally {
       setLoading(false);
@@ -459,6 +480,7 @@ export const AuthProvider = ({ children }) => {
     token,
     loading,
     login,
+    loginWebClient,
     signup,
     loginWithGoogle,
     logout,

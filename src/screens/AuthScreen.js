@@ -27,6 +27,7 @@ import * as WebBrowser from 'expo-web-browser';
 import * as Google from 'expo-auth-session/providers/google';
 import * as ImagePicker from 'expo-image-picker';
 import { AuthContext } from '../context/AuthContext';
+import SoffiaLogo from '../components/SoffiaLogo';
 import { useColors, useTheme, Typography, Spacing } from '../constants/DesignSystem';
 // import { GOOGLE_WEB_CLIENT_ID, GOOGLE_IOS_CLIENT_ID } from '../services/firebase/GoogleSignInService'; // re-enable with androidClientId
 import Logger from '../utils/Logger';
@@ -122,7 +123,7 @@ function UField({ label, value, onChangeText, placeholder, keyboardType, autoCap
 }
 
 export default function AuthScreen() {
-  const { login, loginWithGoogle, signup } = useContext(AuthContext);
+  const { login, loginWebClient, loginWithGoogle, signup } = useContext(AuthContext);
   const C = useColors();
   const { isDark, preference } = useTheme();
   const systemScheme = useColorScheme();
@@ -146,6 +147,7 @@ export default function AuthScreen() {
   const [isPasswordVisible, setPasswordVisible] = useState(false);
   const [isLoading, setIsLoading]               = useState(false);
   const [isGoogleLoading, setGoogleLoading]     = useState(false);
+  const [isSoffiaLoading, setSoffiaLoading]     = useState(false);
 
   // ── Signup state ──────────────────────────────────────────────────────────
   const [suName, setSuName]                       = useState('');
@@ -236,6 +238,14 @@ export default function AuthScreen() {
     Alert.alert('Indisponível', 'Login com Google temporariamente desabilitado.');
   };
 
+  const handleSoffiaLogin = async () => {
+    if (!email || !password) { Alert.alert('Erro', 'Por favor, preencha todos os campos'); return; }
+    setSoffiaLoading(true);
+    const result = await loginWebClient(email, password);
+    setSoffiaLoading(false);
+    if (!result.success) Alert.alert('Erro no Login', result.error || 'Falha na autenticação');
+  };
+
   const pickPhoto = async () => {
     setPickingPhoto(true);
     try {
@@ -307,6 +317,7 @@ export default function AuthScreen() {
                 isLoading={isLoading} isGoogleLoading={isGoogleLoading}
                 isEmailValid={isEmailValid} canSubmit={canSubmit}
                 handleLogin={handleLogin} handleGooglePress={handleGooglePress}
+                handleSoffiaLogin={handleSoffiaLogin} isSoffiaLoading={isSoffiaLoading}
                 onShowSignup={() => switchMode('signup')}
                 C={C} s={s}
               />
@@ -363,7 +374,7 @@ export default function AuthScreen() {
   );
 }
 
-function LoginContent({ heading, email, setEmail, password, setPassword, isPasswordVisible, setPasswordVisible, isLoading, isGoogleLoading, isEmailValid, canSubmit, handleLogin, handleGooglePress, onShowSignup, C, s }) {
+function LoginContent({ heading, email, setEmail, password, setPassword, isPasswordVisible, setPasswordVisible, isLoading, isGoogleLoading, isEmailValid, canSubmit, handleLogin, handleGooglePress, handleSoffiaLogin, isSoffiaLoading, onShowSignup, C, s }) {
   const passwordRef = useRef(null);
   return (
     <View style={s.cardScroll}>
@@ -436,9 +447,19 @@ function LoginContent({ heading, email, setEmail, password, setPassword, isPassw
         <View style={s.dividerLine} />
       </View>
 
-      <Pressable style={({ pressed }) => [s.socialBtn, s.socialBtnSubtle, pressed && { opacity: 0.8 }]}>
-        <Ionicons name="business-outline" size={16} color={C.text.tertiary} />
-        <Text style={[s.socialBtnText, { color: C.text.tertiary }]}>Entrar com conta PlantãoAPI</Text>
+      <Pressable
+        onPress={handleSoffiaLogin}
+        disabled={!canSubmit || isSoffiaLoading}
+        style={({ pressed }) => [s.socialBtn, s.socialBtnSubtle, pressed && { opacity: 0.8 }, (!canSubmit || isSoffiaLoading) && { opacity: 0.5 }]}
+      >
+        {isSoffiaLoading ? (
+          <ActivityIndicator size="small" color={C.text.tertiary} />
+        ) : (
+          <>
+            <SoffiaLogo size={18} color={C.text.tertiary} />
+            <Text style={[s.socialBtnText, { color: C.text.tertiary }]}>Entrar com Soffia</Text>
+          </>
+        )}
       </Pressable>
 
       <View style={s.signupRow}>

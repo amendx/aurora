@@ -153,6 +153,10 @@ export const isBlocked = (interval, config) => {
   let endMin = _minOfDay(interval.endMs);
   if (endMin <= startMin) endMin += DAY_MIN; // candidato cruza meia-noite
 
+  // Deslocamento mínimo entre plantão e compromisso/evento: sem esse intervalo
+  // o médico não chega a tempo, então conta como conflito (não só aviso).
+  const buffer = Math.max(0, (config?.rules?.eventBufferMinutes ?? DEFAULT_RULES.eventBufferMinutes) || 0);
+
   // Compromissos fixos (semanais) + eventos pontuais (data específica) usam a
   // mesma lógica de match turno/horário; só muda o gate de data.
   const _hit = (b, fallback) => {
@@ -167,6 +171,15 @@ export const isBlocked = (interval, config) => {
       });
       if (startMin < be && endMin > bs) {
         return { blocked: true, reason: `${b.label || fallback} (${b.startTime}–${b.endTime})` };
+      }
+      // Janela de deslocamento curta demais antes/depois do compromisso.
+      if (buffer > 0) {
+        if (endMin <= bs && bs - endMin < buffer) {
+          return { blocked: true, reason: `Sem tempo de chegar em "${b.label || fallback}" (${b.startTime}): só ${fmtH(bs - endMin)} após o plantão (mínimo ${fmtH(buffer)})` };
+        }
+        if (startMin >= be && startMin - be < buffer) {
+          return { blocked: true, reason: `Sem tempo após "${b.label || fallback}" (${b.endTime}): plantão começa ${fmtH(startMin - be)} depois (mínimo ${fmtH(buffer)})` };
+        }
       }
     }
     return null;
@@ -222,6 +235,35 @@ const _blockOverflowRisk = (interval, config) => {
   return null;
 };
 
+// Compromissos fixos (recurringBlocks) materializados como intervalos de trabalho
+// para os dias pedidos. Contam como horas trabalhadas na cadeia de horas seguidas
+// (consultório, etc.), junto com os plantões. Folgas e eventos NÃO entram aqui —
+// só "trabalho" recorrente. Marcados isCommitment p/ não contarem como dia de plantão.
+const _commitmentIntervals = (config, dateKeys) => {
+  const out = [];
+  for (const dateKey of dateKeys) {
+    if (!dateKey) continue;
+    const weekday = new Date(`${dateKey}T00:00:00`).getDay();
+    for (const b of config?.recurringBlocks || []) {
+      if (b.weekday !== weekday) continue;
+      let ranges = [];
+      if (b.mode === 'time' && b.startTime && b.endTime) {
+        ranges = [{ start: b.startTime, end: b.endTime }];
+      } else if (b.mode === 'turno') {
+        ranges = (b.turnos || [])
+          .map(t => DEFAULT_SHIFT_TIMES[String(t).charAt(0).toUpperCase()])
+          .filter(Boolean)
+          .map(x => ({ start: x.startTime, end: x.endTime }));
+      }
+      for (const r of ranges) {
+        const iv = shiftToInterval({ date: dateKey, label: 'C', startTime: r.start, endTime: r.end });
+        if (iv) out.push({ ...iv, isCommitment: true, commitmentLabel: b.label || 'Compromisso' });
+      }
+    }
+  }
+  return out;
+};
+
 // Slot de fim de semana a evitar (config.avoidWeekend): sáb, dom, ou sexta à noite.
 const _isAvoidedWeekend = (interval, config) => {
   if (!config?.avoidWeekend || !interval) return false;
@@ -266,23 +308,27 @@ export const evaluateCandidate = (candidate, existingIntervals, config) => {
       if (!after || gap < after.gap) after = { gap, iv: o };
     }
   }
-  const beforeTight = before && before.gap < rules.minRestMinutes;
-  const afterTight = after && after.gap < rules.minRestMinutes;
-  // gap < 6min conta como "sem descanso" (emendado).
-  const restPhrase = (gap, rel, iv) =>
-    gap < 6
-      ? `Sem descanso ${rel} ${_describe(iv)}`
-      : `Só ${fmtH(gap)} de descanso ${rel} ${_describe(iv)}`;
-  if (beforeTight && afterTight) {
-    violations.push({
-      rule: 'rest',
-      severity: 'warn',
-      message: `Imprensado entre o ${_describe(before.iv)} e o ${_describe(after.iv)} — pouco descanso dos dois lados (mínimo ${fmtH(rules.minRestMinutes)})`,
-    });
-  } else if (beforeTight) {
-    violations.push({ rule: 'rest', severity: 'warn', message: `${restPhrase(before.gap, 'depois do', before.iv)} — mínimo ${fmtH(rules.minRestMinutes)}` });
-  } else if (afterTight) {
-    violations.push({ rule: 'rest', severity: 'warn', message: `${restPhrase(after.gap, 'antes do', after.iv)} — mínimo ${fmtH(rules.minRestMinutes)}` });
+  // Descanso mínimo vale ENTRE BLOCOS (sequências de dias seguidos), não entre
+  // plantões vizinhos: só cobra descanso ao começar um novo bloco depois de um
+  // bloco que bateu maxConsecutiveDays. Sem limite de dias → regra desligada.
+  if (rules.maxConsecutiveDays && before) {
+    const dayGap = Math.round(
+      (new Date(`${candidate.dateKey}T00:00:00`).getTime() - new Date(`${before.iv.dateKey}T00:00:00`).getTime()) / (DAY_MIN * MIN),
+    );
+    // dayGap ≤ 1 = mesmo bloco (continuação) → governado por maxConsecutiveDays.
+    // dayGap ≥ 2 = começo de outro bloco → aí sim cobra o descanso.
+    if (dayGap >= 2) {
+      const prevBlockDays = _consecutiveDays(before.iv.dateKey, others).run;
+      if (prevBlockDays >= rules.maxConsecutiveDays && before.gap < rules.minRestMinutes) {
+        violations.push({
+          rule: 'rest',
+          severity: 'warn',
+          message: before.gap < 6
+            ? `Sem descanso após ${prevBlockDays} dias seguidos de plantão (mínimo ${fmtH(rules.minRestMinutes)})`
+            : `Só ${fmtH(before.gap)} de descanso após ${prevBlockDays} dias seguidos de plantão (mínimo ${fmtH(rules.minRestMinutes)})`,
+        });
+      }
+    }
   }
 
   // 3b. risco de transbordar num bloqueio logo em seguida (ex.: T que pode ir
@@ -295,22 +341,31 @@ export const evaluateCandidate = (candidate, existingIntervals, config) => {
     violations.push({ rule: 'weekend', severity: 'warn', message: 'Fim de semana — você prefere evitar.' });
   }
 
-  // 4. horas seguidas: cadeia de plantões quase emendados (gap ≤ CHAIN_GAP)
-  const chain = _chain(candidate, others);
+  // 4. horas seguidas: cadeia de trabalhos quase emendados (gap ≤ CHAIN_GAP).
+  // Conta plantões + compromissos fixos (ex.: consultório) na mesma janela de dias
+  // — um consultório de manhã + T + N emenda 24h e não pode ficar disponível.
+  const commitments = _commitmentIntervals(config, [
+    _dateKeyOfMs(candidate.startMs - DAY_MIN * MIN),
+    candidate.dateKey,
+    _dateKeyOfMs(candidate.endMs + DAY_MIN * MIN),
+  ]);
+  const chain = _chain(candidate, [...others, ...commitments]);
   if (chain.minutes > rules.maxConsecutiveMinutes) {
     const span = chain.count > 1
-      ? ` — de ${_hhmm(chain.startMs)} ${_ddmm(chain.startMs)} a ${_hhmm(chain.endMs)} ${_ddmm(chain.endMs)}, encadeando ${chain.count} plantões`
+      ? ` — de ${_hhmm(chain.startMs)} ${_ddmm(chain.startMs)} a ${_hhmm(chain.endMs)} ${_ddmm(chain.endMs)}, encadeando ${chain.count} blocos`
       : '';
     violations.push({
       rule: 'consecutiveHours',
       severity: 'warn',
-      message: `${fmtH(chain.minutes)} seguidas de plantão quase sem pausa (máx ${fmtH(rules.maxConsecutiveMinutes)})${span}`,
+      message: `${fmtH(chain.minutes)} seguidas de trabalho quase sem pausa (máx ${fmtH(rules.maxConsecutiveMinutes)})${span}`,
     });
   }
 
   // 5. dias consecutivos trabalhados — passar do máximo BLOQUEIA o dia.
+  // FDS que o usuário evita (sem plantão real) não é dia trabalhado: não conta na
+  // sequência nem é bloqueado por ela — só leva o aviso de "evitar fim de semana".
   const days = _consecutiveDays(candidate.dateKey, others);
-  if (days.run > rules.maxConsecutiveDays) {
+  if (rules.maxConsecutiveDays && days.run > rules.maxConsecutiveDays && !_isAvoidedWeekend(candidate, config)) {
     violations.push({
       rule: 'consecutiveDays',
       severity: 'block',
@@ -391,6 +446,28 @@ const _consecutiveDays = (dateKey, others) => {
   const startMs = base - back * dayMs;
   const endMs = base + fwd * dayMs;
   return { run: back + fwd + 1, startBr: _ddmm(startMs), endBr: _ddmm(endMs) };
+};
+
+// Agrupa intervalos em blocos de dias-calendário consecutivos (ignora carryover
+// 'D'). Cada bloco: { days, startMs, endMs } com os extremos temporais reais.
+const _blocks = (intervals) => {
+  const worked = (intervals || []).filter(i => i && i.label !== 'D').sort((a, b) => a.startMs - b.startMs);
+  const dayMs = DAY_MIN * MIN;
+  const blocks = [];
+  for (const iv of worked) {
+    const cur = blocks[blocks.length - 1];
+    const dayDiff = cur
+      ? Math.round((new Date(`${iv.dateKey}T00:00:00`).getTime() - new Date(`${cur.endDay}T00:00:00`).getTime()) / dayMs)
+      : null;
+    if (cur && dayDiff <= 1) {
+      if (dayDiff === 1) cur.days += 1;
+      cur.endDay = iv.dateKey;
+      cur.endMs = Math.max(cur.endMs, iv.endMs);
+    } else {
+      blocks.push({ days: 1, startDay: iv.dateKey, endDay: iv.dateKey, startMs: iv.startMs, endMs: iv.endMs });
+    }
+  }
+  return blocks;
 };
 
 // ── ranking de vagas ──────────────────────────────────────────────────────────
@@ -517,12 +594,17 @@ export const analyzeSchedule = (existingShifts, config) => {
     if (run > maxRun) maxRun = run;
   }
 
-  // alertas de descanso entre plantões adjacentes (nomeando os dois plantões)
+  // alertas de descanso ENTRE BLOCOS: bloco que bateu o máx de dias seguidos e foi
+  // seguido por outro bloco cedo demais. Sem limite de dias → sem alerta.
   const restAlerts = [];
-  for (let i = 1; i < intervals.length; i++) {
-    const gap = (intervals[i].startMs - intervals[i - 1].endMs) / MIN;
-    if (gap >= 0 && gap < rules.minRestMinutes) {
-      restAlerts.push(`Só ${fmtH(gap)} entre o ${_describe(intervals[i - 1])} e o ${_describe(intervals[i])}`);
+  if (rules.maxConsecutiveDays) {
+    const blocks = _blocks(intervals);
+    for (let i = 0; i + 1 < blocks.length; i++) {
+      if (blocks[i].days < rules.maxConsecutiveDays) continue;
+      const gap = (blocks[i + 1].startMs - blocks[i].endMs) / MIN;
+      if (gap >= 0 && gap < rules.minRestMinutes) {
+        restAlerts.push(`Só ${fmtH(gap)} de descanso após ${blocks[i].days} dias seguidos (até ${_ddmm(blocks[i].endMs)})`);
+      }
     }
   }
 

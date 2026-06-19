@@ -26,7 +26,7 @@
  */
 
 import { doc, setDoc, writeBatch } from './fdb';
-import { db } from './config';
+import { db, functions } from './config';
 import Logger from '../../utils/Logger';
 import { makeLogEntry, appendLog, TRANSFER_LOG_TYPES } from '../../utils/shiftTransferLog';
 
@@ -479,11 +479,54 @@ const FirebaseAdapter = {
       } else {
         Logger.warn(`[Firebase] fetchGroupScheduleMonth/days [${groupId}/${monthKey}]: ${daysRes.reason?.message}`);
       }
-      return { days, syncedAt: meta.syncedAt || null, hasData: true };
+      // authoritative = escrito pelo aurora-web (fonte da verdade). O app não
+      // re-agrega nem sobrescreve quando true.
+      return { days, syncedAt: meta.syncedAt || null, hasData: true, authoritative: meta.authoritative === true };
     } catch (err) {
       Logger.warn(`[Firebase] fetchGroupScheduleMonth [${groupId}/${monthKey}]: ${err?.message}`);
       return empty;
     }
+  },
+
+  /**
+   * Realtime read for the web-authored group calendar projection.
+   * Listens to groupSchedules/{groupId}/months/{monthKey}/days/* and emits the
+   * full month map every time the coordinator updates the web schedule.
+   */
+  subscribeGroupScheduleMonth: (groupId, monthKey, onChange, onError) => {
+    if (!db || !groupId || !monthKey) return () => {};
+    let unsub = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { collection, onSnapshot } = await import('./fdb');
+        if (cancelled) return;
+        unsub = onSnapshot(
+          collection(db, 'groupSchedules', String(groupId), 'months', monthKey, 'days'),
+          snap => {
+            const days = {};
+            let syncedAt = null;
+            snap.forEach(d => {
+              const data = d.data() || {};
+              days[d.id] = data;
+              if (data.syncedAt && (!syncedAt || data.syncedAt > syncedAt)) syncedAt = data.syncedAt;
+            });
+            onChange?.({ days, syncedAt, hasData: true, source: 'firestore-live' });
+          },
+          err => {
+            Logger.warn(`[Firebase] subscribeGroupScheduleMonth [${groupId}/${monthKey}]: ${err?.message}`);
+            onError?.(err);
+          },
+        );
+      } catch (err) {
+        Logger.warn(`[Firebase] subscribeGroupScheduleMonth/setup [${groupId}/${monthKey}]: ${err?.message}`);
+        onError?.(err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (typeof unsub === 'function') unsub();
+    };
   },
 
   saveTimeEntries: (userId, monthKey, entries) => {
@@ -555,12 +598,17 @@ const FirebaseAdapter = {
    * Interests vivem no array `interests` do doc da opening; o escalista
    * escolhe remotamente entre os interessados.
    */
+  // Interesses moram em openings/{id}/interests/{uid} (doc id = uid). A rule deixa
+  // o médico criar/remover só o próprio; a LISTA só gestor/coord/admin lê.
   addOpeningInterest: async (openingId, interest) => {
     if (!db || !openingId || !interest?.userId) return Promise.resolve();
     try {
-      const { arrayUnion } = await import('./fdb');
-      const ref = doc(db, 'openings', String(openingId));
-      return _write(ref, { interests: arrayUnion(interest), updatedAt: new Date().toISOString() });
+      const ref = doc(db, 'openings', String(openingId), 'interests', String(interest.userId));
+      return _write(ref, {
+        ...interest,
+        userId: String(interest.userId),
+        at: interest.at || new Date().toISOString(),
+      }, false);
     } catch (err) {
       Logger.warn(`[FirebaseAdapter] addOpeningInterest: ${err.message}`);
     }
@@ -569,14 +617,38 @@ const FirebaseAdapter = {
   removeOpeningInterest: async (openingId, userId) => {
     if (!db || !openingId || !userId) return Promise.resolve();
     try {
-      const { getDoc } = await import('./fdb');
-      const ref = doc(db, 'openings', String(openingId));
-      const snap = await getDoc(ref);
-      const list = (snap.exists() ? snap.data()?.interests : []) || [];
-      const next = list.filter(i => String(i.userId) !== String(userId));
-      return _write(ref, { interests: next, updatedAt: new Date().toISOString() });
+      const { deleteDoc } = await import('./fdb');
+      return deleteDoc(doc(db, 'openings', String(openingId), 'interests', String(userId)));
     } catch (err) {
       Logger.warn(`[FirebaseAdapter] removeOpeningInterest: ${err.message}`);
+    }
+  },
+
+  /** O próprio interesse do médico (a rule permite ler só o seu). null se não houver. */
+  getMyOpeningInterest: async (openingId, userId) => {
+    if (!db || !openingId || !userId) return null;
+    try {
+      const { getDoc } = await import('./fdb');
+      const snap = await getDoc(doc(db, 'openings', String(openingId), 'interests', String(userId)));
+      return snap.exists() ? snap.data() : null;
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] getMyOpeningInterest: ${err.message}`);
+      return null;
+    }
+  },
+
+  /** Lista de interessados — só gestor/coord/admin consegue ler (senão a rule nega). */
+  getOpeningInterests: async (openingId) => {
+    if (!db || !openingId) return [];
+    try {
+      const { collection: _collection, getDocs } = await import('./fdb');
+      const snap = await getDocs(_collection(db, 'openings', String(openingId), 'interests'));
+      const out = [];
+      snap.forEach(d => out.push({ id: d.id, ...d.data() }));
+      return out;
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] getOpeningInterests: ${err.message}`);
+      return [];
     }
   },
 
@@ -1622,6 +1694,118 @@ const FirebaseAdapter = {
     } catch (err) {
       Logger.warn(`[FirebaseAdapter] loadPushDevices: ${err.message}`);
       return [];
+    }
+  },
+
+  /**
+   * Reads the manager-published config off institutions/{id} for a set of ids.
+   * institutions/{id} is world-readable (rules: allow read: if true), so a
+   * doctor's app can fetch the hospital's source-of-truth financial config.
+   * Returns a { [instId]: HospitalConfig } map; missing/config-less docs are
+   * skipped. Fail-safe: any error yields {} so calculations fall back to the
+   * user's own config.
+   */
+  /**
+   * Real-time subscription to the cross-user groups this doctor belongs to:
+   * top-level `auroraGroups` where memberIds array-contains uid. This is the
+   * collection the web admin writes when adding a professional to a hospital, so
+   * the app reflects membership changes live (rules allow a member to read it).
+   *
+   * `onChange` receives a raw array [{ id, ...data }]; the caller normalizes.
+   * Returns an unsubscribe fn that also cancels the pending async setup.
+   */
+  subscribeAuroraGroups: (userId, onChange, onError) => {
+    if (!db || !userId) return () => {};
+    let unsub = () => {};
+    let cancelled = false;
+    (async () => {
+      try {
+        const { collection, query, where, onSnapshot } = await import('./fdb');
+        if (cancelled) return;
+        const q = query(
+          collection(db, 'auroraGroups'),
+          where('memberIds', 'array-contains', String(userId)),
+        );
+        unsub = onSnapshot(
+          q,
+          (snap) => {
+            const out = [];
+            snap.forEach((d) => out.push({ id: d.id, ...d.data() }));
+            onChange(out);
+          },
+          (err) => { if (onError) onError(err); },
+        );
+      } catch (err) {
+        if (onError) onError(err);
+      }
+    })();
+    return () => { cancelled = true; try { unsub(); } catch (_) {} };
+  },
+
+  /**
+   * Células da escala fixa em que o médico é titular OU co, nos seus grupos.
+   * Lê todas as células de cada grupo (rule permite a membro) e filtra client-side.
+   * Cada item ganha `groupId`.
+   */
+  getMyFixedSlots: async (userId, groupIds) => {
+    if (!db || !userId || !Array.isArray(groupIds) || groupIds.length === 0) return [];
+    try {
+      const { collection, getDocs } = await import('./fdb');
+      const uid = String(userId);
+      const snaps = await Promise.all(
+        groupIds.map((gid) =>
+          getDocs(collection(db, 'auroraGroups', String(gid), 'fixedSlots')).catch(() => null),
+        ),
+      );
+      const out = [];
+      snaps.forEach((snap, i) => {
+        if (!snap) return;
+        snap.forEach((d) => {
+          const s = d.data() || {};
+          if (String(s.titularId) === uid || (s.co && String(s.co.userId) === uid)) {
+            out.push({ ...s, groupId: String(groupIds[i]) });
+          }
+        });
+      });
+      return out;
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] getMyFixedSlots: ${err.message}`);
+      return [];
+    }
+  },
+
+  /** Chama uma Cloud Function de escala fixa (entregar/transferir/reverter). */
+  callFixedFn: async (name, data) => {
+    if (!functions) return { ok: false, reason: 'functions-indisponivel' };
+    try {
+      const { httpsCallable } = await import('firebase/functions');
+      const res = await httpsCallable(functions, name)(data || {});
+      return res.data || { ok: true };
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] callFixedFn(${name}): ${err?.message}`);
+      return { ok: false, reason: err?.message || 'erro' };
+    }
+  },
+
+  getHospitalConfigs: async (instIds) => {
+    if (!db || !Array.isArray(instIds) || instIds.length === 0) return {};
+    try {
+      const { doc: _doc, getDoc } = await import('./fdb');
+      const ids = [...new Set(instIds.map(String).filter(Boolean))];
+      const snaps = await Promise.all(
+        ids.map(id => getDoc(_doc(db, 'institutions', id)).catch(() => null)),
+      );
+      const out = {};
+      snaps.forEach((snap, i) => {
+        if (snap && snap.exists()) {
+          const cfg = snap.data()?.config;
+          if (cfg) out[ids[i]] = cfg;
+        }
+      });
+      return out;
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] getHospitalConfigs: ${err.message}`);
+      return {};
     }
   },
 };

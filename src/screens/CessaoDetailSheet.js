@@ -17,6 +17,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useColors, Typography, BorderRadius } from '../constants/DesignSystem';
 import { AuthContext } from '../context/AuthContext';
+import { isViewOnly } from '../utils/userSource';
 import { useOpenings } from '../contexts/OpeningsContext';
 import { useShifts } from '../contexts/ShiftsContext';
 
@@ -176,7 +177,7 @@ export default function CessaoDetailSheet({ visible, opening, onClose }) {
             <Pressable style={s.cancelBtn} onPress={handleCancel}>
               <Text style={s.cancelBtnText}>Cancelar cessão</Text>
             </Pressable>
-          ) : (
+          ) : isViewOnly(user) ? null : (
             <Pressable style={[s.primaryBtn, { backgroundColor: C.primary }]} onPress={handleClaim}>
               <Ionicons name="checkmark" size={16} color="#fff" />
               <Text style={s.primaryBtnText}>Pegar plantão</Text>

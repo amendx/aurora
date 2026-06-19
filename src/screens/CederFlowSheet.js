@@ -2,6 +2,7 @@ import { useState, useMemo, useContext } from 'react';
 import {
   View, Text, Modal, Pressable, ScrollView, TouchableOpacity,
   StyleSheet, Image, ActivityIndicator, TextInput, Alert,
+  KeyboardAvoidingView, Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -33,7 +34,7 @@ export default function CederFlowSheet({ visible, shift, onClose, onDone, initia
   const insets = useSafeAreaInsets();
   const s = makeStyles(C);
   const { user } = useContext(AuthContext);
-  const { getShiftCapableGroupMembers } = useGroups();
+  const { groupsById, getShiftCapableGroupMembers } = useGroups();
   const { cedeOpenToGroup, cedeTargeted } = useOffers();
   const { refresh: refreshOpenings } = useOpenings();
   const { removeShiftLocally } = useShifts();
@@ -43,13 +44,24 @@ export default function CederFlowSheet({ visible, shift, onClose, onDone, initia
   const [submitting, setSub]  = useState(false);
   const [query, setQuery]     = useState('');
 
-  const groupId = String(shift?.group?.id || '');
+  // Colegas de TODOS os grupos em comum (não só o grupo do plantão). membersByGroupId
+  // é keyed por public_id||id — usar shift.group.id direto não bate. Mesmo padrão do
+  // TrocarFlowSheet: dedup por pessoa across grupos.
   const members = useMemo(() => {
-    if (!groupId) return [];
-    return getShiftCapableGroupMembers(groupId)
-      .filter(m => m?.person?.id != null && String(m.person.id) !== String(user?.id))
+    if (!user?.id) return [];
+    const seen = new Map();
+    Object.values(groupsById || {}).forEach(g => {
+      const gid = String(g.public_id || g.id || '');
+      if (!gid) return;
+      getShiftCapableGroupMembers(gid).forEach(m => {
+        const p = m.person;
+        if (!p || p.id == null || String(p.id) === String(user.id)) return;
+        if (!seen.has(p.id)) seen.set(p.id, m);
+      });
+    });
+    return Array.from(seen.values())
       .sort((a, b) => (a.person.name || '').localeCompare(b.person.name || '', 'pt-BR'));
-  }, [groupId, getShiftCapableGroupMembers, user?.id]);
+  }, [groupsById, getShiftCapableGroupMembers, user?.id]);
 
   const _councilStr = (c) => (typeof c === 'string' ? c : (c?.state || c?.uf || ''));
 
@@ -111,6 +123,10 @@ export default function CederFlowSheet({ visible, shift, onClose, onDone, initia
 
   return (
     <Modal visible transparent animationType="slide" onRequestClose={close}>
+      <KeyboardAvoidingView
+        style={{ flex: 1, justifyContent: 'flex-end' }}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      >
       <Pressable style={s.backdrop} onPress={close} />
       <View style={[s.sheet, { paddingBottom: 16 + insets.bottom }]}>
         <View style={s.handle} />
@@ -172,7 +188,7 @@ export default function CederFlowSheet({ visible, shift, onClose, onDone, initia
         {mode === 'targeted' && (
           <View style={{ flex: 0, paddingHorizontal: 18 }}>
             <Text style={s.eyebrow}>
-              {members.length} colegas em {shift.group?.name}
+              {members.length} {members.length === 1 ? 'colega' : 'colegas'} nos seus grupos
             </Text>
             <View style={s.searchBox}>
               <Ionicons name="search" size={16} color={C.text.tertiary} />
@@ -240,14 +256,14 @@ export default function CederFlowSheet({ visible, shift, onClose, onDone, initia
           </View>
         )}
       </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
 
 const makeStyles = (C) => StyleSheet.create({
-  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)' },
+  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.45)' },
   sheet: {
-    position: 'absolute', left: 0, right: 0, bottom: 0,
     backgroundColor: C.background.elevated,
     borderTopLeftRadius: BorderRadius.xxl, borderTopRightRadius: BorderRadius.xxl,
     paddingTop: 8,

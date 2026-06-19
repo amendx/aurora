@@ -13,6 +13,7 @@ import React, { useContext, useMemo, useState, useCallback, useEffect } from 're
 import { View, Text, ScrollView, Pressable, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { AuthContext } from '../context/AuthContext';
+import { isViewOnly } from '../utils/userSource';
 import { useSwapAuctions, isBidCompatible } from '../contexts/SwapAuctionsContext';
 import { useOffers } from '../contexts/OffersContext';
 import { useOpenings } from '../contexts/OpeningsContext';
@@ -93,9 +94,14 @@ const _monthKeysFromNow = (n = 3) => {
   return out;
 };
 
+// Leilão (troca aberta ao grupo) foi descontinuado. Mantemos o código por trás
+// desta flag para reversibilidade; com false, não há criação nem exibição de leilões.
+const LEILAO_ENABLED = false;
+
 const TrocasAbertasScreen = () => {
   const C = useColors();
   const { user } = useContext(AuthContext);
+  const viewOnly = isViewOnly(user);
   const { auctions, myAuctions, loading, refresh, submitBid, cancelAuction, acceptBid, getBids } = useSwapAuctions();
   const {
     swapsReceived, swapsSent,
@@ -239,7 +245,7 @@ const TrocasAbertasScreen = () => {
           </View>
         ) : busy ? (
           <ActivityIndicator size="small" color={C.primary} style={{ marginTop: 4 }} />
-        ) : mode === 'received' ? (
+        ) : viewOnly ? null : mode === 'received' ? (
           <View style={s.btnRow}>
             <Pressable style={[s.acceptBtn, { flex: 2 }]} onPress={() => swapAction(swap, acceptSwap)}>
               <Ionicons name="checkmark" size={16} color="#fff" />
@@ -344,15 +350,8 @@ const TrocasAbertasScreen = () => {
           {!!_relTime(o.createdAt) && <Text style={s.relTime}>{_relTime(o.createdAt)}</Text>}
         </View>
 
-        <View style={s.relRow}>
-          <View style={[s.modeChip, { backgroundColor: C.money + '14' }]}>
-            <Ionicons name="flash-outline" size={12} color={C.money} />
-            <Text style={[s.modeChipText, { color: C.money }]}>PRIMEIRO A PEGAR</Text>
-          </View>
-          <View style={s.teamPair}>
-            {renderTeamChip(groupForChip, 'cg')}
-          </View>
-        </View>
+        {/* Bloco "PRIMEIRO A PEGAR" + chip do grupo escondido — redundante com o
+            rodapé ("Primeiro a pegar leva") e o renderHospital abaixo. */}
 
         <View style={[s.swapGrid, { justifyContent: 'flex-start' }]}>
           {renderShiftCol(mine ? 'VOCÊ CEDEU' : 'PLANTÃO', cededShift)}
@@ -361,13 +360,15 @@ const TrocasAbertasScreen = () => {
         {renderHospital(groupForChip)}
 
         <View style={s.cedeFooter}>
-          <Text style={s.footerText}>{mine ? 'Toque para ver detalhes' : 'Primeiro a pegar leva'}</Text>
-          <View style={s.footerCta}>
-            <Text style={[s.footerCtaText, { color: mine ? C.error : C.primary }]}>
-              {mine ? 'Cancelar' : 'Pegar plantão'}
-            </Text>
-            <Ionicons name="chevron-forward" size={14} color={mine ? C.error : C.primary} />
-          </View>
+          <Text style={s.footerText}>{viewOnly ? 'Toque para ver detalhes' : mine ? 'Toque para ver detalhes' : 'Primeiro a pegar leva'}</Text>
+          {!viewOnly && (
+            <View style={s.footerCta}>
+              <Text style={[s.footerCtaText, { color: mine ? C.error : C.primary }]}>
+                {mine ? 'Cancelar' : 'Pegar plantão'}
+              </Text>
+              <Ionicons name="chevron-forward" size={14} color={mine ? C.error : C.primary} />
+            </View>
+          )}
         </View>
       </Pressable>
     );
@@ -454,12 +455,16 @@ const TrocasAbertasScreen = () => {
   const directedSwaps = tab === 'available' ? (swapsReceived || []) : (swapsSent || []);
   // Cessões: "Minhas" mostra as ativas que EU abri; "Disponíveis" mostra as
   // dos colegas. Reaproveita openings/myCededOpenings do OpeningsContext.
-  const activeMyCedes = (myCededOpenings || []).filter(o => o.status === 'active');
+  // Só CESSÕES reais (kind 'cede') entram aqui. Vagas publicadas pelo escalista —
+  // avulsa (admin_temp) e de escala fixa (admin_fixed) — não são cessões: aparecem
+  // na tela de Vagas, não como "fulano cedeu ao grupo".
+  const isCessao = (o) => o.kind === 'cede';
+  const activeMyCedes = (myCededOpenings || []).filter(o => o.status === 'active' && isCessao(o));
   const cededList = tab === 'available'
-    ? (claimableOpenings || []).filter(o => o.availableSlots > 0)
+    ? (claimableOpenings || []).filter(o => o.availableSlots > 0 && isCessao(o))
     : activeMyCedes;
   const isEmpty = list.length === 0 && directedSwaps.length === 0 && cededList.length === 0;
-  const availCount = (auctions?.length || 0) + (swapsReceived?.length || 0) + ((claimableOpenings || []).filter(o => o.availableSlots > 0).length);
+  const availCount = (auctions?.length || 0) + (swapsReceived?.length || 0) + ((claimableOpenings || []).filter(o => o.availableSlots > 0 && isCessao(o)).length);
   const mineCount = (myAuctions?.length || 0) + (swapsSent?.length || 0) + activeMyCedes.length;
 
   const renderTab = (key, label, count) => {
@@ -510,26 +515,30 @@ const TrocasAbertasScreen = () => {
           )}
           {directedSwaps.map(sw => renderDirectedSwapCard(sw, tab === 'available' ? 'received' : 'sent'))}
 
-          {/* SEÇÃO 3: Leilões (troca aberta ao grupo). */}
-          {list.length > 0 && (
+          {/* SEÇÃO 3: Leilões (troca aberta ao grupo) — descontinuado. */}
+          {LEILAO_ENABLED && list.length > 0 && (
             <Text style={s.sectionLabel}>
               {tab === 'mine' ? 'Seus leilões de troca' : 'Leilões abertos ao grupo'}
             </Text>
           )}
-          {list.map(a => renderAuctionCard(a, tab === 'mine'))}
+          {LEILAO_ENABLED && list.map(a => renderAuctionCard(a, tab === 'mine'))}
         </View>
       </ScrollView>
 
-      {/* FAB */}
-      <Pressable style={[s.fab, { backgroundColor: C.primary }]} onPress={() => setCreateOpen(true)}>
-        <Ionicons name="add" size={26} color="#fff" />
-      </Pressable>
+      {/* FAB — criação de leilão (desativada) */}
+      {LEILAO_ENABLED && (
+        <Pressable style={[s.fab, { backgroundColor: C.primary }]} onPress={() => setCreateOpen(true)}>
+          <Ionicons name="add" size={26} color="#fff" />
+        </Pressable>
+      )}
 
-      <TrocarAbertoSheet
-        visible={createOpen}
-        shift={null}
-        onClose={() => { setCreateOpen(false); refresh(); }}
-      />
+      {LEILAO_ENABLED && (
+        <TrocarAbertoSheet
+          visible={createOpen}
+          shift={null}
+          onClose={() => { setCreateOpen(false); refresh(); }}
+        />
+      )}
 
       <CessaoDetailSheet
         visible={!!detailCessao}

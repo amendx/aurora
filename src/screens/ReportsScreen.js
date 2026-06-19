@@ -22,6 +22,7 @@ import { AuthContext } from '../context/AuthContext';
 import LocalCache from '../services/LocalCache';
 import { getMonthTotalValue, getMonthTotalHours } from '../utils/MonthSummaryComputer';
 import { buildHybridConfig, isPastMonthKey } from '../utils/HospitalConfigResolver';
+import { applyPublishedHospitalConfigs, collectInstIds } from '../utils/PublishedHospitalConfig';
 import { ChartsView } from './ChartsScreen';
 
 // ── Skeleton ──────────────────────────────────────────────────────────────────
@@ -176,6 +177,12 @@ export default function ReportsScreen({ onExportReady, initialTab = 'resumo' } =
           if (snap) breakdownConfig = buildHybridConfig(liveConfig, snap);
         } catch (_) {}
       }
+      // Overlay manager-published hospital configs (source of truth) for this
+      // month's hospitals — mirrors the MonthSummary path in ShiftsContext.
+      breakdownConfig = await applyPublishedHospitalConfigs(
+        breakdownConfig,
+        collectInstIds(daysWithShifts),
+      );
 
       // Pre-pass: total planned hours for the month — needed by the legacy
       // global-loyalty tier filter inside calculateShiftValueWithBreakdown.

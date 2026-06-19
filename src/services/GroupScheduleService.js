@@ -46,6 +46,29 @@ const _monthDates = (monthKey) => {
   return dates;
 };
 
+// Garante capacity/filledCount/available coerentes em cada slot. O aurora-web
+// pode mandar só `capacity` (deriva available) ou só assignments (deriva o
+// resto). Mantém o app robusto ao formato exato que vier.
+const _normalizeScheduleDays = (days) => {
+  if (!days || typeof days !== 'object') return days;
+  for (const day of Object.values(days)) {
+    for (const slot of (day?.slots || [])) {
+      const filled = Array.isArray(slot.assignments)
+        ? slot.assignments.length
+        : (slot.filledCount || 0);
+      const cap = (typeof slot.capacity === 'number')
+        ? slot.capacity
+        : filled + (slot.available || 0);
+      slot.filledCount = filled;
+      slot.capacity = cap;
+      slot.available = (typeof slot.available === 'number')
+        ? slot.available
+        : Math.max(cap - filled, 0);
+    }
+  }
+  return days;
+};
+
 const _enrichAssignmentsWithSource = async (days) => {
   const ids = new Set();
   for (const day of Object.values(days)) {
@@ -75,6 +98,46 @@ const _enrichAssignmentsWithSource = async (days) => {
     }
   } catch {}
   return days;
+};
+
+const _mergeAggregateDays = (baseDays, aggregateDays) => {
+  if (!aggregateDays || typeof aggregateDays !== 'object') return baseDays;
+  const out = baseDays || {};
+  for (const [dateStr, aggregateDay] of Object.entries(aggregateDays)) {
+    if (!out[dateStr]) out[dateStr] = aggregateDay;
+    const day = out[dateStr];
+    if (!Array.isArray(day.slots)) day.slots = [];
+    for (const aggregateSlot of (aggregateDay?.slots || [])) {
+      let slot = day.slots.find(s => s.label === aggregateSlot.label);
+      if (!slot) {
+        day.slots.push({ ...aggregateSlot });
+        continue;
+      }
+      if (!Array.isArray(slot.assignments)) slot.assignments = [];
+      const seen = new Set(slot.assignments.map(a => String(a.userId)));
+      for (const assignment of (aggregateSlot.assignments || [])) {
+        if (seen.has(String(assignment.userId))) continue;
+        seen.add(String(assignment.userId));
+        slot.assignments.push(assignment);
+      }
+      const filled = slot.assignments.length;
+      const previousCapacity = typeof slot.capacity === 'number' ? slot.capacity : 0;
+      slot.filledCount = filled;
+      slot.capacity = Math.max(previousCapacity, filled);
+      slot.available = Math.max(slot.capacity - filled, 0);
+    }
+  }
+  return out;
+};
+
+const _mergeMemberShiftOverlay = async (group, monthKey, days, currentUserId) => {
+  if (!group?.id || !monthKey || !currentUserId) return days;
+  try {
+    const aggregate = await FirebaseAdapter.aggregateAuroraGroupSchedule(group, monthKey, currentUserId);
+    return _mergeAggregateDays(days, aggregate);
+  } catch {
+    return days;
+  }
 };
 
 const _fetchFromWebClient = async (token, group, monthKey) => {
@@ -109,10 +172,13 @@ const _fetchFromWebClient = async (token, group, monthKey) => {
  * @param {boolean} [opts.force]  bypass staleness checks
  * @returns {Promise<{ days: Object<string, object>, syncedAt: string|null, source: 'cache'|'firestore'|'aurora-aggregate'|'webClient' }>}
  */
-const getMonth = async ({ group, monthKey, token, userSource, currentUserId, force = false }) => {
+const getMonth = async ({ group, monthKey, token, userSource, auroraOnlyMode = false, currentUserId, force = false }) => {
   if (!group?.id || !monthKey) return { days: {}, syncedAt: null, source: 'cache' };
   const groupId = String(group.id);
-  const isAurora = userSource === 'aurora';
+  // isAurora trata aurora native E webClient migrado pra aurora-only do mesmo
+  // jeito — nenhum dos dois pode cair no _fetchFromWebClient. Caller deve
+  // passar auroraOnlyMode quando user.auroraOnlyMode === true.
+  const isAurora = userSource === 'aurora' || auroraOnlyMode === true;
   const key = `${groupId}|${monthKey}`;
 
   if (_inflight.has(key)) return _inflight.get(key);
@@ -133,8 +199,15 @@ const getMonth = async ({ group, monthKey, token, userSource, currentUserId, for
     if (isAurora || !token) {
       const fs = await FirebaseAdapter.fetchGroupScheduleMonth(groupId, monthKey);
       if (fs?.hasData) {
-        firestoreDays = fs.days;
+        firestoreDays = _normalizeScheduleDays(fs.days);
         firestoreSyncedAt = fs.syncedAt;
+        // Doc autoritativo (aurora-web) = verdade. Usa SEMPRE, sem agregar nem
+        // sobrescrever — mesmo que o syncedAt pareça "stale" pra regra local.
+        if (fs.authoritative) {
+          firestoreDays = await _mergeMemberShiftOverlay(group, monthKey, firestoreDays, currentUserId);
+          await _enrichAssignmentsWithSource(firestoreDays);
+          return { days: firestoreDays, syncedAt: firestoreSyncedAt, source: 'firestore-authoritative' };
+        }
         if (!isMonthStale(firestoreSyncedAt, monthKey)) {
           await _enrichAssignmentsWithSource(firestoreDays);
           LocalCache.saveGroupSchedule(groupId, monthKey, firestoreDays, firestoreSyncedAt).catch(() => {});
@@ -205,11 +278,11 @@ const getMonth = async ({ group, monthKey, token, userSource, currentUserId, for
  * @returns {Promise<Object<string, { days: Object, syncedAt: string|null, source: string }>>}
  *          keyed by groupId
  */
-const getMultipleMonths = async ({ groups, monthKey, token, userSource, currentUserId, force = false }) => {
+const getMultipleMonths = async ({ groups, monthKey, token, userSource, auroraOnlyMode = false, currentUserId, force = false }) => {
   const out = {};
   if (!Array.isArray(groups) || groups.length === 0 || !monthKey) return out;
   await Promise.all(groups.map(async (g) => {
-    const res = await getMonth({ group: g, monthKey, token, userSource, currentUserId, force });
+    const res = await getMonth({ group: g, monthKey, token, userSource, auroraOnlyMode, currentUserId, force });
     out[String(g.id)] = res;
   }));
   return out;
@@ -378,9 +451,54 @@ const enrichWithPendingSwaps = async (perGroupResult, currentUserId, localSwaps 
   return perGroupResult;
 };
 
+const subscribeMultipleMonths = ({
+  groups,
+  monthKey,
+  currentUserId,
+  localSwaps = null,
+  onChange,
+  onError,
+}) => {
+  if (!Array.isArray(groups) || groups.length === 0 || !monthKey) return () => {};
+  const latest = {};
+  let seq = 0;
+  const unsubs = groups
+    .filter(g => g?.id)
+    .map(g => FirebaseAdapter.subscribeGroupScheduleMonth(
+      String(g.id),
+      monthKey,
+      async (res) => {
+        const gid = String(g.id);
+        let days = _normalizeScheduleDays(res?.days || {});
+        days = await _mergeMemberShiftOverlay(g, monthKey, days, currentUserId);
+        await _enrichAssignmentsWithSource(days);
+        latest[gid] = {
+          days,
+          syncedAt: res?.syncedAt || new Date().toISOString(),
+          source: res?.source || 'firestore-live',
+        };
+        const snapshot = {};
+        for (const group of groups) {
+          const id = String(group.id);
+          snapshot[id] = latest[id] || { days: {}, syncedAt: null, source: 'firestore-live' };
+        }
+        const currentSeq = ++seq;
+        await enrichWithPendingOffers(snapshot, currentUserId);
+        await enrichWithPendingSwaps(snapshot, currentUserId, localSwaps);
+        if (currentSeq === seq) onChange?.(snapshot);
+      },
+      onError,
+    ));
+
+  return () => unsubs.forEach(unsub => {
+    if (typeof unsub === 'function') unsub();
+  });
+};
+
 export default {
   getMonth,
   getMultipleMonths,
+  subscribeMultipleMonths,
   aggregateByDate,
   enrichWithPendingOffers,
   enrichWithPendingSwaps,

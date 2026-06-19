@@ -7,6 +7,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useColors, Typography, Spacing, BorderRadius, Shadows } from '../constants/DesignSystem';
 import { useOffers } from '../contexts/OffersContext';
+import { routeForNotification } from '../utils/notificationRoute';
 
 const _labelName = (l) => ({ M: 'Manhã', T: 'Tarde', N: 'Noite', D: 'Noite' }[l] || l || 'Plantão');
 const _fmtDate = (iso) => {
@@ -62,6 +63,14 @@ export default function AvisosScreen({ navigation }) {
   );
 
   const empty = offersReceived.length === 0 && swapsReceived.length === 0 && outcomeNotifs.length === 0;
+
+  // Tocar num aviso → marca lido e cai na tela do aviso em questão (Vagas,
+  // Movimentações, …), conforme o tipo/payload. Mesmo mapa do deep-link de push.
+  const onOutcomePress = useCallback((n) => {
+    if (!n.read) markInboxRead(n.id);
+    const route = routeForNotification({ type: n.type, ...(n.payload || {}) });
+    if (route) navigation?.navigate?.(route.screen, route.params || null);
+  }, [markInboxRead, navigation]);
 
   return (
     <View style={[s.root, { backgroundColor: C.background.secondary }]}>
@@ -125,13 +134,14 @@ export default function AvisosScreen({ navigation }) {
                   <Pressable
                     key={n.id}
                     style={[s.outcomeRow, !n.read && { backgroundColor: C.accentSoft + '40' }]}
-                    onPress={() => !n.read && markInboxRead(n.id)}
+                    onPress={() => onOutcomePress(n)}
                   >
                     {!n.read && <View style={s.unreadDot} />}
                     <View style={{ flex: 1 }}>
                       <Text style={s.outcomeTitle} numberOfLines={1}>{n.title}</Text>
                       {n.body ? <Text style={s.outcomeBody} numberOfLines={2}>{n.body}</Text> : null}
                     </View>
+                    <Ionicons name="chevron-forward" size={16} color={C.text.tertiary} style={{ marginLeft: 4 }} />
                     <Text style={s.outcomeAgo}>{_fmtAgo(n.createdAt)}</Text>
                   </Pressable>
                 ))}

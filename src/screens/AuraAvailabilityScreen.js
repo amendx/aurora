@@ -45,6 +45,25 @@ const _fmtBr = (dateKey) => {
 };
 const _nextDays = (n) => Array.from({ length: n }, (_, i) => _addDays(_todayKey(), i));
 
+// Máscara de digitação "DD/MM" ou "DD/MM/AAAA".
+const _maskBr = (t) => {
+  const d = String(t).replace(/\D/g, '').slice(0, 8);
+  if (d.length <= 2) return d;
+  if (d.length <= 4) return `${d.slice(0, 2)}/${d.slice(2)}`;
+  return `${d.slice(0, 2)}/${d.slice(2, 4)}/${d.slice(4)}`;
+};
+// "DD/MM" (ano = atual) ou "DD/MM/AAAA" → "YYYY-MM-DD". null se inválida.
+const _parseBr = (str) => {
+  const m = String(str).trim().match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
+  if (!m) return null;
+  const day = +m[1], mon = +m[2];
+  let year = m[3] ? +m[3] : new Date().getFullYear();
+  if (year < 100) year += 2000;
+  const d = new Date(year, mon - 1, day);
+  if (d.getMonth() !== mon - 1 || d.getDate() !== day) return null; // ex.: 31/02
+  return `${d.getFullYear()}-${String(mon).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+};
+
 export default function AuraAvailabilityScreen({ navigation }) {
   const C = useColors();
   const insets = useSafeAreaInsets();
@@ -64,9 +83,9 @@ export default function AuraAvailabilityScreen({ navigation }) {
   const [bLabel, setBLabel] = useState('');
   const [bColor, setBColor] = useState(COMPROMISSO_COLORS[0]);
 
-  // form: folga
-  const [fStart, setFStart] = useState(_todayKey());
-  const [fDays, setFDays] = useState(1);
+  // form: folga (datas manuais DD/MM)
+  const [fFrom, setFFrom] = useState('');
+  const [fTo, setFTo] = useState('');
   const [fLabel, setFLabel] = useState('');
 
   // form: evento pontual (data + turno/horário)
@@ -155,9 +174,12 @@ export default function AuraAvailabilityScreen({ navigation }) {
   };
 
   const handleAddFolga = () => {
-    const endDate = _addDays(fStart, Math.max(1, fDays) - 1);
-    persist(addFolga(config, { startDate: fStart, endDate, label: fLabel.trim() || 'Folga' }));
-    setFLabel('');
+    let start = _parseBr(fFrom);
+    let end = _parseBr(fTo);
+    if (!start || !end) return;
+    if (end < start) [start, end] = [end, start]; // inverte se digitar fora de ordem
+    persist(addFolga(config, { startDate: start, endDate: end, label: fLabel.trim() || 'Folga' }));
+    setFFrom(''); setFTo(''); setFLabel('');
   };
 
   const toggleEvTurno = (k) =>
@@ -284,7 +306,7 @@ export default function AuraAvailabilityScreen({ navigation }) {
 
       {/* ── Folgas ── */}
       <Text style={s.sectionTitle}>Folgas</Text>
-      <Text style={s.sectionHint}>Períodos de 1+ dias sem pegar plantão (viagem…). Se já tiver plantão num dia de folga, passe-o (ceder/trocar).</Text>
+      <Text style={s.sectionHint}>Período sem pegar plantão (viagem…). Digite as datas (DD/MM) — qualquer dia do mês. Se já tiver plantão num dia de folga, passe-o (ceder/trocar).</Text>
 
       <View style={s.card}>
         {(config.folgas || []).length === 0 && (
@@ -317,28 +339,30 @@ export default function AuraAvailabilityScreen({ navigation }) {
 
         <View style={s.divider} />
 
-        <Text style={s.formLabel}>Início</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-          {_nextDays(30).map(dk => {
-            const active = dk === fStart;
-            const d = new Date(`${dk}T00:00:00`);
-            return (
-              <Pressable key={dk} onPress={() => setFStart(dk)} style={[s.dayChip, active && { backgroundColor: C.primary, borderColor: C.primary }]}>
-                <Text style={[s.dayChipWd, active && { color: '#fff' }]}>{WEEKDAYS[d.getDay()]}</Text>
-                <Text style={[s.dayChipNum, active && { color: '#fff' }]}>{d.getDate()}</Text>
-              </Pressable>
-            );
-          })}
-        </ScrollView>
-
-        <View style={s.stepperRow}>
-          <Text style={s.formLabel}>Duração: {fDays} {fDays === 1 ? 'dia' : 'dias'}</Text>
-          <View style={s.stepper}>
-            <Pressable style={s.stepBtn} onPress={() => setFDays(d => Math.max(1, d - 1))}><Ionicons name="remove" size={18} color={C.primary} /></Pressable>
-            <Pressable style={s.stepBtn} onPress={() => setFDays(d => d + 1)}><Ionicons name="add" size={18} color={C.primary} /></Pressable>
+        <View style={s.dateRangeRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={s.formLabel}>De</Text>
+            <TextInput
+              style={s.input}
+              placeholder="13/06"
+              placeholderTextColor={C.text.tertiary}
+              keyboardType="numeric"
+              value={fFrom}
+              onChangeText={(t) => setFFrom(_maskBr(t))}
+            />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={s.formLabel}>A</Text>
+            <TextInput
+              style={s.input}
+              placeholder="19/06"
+              placeholderTextColor={C.text.tertiary}
+              keyboardType="numeric"
+              value={fTo}
+              onChangeText={(t) => setFTo(_maskBr(t))}
+            />
           </View>
         </View>
-        <Text style={s.itemSub}>Até {_fmtBr(_addDays(fStart, Math.max(1, fDays) - 1))}</Text>
 
         <TextInput
           style={s.input}
@@ -348,7 +372,11 @@ export default function AuraAvailabilityScreen({ navigation }) {
           onChangeText={setFLabel}
         />
 
-        <Pressable style={s.addBtn} onPress={handleAddFolga}>
+        <Pressable
+          style={[s.addBtn, !(_parseBr(fFrom) && _parseBr(fTo)) && { opacity: 0.5 }]}
+          disabled={!(_parseBr(fFrom) && _parseBr(fTo))}
+          onPress={handleAddFolga}
+        >
           <Ionicons name="add" size={18} color="#fff" />
           <Text style={s.addBtnText}>Adicionar folga</Text>
         </Pressable>
@@ -506,13 +534,6 @@ export default function AuraAvailabilityScreen({ navigation }) {
       <View style={s.card}>
         <RuleStepper
           C={C} s={s}
-          label="Descanso mínimo entre plantões"
-          value={`${Math.round((rules.minRestMinutes || 0) / 60)}h`}
-          onMinus={() => updateRule({ minRestMinutes: Math.max(0, (rules.minRestMinutes || 0) - 60) })}
-          onPlus={() => updateRule({ minRestMinutes: (rules.minRestMinutes || 0) + 60 })}
-        />
-        <RuleStepper
-          C={C} s={s}
           label="Máximo de horas seguidas"
           value={`${Math.round((rules.maxConsecutiveMinutes || 0) / 60)}h`}
           onMinus={() => updateRule({ maxConsecutiveMinutes: Math.max(60, (rules.maxConsecutiveMinutes || 0) - 60) })}
@@ -521,9 +542,27 @@ export default function AuraAvailabilityScreen({ navigation }) {
         <RuleStepper
           C={C} s={s}
           label="Máximo de dias seguidos"
-          value={`${rules.maxConsecutiveDays || 0}`}
-          onMinus={() => updateRule({ maxConsecutiveDays: Math.max(1, (rules.maxConsecutiveDays || 0) - 1) })}
+          sublabel="0 = sem limite"
+          value={rules.maxConsecutiveDays ? `${rules.maxConsecutiveDays}` : '—'}
+          onMinus={() => updateRule({ maxConsecutiveDays: Math.max(0, (rules.maxConsecutiveDays || 0) - 1) })}
           onPlus={() => updateRule({ maxConsecutiveDays: (rules.maxConsecutiveDays || 0) + 1 })}
+        />
+        <RuleStepper
+          C={C} s={s}
+          label="Descanso mínimo entre blocos"
+          sublabel={rules.maxConsecutiveDays ? `Após ${rules.maxConsecutiveDays} dias seguidos de plantão` : 'Defina o máx de dias seguidos primeiro'}
+          value={`${Math.round((rules.minRestMinutes || 0) / 60)}h`}
+          disabled={!rules.maxConsecutiveDays}
+          onMinus={() => updateRule({ minRestMinutes: Math.max(0, (rules.minRestMinutes || 0) - 60) })}
+          onPlus={() => updateRule({ minRestMinutes: (rules.minRestMinutes || 0) + 60 })}
+        />
+        <RuleStepper
+          C={C} s={s}
+          label="Tempo até um compromisso"
+          sublabel="Deslocamento mínimo entre plantão e evento"
+          value={`${rules.eventBufferMinutes ?? 75} min`}
+          onMinus={() => updateRule({ eventBufferMinutes: Math.max(0, (rules.eventBufferMinutes ?? 75) - 15) })}
+          onPlus={() => updateRule({ eventBufferMinutes: (rules.eventBufferMinutes ?? 75) + 15 })}
           last
         />
       </View>
@@ -531,14 +570,17 @@ export default function AuraAvailabilityScreen({ navigation }) {
   );
 }
 
-function RuleStepper({ C, s, label, value, onMinus, onPlus, last }) {
+function RuleStepper({ C, s, label, sublabel, value, onMinus, onPlus, last, disabled }) {
   return (
-    <View style={[s.ruleRow, !last && s.ruleRowBorder]}>
-      <Text style={s.ruleLabel}>{label}</Text>
+    <View style={[s.ruleRow, !last && s.ruleRowBorder, disabled && s.ruleRowDisabled]}>
+      <View style={s.ruleTextCol}>
+        <Text style={s.ruleLabel}>{label}</Text>
+        {sublabel ? <Text style={s.ruleSub}>{sublabel}</Text> : null}
+      </View>
       <View style={s.stepper}>
-        <Pressable style={s.stepBtn} onPress={onMinus}><Ionicons name="remove" size={18} color={C.primary} /></Pressable>
+        <Pressable style={s.stepBtn} disabled={disabled} onPress={onMinus}><Ionicons name="remove" size={18} color={disabled ? C.text.tertiary : C.primary} /></Pressable>
         <Text style={s.ruleValue}>{value}</Text>
-        <Pressable style={s.stepBtn} onPress={onPlus}><Ionicons name="add" size={18} color={C.primary} /></Pressable>
+        <Pressable style={s.stepBtn} disabled={disabled} onPress={onPlus}><Ionicons name="add" size={18} color={disabled ? C.text.tertiary : C.primary} /></Pressable>
       </View>
     </View>
   );
@@ -591,6 +633,7 @@ const makeStyles = (C) => StyleSheet.create({
     paddingHorizontal: Spacing.md, paddingVertical: Spacing.sm, fontSize: Typography.fontSize.body, color: C.text.primary,
     fontFamily: Typography.fontFamily.regular,
   },
+  dateRangeRow: { flexDirection: 'row', alignItems: 'flex-end', gap: Spacing.md },
   timeRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm },
   timeInput: { flex: 1, textAlign: 'center' },
   timeSep: { fontSize: Typography.fontSize.subhead, color: C.text.tertiary, marginTop: Spacing.md },
@@ -608,6 +651,9 @@ const makeStyles = (C) => StyleSheet.create({
 
   ruleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: Spacing.md },
   ruleRowBorder: { borderBottomWidth: 0.5, borderBottomColor: C.border.light },
-  ruleLabel: { flex: 1, fontSize: Typography.fontSize.subhead, color: C.text.primary, fontFamily: Typography.fontFamily.regular },
+  ruleRowDisabled: { opacity: 0.45 },
+  ruleTextCol: { flex: 1, paddingRight: Spacing.sm },
+  ruleLabel: { fontSize: Typography.fontSize.subhead, color: C.text.primary, fontFamily: Typography.fontFamily.regular },
+  ruleSub: { fontSize: Typography.fontSize.caption2, color: C.text.tertiary, marginTop: 1 },
   ruleValue: { minWidth: 44, textAlign: 'center', fontSize: Typography.fontSize.body, fontFamily: Typography.fontFamily.bold, color: C.text.primary },
 });

@@ -18,6 +18,7 @@ import { initializeApp, getApps } from 'firebase/app';
 import { getFirestore } from 'firebase/firestore';
 import { getAuth, initializeAuth, getReactNativePersistence } from 'firebase/auth';
 import { getStorage } from 'firebase/storage';
+import { getFunctions } from 'firebase/functions';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const FIREBASE_CONFIG = {
@@ -37,9 +38,10 @@ const _isConfigured = !!(
   FIREBASE_CONFIG.appId
 );
 
-let db      = null;
-let auth    = null;
-let storage = null;
+let db        = null;
+let auth      = null;
+let storage   = null;
+let functions = null;
 
 if (_isConfigured) {
   try {
@@ -50,6 +52,8 @@ if (_isConfigured) {
       ? initializeAuth(app, { persistence: getReactNativePersistence(AsyncStorage) })
       : getAuth(app);
     storage = getStorage(app);
+    // Callables (região default us-central1, igual ao deploy das funções).
+    functions = getFunctions(app);
   } catch (err) {
     console.warn('[Aurora/Firebase] Init failed:', err?.message);
   }
@@ -57,4 +61,4 @@ if (_isConfigured) {
   console.info('[Aurora/Firebase] Firebase env vars not set — shadow writes disabled. See .env.example.');
 }
 
-export { db, auth, storage };
+export { db, auth, storage, functions };

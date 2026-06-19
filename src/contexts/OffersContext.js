@@ -19,6 +19,7 @@
 
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { AuthContext } from '../context/AuthContext';
+import { isViewOnly } from '../utils/userSource';
 import { useGroups } from './GroupsContext';
 import FirebaseAdapter from '../services/firebase/FirebaseAdapter';
 import { db } from '../services/firebase/config';
@@ -29,6 +30,7 @@ import Logger from '../utils/Logger';
 import ActivityLogger from '../utils/ActivityLogger';
 import UserSourceResolver from '../utils/UserSourceResolver';
 import { isWithinDevolutionWindow } from '../utils/shiftTransferLog';
+import { fmtDateBR } from '../utils/formatDate';
 
 const OffersContext = createContext();
 
@@ -190,6 +192,7 @@ export const OffersProvider = ({ children }) => {
   // calendar reflects the cede right away. The opening carries a full snapshot
   // so the holder can cancel and restore the shift before anyone claims.
   const cedeOpenToGroup = useCallback(async (shift) => {
+    if (isViewOnly(user)) return { success: false, reason: 'view_only' };
     if (!userId || !shift?.id || !shift?.group?.id) return { success: false };
     const groupId = String(shift.group.id);
     const openingId = _uuid('cede');
@@ -260,6 +263,7 @@ export const OffersProvider = ({ children }) => {
 
   // ── Ceder: targeted to one person ─────────────────────────────────────────
   const cedeTargeted = useCallback(async (shift, toUserId, toUserName) => {
+    if (isViewOnly(user)) return { success: false, reason: 'view_only' };
     if (!userId || !shift?.id || !toUserId) return { success: false };
     const offerId = _uuid('offer');
     const startISO = shift.startISO || shift.start_date || new Date().toISOString();
@@ -346,6 +350,7 @@ export const OffersProvider = ({ children }) => {
 
   // ── Offer responses ───────────────────────────────────────────────────────
   const acceptOffer = useCallback(async (offer) => {
+    if (isViewOnly(user)) return { success: false, reason: 'view_only' };
     if (!offer?.id || String(offer.toUserId) !== String(userId)) return { success: false };
     const result = await FirebaseAdapter.transferShift(offer.fromUserId, userId, offer.shiftSnapshot, {
       fromUserName: offer.fromUserName || null,
@@ -408,6 +413,7 @@ export const OffersProvider = ({ children }) => {
 
   // ── Swap responses ───────────────────────────────────────────────────────
   const acceptSwap = useCallback(async (swap) => {
+    if (isViewOnly(user)) return { success: false, reason: 'view_only' };
     if (!swap?.id || String(swap.targetUserId) !== String(userId)) return { success: false };
     const result = await FirebaseAdapter.swapShifts(
       swap.initiatorUserId, userId, swap.shiftA, swap.shiftB,
@@ -554,5 +560,5 @@ function _humanShiftLabel(shift) {
   const dateStr = shift.date || (shift.startISO || '').slice(0, 10) || '';
   const labelMap = { M: 'Manhã', T: 'Tarde', N: 'Noite', D: 'Noite' };
   const labelName = labelMap[shift.label] || shift.label || 'Plantão';
-  return `${labelName} · ${dateStr}`;
+  return dateStr ? `${labelName} · ${fmtDateBR(dateStr)}` : labelName;
 }
