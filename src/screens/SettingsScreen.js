@@ -6,7 +6,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AuthContext } from '../context/AuthContext';
-import { isViewOnly } from '../utils/userSource';
+import { canCallWebClient, isViewOnly } from '../utils/userSource';
 import { useTheme } from '../contexts/ThemeContext';
 import { useGroups } from '../contexts/GroupsContext';
 import { useShifts } from '../contexts/ShiftsContext';
@@ -14,6 +14,7 @@ import { useColors, Typography, Spacing, Shadows } from '../constants/DesignSyst
 import { registerScrollToTop } from '../utils/scrollToTopBus';
 import FirebaseAdapter from '../services/firebase/FirebaseAdapter';
 import LocalCache from '../services/LocalCache';
+import { syncWebClientShifts } from '../services/WebClientShiftSyncService';
 import * as SecureStore from 'expo-secure-store';
 import TimeUtils from '../utils/TimeUtils';
 import Logger from '../utils/Logger';
@@ -73,7 +74,7 @@ const SettingsScreen = ({ navigation }) => {
   useEffect(() => registerScrollToTop('settings', () => {
     scrollRef.current?.scrollTo?.({ y: 0, animated: true });
   }), []);
-  const { logout, user, setAuroraOnlyMode } = useContext(AuthContext);
+  const { logout, token, user, setAuroraOnlyMode } = useContext(AuthContext);
   const { isDark, setTheme } = useTheme();
   const { groupsById, coworkersById, membersByGroupId } = useGroups();
   const { loadMonthlyShifts } = useShifts();
@@ -81,6 +82,7 @@ const SettingsScreen = ({ navigation }) => {
   const C = useColors();
   const s = makeStyles(C);
   const [auroraSyncing, setAuroraSyncing] = useState(false);
+  const [webClientShiftSyncing, setWebClientShiftSyncing] = useState(false);
 
   const firstName = user?.name?.split(' ')[0] || 'Usuário';
   const fullName  = user?.name || 'Usuário';
@@ -88,6 +90,7 @@ const SettingsScreen = ({ navigation }) => {
   const isAuroraNative = user?.source === 'aurora';
   const auroraOnly = !!user?.auroraOnlyMode;
   const viewOnly = isViewOnly(user);
+  const activeWebClient = canCallWebClient(user);
 
   const handleLogout = () => {
     Alert.alert('Sair da Conta', 'Tem certeza que deseja sair?', [
@@ -249,6 +252,43 @@ const SettingsScreen = ({ navigation }) => {
               Alert.alert('Erro', err?.message || 'Falha ao sincronizar.');
             } finally {
               setAuroraSyncing(false);
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  const handleRefreshWebClientShifts = () => {
+    Alert.alert(
+      'Sincronizar plantões?',
+      'Vamos apagar os plantões cacheados e buscar novamente no webClient os últimos 3 meses, o mês atual e o próximo mês. Horas registradas e configurações serão preservadas.',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Sincronizar',
+          onPress: async () => {
+            setWebClientShiftSyncing(true);
+            try {
+              const result = await syncWebClientShifts({
+                userId: user?.id,
+                loadMonthlyShifts,
+                webClientToken: token,
+              });
+              const remoteMsg = result.firebaseCleanupOk
+                ? `${result.firebaseDeletedShifts} plantões antigos removidos do Firebase.`
+                : 'Firestore não permitiu limpar o cache remoto; o cache local foi sincronizado.';
+              const writeMsg = result.firebaseWriteOk
+                ? `${result.firebaseWrittenShifts} plantões regravados no Firebase.`
+                : 'Alguns meses não foram regravados no Firebase.';
+              Alert.alert(
+                'Pronto',
+                `${result.loadedMonthKeys.length} meses sincronizados. ${remoteMsg} ${writeMsg}`,
+              );
+            } catch (err) {
+              Alert.alert('Erro', err?.message || 'Falha ao sincronizar plantões.');
+            } finally {
+              setWebClientShiftSyncing(false);
             }
           },
         },
@@ -452,6 +492,29 @@ const SettingsScreen = ({ navigation }) => {
       <SL top>Plantões & valores</SL>
       <View style={s.card}>
         <Row icon="business-outline"      label="Meus hospitais"  hint="Valores, fidelização e bônus por hospital" accent onPress={() => navigation?.navigate?.('HospitalsScreen')} />
+        {activeWebClient && (
+          <>
+            <View style={s.sep} />
+            <Pressable
+              style={({ pressed }) => [s.row, pressed && !webClientShiftSyncing && s.rowPressed]}
+              onPress={webClientShiftSyncing ? undefined : handleRefreshWebClientShifts}
+            >
+              <View style={s.rowIcon}>
+                <Ionicons name="refresh-outline" size={16} color={C.primary} />
+              </View>
+              <View style={s.rowBody}>
+                <Text style={s.rowLabel}>Sincronizar plantões</Text>
+                <Text style={s.rowHint}>Busca novamente no webClient sem apagar horas registradas</Text>
+              </View>
+              {webClientShiftSyncing ? (
+                <ActivityIndicator size="small" color={C.primary} />
+              ) : (
+                <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
+              )}
+            </Pressable>
+            <View style={s.sep} />
+          </>
+        )}
         {/* Global "Valores e bônus" (ConfigScreen) intentionally hidden — per-hospital
             is now the primary path. Re-enable this Row to roll back to the global UI. */}
         {/* <Row icon="cash-outline"          label="Valores e bônus" hint="Hora-base, fidelização, FDS" onPress={() => navigation?.navigate?.('ConfigScreen')} /> */}
@@ -459,8 +522,7 @@ const SettingsScreen = ({ navigation }) => {
         <Row icon="document-text-outline" label="Relatórios"      hint="Histórico e exportação"            onPress={() => navigation?.navigate?.('Reports')} last />
       </View>
 
-      {/* "Usar Aurora como fonte" oculto por hora (WEBCLIENT-BRIDGE). */}
-      {false && !isAuroraNative && (
+      {!isAuroraNative && (
         <>
           <SL top>Fonte dos plantões</SL>
           <View style={s.card}>

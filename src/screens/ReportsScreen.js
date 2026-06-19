@@ -23,6 +23,8 @@ import LocalCache from '../services/LocalCache';
 import { getMonthTotalValue, getMonthTotalHours } from '../utils/MonthSummaryComputer';
 import { buildHybridConfig, isPastMonthKey } from '../utils/HospitalConfigResolver';
 import { applyPublishedHospitalConfigs, collectInstIds } from '../utils/PublishedHospitalConfig';
+import { applyLuisFrancaPreset } from '../utils/LuisFrancaPreset';
+import { isViewOnly } from '../utils/userSource';
 import { ChartsView } from './ChartsScreen';
 
 // ── Skeleton ──────────────────────────────────────────────────────────────────
@@ -183,6 +185,10 @@ export default function ReportsScreen({ onExportReady, initialTab = 'resumo' } =
         breakdownConfig,
         collectInstIds(daysWithShifts),
       );
+      const teForLoyalty = user?.id
+        ? ((await LocalCache.getTimeEntries(user.id, viewMonthKey).catch(() => ({}))) || {})
+        : {};
+      breakdownConfig = applyLuisFrancaPreset(breakdownConfig, daysWithShifts, isViewOnly(user), teForLoyalty);
 
       // Pre-pass: total planned hours for the month — needed by the legacy
       // global-loyalty tier filter inside calculateShiftValueWithBreakdown.

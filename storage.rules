@@ -1,5 +1,17 @@
 rules_version = '2';
 
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if true;
+    }
+  }
+}
+
+/* ── REGRAS ORIGINAIS (restaurar depois) ─────────────────────────────────────
+
+rules_version = '2';
+
 // AURORA-ONLY: todo acesso ao Storage exige Firebase Auth. Sem fallback anônimo.
 
 service firebase.storage {
@@ -18,3 +30,5 @@ service firebase.storage {
     }
   }
 }
+
+────────────────────────────────────────────────────── FIM REGRAS ORIGINAIS */

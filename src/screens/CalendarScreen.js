@@ -122,7 +122,8 @@ const CalendarScreen = ({ navigation }) => {
   const [loyaltyConfig, setLoyaltyConfig] = useState(null);
   const [, setExtraHours] = useState(0);
   const [cachedSummary, setCachedSummary] = useState(null);
-  const monthSummary = contextSummary || cachedSummary;
+  const contextMatchesView = loadedFor === `${currentDate.getFullYear()}-${currentDate.getMonth() + 1}`;
+  const monthSummary = (contextMatchesView ? contextSummary : null) || cachedSummary;
   const [groupColors, setGroupColors] = useState({});
   const [timeEntriesByMonth, setTimeEntriesByMonth] = useState({});
 
@@ -157,29 +158,82 @@ const CalendarScreen = ({ navigation }) => {
   // Load month summary from cache when data or month changes
   useEffect(() => {
     if (!userId) return;
+    setCachedSummary(null);
     const year = currentDate.getFullYear();
     const month = currentDate.getMonth() + 1;
     const monthKey = `${year}-${String(month).padStart(2, '0')}`;
-    LocalCache.getSummary(userId, monthKey).then(s => s && setCachedSummary(s)).catch(() => {});
+    LocalCache.getSummary(userId, monthKey).then(s => setCachedSummary(s || null)).catch(() => {});
   }, [userId, currentDate.getFullYear(), currentDate.getMonth(), daysWithShifts]);
 
   // Load time-entries for current + next + currently-viewed month so the
   // summary's "Horas extras" totalizer stays accurate as the user navigates.
+  // Reads from LocalCache first, then merges SecureStore entries as fallback
+  // (DayViewScreen saves to SecureStore only, not LocalCache).
   useEffect(() => {
     if (!userId) return;
+    let cancelled = false;
+    const uid = String(userId);
     const now = new Date();
     const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
     const nextDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
     const nextKey = `${nextDate.getFullYear()}-${String(nextDate.getMonth() + 1).padStart(2, '0')}`;
     const viewKey = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}`;
     const keys = Array.from(new Set([monthKey, nextKey, viewKey]));
-    Promise.all(keys.map(k => LocalCache.getTimeEntries(userId, k).catch(() => ({}))))
-      .then(maps => {
-        const next = {};
-        keys.forEach((k, i) => { next[k] = maps[i] || {}; });
-        setTimeEntriesByMonth(next);
-      });
-  }, [userId, currentDate.getFullYear(), currentDate.getMonth()]);
+
+    (async () => {
+      const maps = await Promise.all(keys.map(k => LocalCache.getTimeEntries(userId, k).catch(() => ({}))));
+      const next = {};
+      keys.forEach((k, i) => { next[k] = maps[i] || {}; });
+
+      // Merge SecureStore entries for viewed month (covers hours registered
+      // from DayViewScreen which writes to SecureStore but not LocalCache).
+      const viewEntries = { ...(next[viewKey] || {}) };
+      for (const d of (daysWithShifts || [])) {
+        const shifts = d.shifts || [];
+        const needsLookup = shifts.some(sh => !viewEntries[sh.id]?.actualDurationMinutes);
+        if (!needsLookup) continue;
+        try {
+          const raw = (uid && await SecureStore.getItemAsync(`real_hours_${uid}_${d.date}`))
+            || await SecureStore.getItemAsync(`real_hours_${d.date}`);
+          if (!raw) continue;
+          const parsed = JSON.parse(raw);
+          shifts.forEach((shift, i) => {
+            if (viewEntries[shift.id]?.actualDurationMinutes) return;
+            const rh = parsed[i];
+            if (!rh?.startTime || !rh?.endTime) return;
+            const mins = TimeUtils.calculateDurationMinutes(rh.startTime, rh.endTime);
+            if (mins != null && mins > 0) {
+              viewEntries[shift.id] = {
+                shiftId: shift.id,
+                actualDurationMinutes: mins,
+                actualStart: rh.startTime,
+                actualEnd: rh.endTime,
+              };
+            }
+          });
+        } catch {}
+      }
+      next[viewKey] = viewEntries;
+
+      if (!cancelled) setTimeEntriesByMonth(next);
+    })();
+
+    return () => { cancelled = true; };
+  }, [userId, currentDate.getFullYear(), currentDate.getMonth(), loadedFor]);
+
+  useEffect(() => {
+    if (!userId || !navigation?.addListener) return;
+    const unsubscribe = navigation.addListener('focus', () => {
+      const year = currentDate.getFullYear();
+      const month = currentDate.getMonth() + 1;
+      const monthKey = `${year}-${String(month).padStart(2, '0')}`;
+      LocalCache.getSummary(userId, monthKey).then(s => setCachedSummary(s || null)).catch(() => {});
+      LocalCache.getTimeEntries(userId, monthKey).then(te => {
+        setTimeEntriesByMonth(prev => ({ ...prev, [monthKey]: te || {} }));
+      }).catch(() => {});
+    });
+    return unsubscribe;
+  }, [navigation, userId, currentDate.getFullYear(), currentDate.getMonth()]);
 
   // Initial data load
   useEffect(() => {
@@ -429,8 +483,21 @@ const CalendarScreen = ({ navigation }) => {
       (d.shifts || []).forEach(shift => {
         const entry = entries[shift.id];
         if (!entry?.actualDurationMinutes) return;
-        const planned = shift.splitHours?.minutesThisMonth
-          ?? TimeUtils.getShiftStandardMinutes(shift.label);
+        // Use actual shift duration: splitHours > durationMinutes > parsed time > label default
+        let planned = shift.splitHours?.minutesThisMonth;
+        if (planned == null && shift.durationMinutes > 0) {
+          planned = shift.durationMinutes;
+        }
+        if (planned == null && shift.time) {
+          let parts = shift.time.split(' – ');
+          if (parts.length !== 2) parts = shift.time.split(' - ');
+          if (parts.length === 2) {
+            const norm = t => t.replace(/\s*\([^)]*\)/, '').replace('h', ':').trim();
+            const mins = TimeUtils.calculateDurationMinutes(norm(parts[0]), norm(parts[1]));
+            if (mins != null && mins > 0) planned = mins;
+          }
+        }
+        if (planned == null) planned = TimeUtils.getShiftStandardMinutes(shift.label);
         const diff = entry.actualDurationMinutes - planned;
         if (diff > 0) extraMin += diff;
       });
@@ -536,6 +603,10 @@ const CalendarScreen = ({ navigation }) => {
       // Reload summary from cache
       const monthKey = `${year}-${String(month).padStart(2, '0')}`;
       LocalCache.getSummary(userId, monthKey).then(s => s && setCachedSummary(s)).catch(() => {});
+      // Reload time entries so stats.extraHours recalculates
+      LocalCache.getTimeEntries(userId, monthKey).then(te => {
+        setTimeEntriesByMonth(prev => ({ ...prev, [monthKey]: te || {} }));
+      }).catch(() => {});
     } catch (err) {
       Logger.warn('CalendarScreen: summary refresh error:', err?.message);
     }
@@ -717,28 +788,29 @@ const CalendarScreen = ({ navigation }) => {
   );
 
   // ── Render: Summary card ──────────────────────────────────────────────────────
+  const summaryLoading = loading || isNavigating;
   const renderSummaryCard = () => (
     <View style={s.summaryCard}>
       <View style={s.summaryTopRow}>
         <Text style={s.summaryEarningsLabel}>Ganhos previstos</Text>
         <Text style={s.summaryEarnings}>
-          {loading ? '—' : projected != null ? (valuesHidden ? 'R$ ••••' : fmtBRLk(projected)) : '—'}
+          {summaryLoading ? '—' : projected != null ? (valuesHidden ? 'R$ ••••' : fmtBRLk(projected)) : '—'}
         </Text>
       </View>
       <View style={s.summaryDivider} />
       <View style={s.summaryStatsRow}>
         <View style={s.summaryStat}>
           <Text style={s.summaryStatLabel}>Plantões</Text>
-          <Text style={s.summaryStatValue}>{loading ? '—' : stats.totalShifts}</Text>
+          <Text style={s.summaryStatValue}>{summaryLoading ? '—' : stats.totalShifts}</Text>
         </View>
         <View style={[s.summaryStat, { borderLeftWidth: 0.5, borderLeftColor: C.border.light }]}>
           <Text style={s.summaryStatLabel}>Horas</Text>
-          <Text style={s.summaryStatValue}>{loading ? '—' : formatHours(stats.totalHours)}</Text>
+          <Text style={s.summaryStatValue}>{summaryLoading ? '—' : formatHours(stats.totalHours)}</Text>
         </View>
         <View style={[s.summaryStat, { borderLeftWidth: 0.5, borderLeftColor: C.border.light }]}>
           <Text style={s.summaryStatLabel}>Horas extras</Text>
           <Text style={[s.summaryStatValue, stats.extraHours > 0 && { color: C.warning }]}>
-            {loading ? '—' : (stats.extraHours > 0 ? formatHours(stats.extraHours) : '—')}
+            {summaryLoading ? '—' : (stats.extraHours > 0 ? formatHours(stats.extraHours) : '—')}
           </Text>
         </View>
       </View>

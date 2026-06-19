@@ -450,14 +450,20 @@ function LoginContent({ heading, email, setEmail, password, setPassword, isPassw
       <Pressable
         onPress={handleSoffiaLogin}
         disabled={!canSubmit || isSoffiaLoading}
-        style={({ pressed }) => [s.socialBtn, s.socialBtnSubtle, pressed && { opacity: 0.8 }, (!canSubmit || isSoffiaLoading) && { opacity: 0.5 }]}
+        style={({ pressed }) => [
+          s.socialBtn,
+          (!canSubmit || isSoffiaLoading)
+            ? { backgroundColor: C.border.light, borderColor: C.border.light }
+            : { backgroundColor: '#256FFF', borderColor: '#256FFF' },
+          pressed && { opacity: 0.8 },
+        ]}
       >
         {isSoffiaLoading ? (
-          <ActivityIndicator size="small" color={C.text.tertiary} />
+          <ActivityIndicator size="small" color="#fff" />
         ) : (
           <>
-            <SoffiaLogo size={18} color={C.text.tertiary} />
-            <Text style={[s.socialBtnText, { color: C.text.tertiary }]}>Entrar com Soffia</Text>
+            <SoffiaLogo size={18} color={(!canSubmit) ? C.text.tertiary : '#fff'} />
+            <Text style={[s.socialBtnText, { color: (!canSubmit) ? C.text.tertiary : '#fff' }]}>Entrar com Soffia</Text>
           </>
         )}
       </Pressable>

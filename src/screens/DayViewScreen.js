@@ -25,24 +25,42 @@ import { usePrivacy } from '../contexts/PrivacyContext';
 import { useGroups } from '../contexts/GroupsContext';
 import { useColors, Typography, Spacing, BorderRadius, Shadows } from '../constants/DesignSystem';
 import { getFullShiftConfig, calculateShiftValueSync, roundCurrency, getShiftPeriod, getShiftHours, shouldUseWeekendValue } from '../utils/ShiftValueCalculator';
+import { resolveShiftConfig, resolveLoyaltyPct } from '../utils/HospitalConfigResolver';
+import { applyLuisFrancaPreset } from '../utils/LuisFrancaPreset';
+import { applyPublishedHospitalConfigs, collectInstIds } from '../utils/PublishedHospitalConfig';
 import ShiftBottomSheet from '../components/ShiftBottomSheet';
 import CederFlowSheet from './CederFlowSheet';
 import TrocarFlowSheet from './TrocarFlowSheet';
 import TrocaDetailSheet from './TrocaDetailSheet';
 import CessaoDetailSheet from './CessaoDetailSheet';
 import AddManualShiftModal from '../components/AddManualShiftModal';
+import HoursEditModal from '../components/HoursEditModal';
 import { AuthContext } from '../context/AuthContext';
 import { isViewOnly } from '../utils/userSource';
 import { getGroupColors } from '../utils/GroupColorConfig';
 import { movementVisual } from '../utils/MovementColors';
 import TodayCoworkersService from '../services/TodayCoworkersService';
+import LocalCache from '../services/LocalCache';
 import { deriveShiftStatus, SHIFT_STATUS_META, statusTone, SHIFT_STATUS } from '../utils/shiftStatus';
+import TimeUtils from '../utils/TimeUtils';
 
 // Horas do plantão p/ exibição: usa durationMinutes quando existe (manuais/
 // openings), senão cai pra duração padrão do turno (M/T=6h, N/D=12h). Plantões
 // vindos do webClient não trazem durationMinutes — sem fallback davam "0h".
-const shiftHoursOf = (sh) =>
-  sh?.durationMinutes ? Math.round(sh.durationMinutes / 60 * 10) / 10 : getShiftHours(sh?.label);
+const shiftHoursOf = (sh) => {
+  if (sh?.splitHours?.minutesThisMonth != null) return Math.round((sh.splitHours.minutesThisMonth / 60) * 10) / 10;
+  if (sh?.splitHours?.hoursThisMonth != null) return sh.splitHours.hoursThisMonth;
+  if (sh?.durationMinutes) return Math.round(sh.durationMinutes / 60 * 10) / 10;
+  const timeStr = sh?.time || '';
+  let parts = timeStr.split(' – ');
+  if (parts.length !== 2) parts = timeStr.split(' - ');
+  if (parts.length === 2) {
+    const norm = t => t.replace(/\s*\([^)]*\)/, '').replace('h', ':').trim();
+    const minutes = TimeUtils.calculateDurationMinutes(norm(parts[0]), norm(parts[1]));
+    if (minutes != null && minutes > 0) return Math.round((minutes / 60) * 10) / 10;
+  }
+  return getShiftHours(sh?.label);
+};
 
 const WEEKDAYS_PT = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
 const MONTHS_FULL_PT = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
@@ -91,7 +109,7 @@ const buildWeekDays = (centerDate) => {
 const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
   const C = useColors();
   const insets = useSafeAreaInsets();
-  const { daysWithShifts, hoursReport } = useShifts();
+  const { daysWithShifts, hoursReport, persistTimeEntries, refreshMonthSummary } = useShifts();
   const { myCededOpenings, refresh: refreshOpenings, cancelCedeOpening } = useOpenings();
   const { swapsSent, swapsReceived, offersSent, cancelSwap, cancelOffer } = useOffers();
   const { valuesHidden } = usePrivacy();
@@ -118,6 +136,7 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
 
   const [shiftPickerVisible, setShiftPickerVisible] = useState(false);
   const [addModalVisible, setAddModalVisible] = useState(false);
+  const [hoursEditor, setHoursEditor] = useState(null);
 
   // Foco + lista (mockup Aurora · Dia + Detalhe · variação C).
   // Só o plantão em foco exibe ações; os demais ficam como linhas compactas.
@@ -283,9 +302,17 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
 
   useEffect(() => {
     const userId = user?.id;
-    getFullShiftConfig().then(cfg => { setSavedValues(cfg.hourValues); setFullConfig(cfg); }).catch(() => {});
+    getFullShiftConfig().then(async cfg => {
+      const published = await applyPublishedHospitalConfigs(cfg, collectInstIds(daysWithShifts));
+      // timeEntries do mês exibido → faixa de fidelização por horas reais.
+      const mk = (daysWithShifts?.[0]?.date || selectedDateStr || '').slice(0, 7);
+      const te = (userId && mk) ? ((await LocalCache.getTimeEntries(userId, mk).catch(() => ({}))) || {}) : {};
+      const eff = applyLuisFrancaPreset(published, daysWithShifts, viewOnly, te);
+      setSavedValues(eff.hourValues);
+      setFullConfig(eff);
+    }).catch(() => {});
     if (userId) getGroupColors(userId).then(colors => setGroupColors(colors || {}));
-  }, [user?.id]);
+  }, [user?.id, viewOnly, daysWithShifts]);
 
   useEffect(() => {
     const uid = String(user?.id || '');
@@ -294,10 +321,24 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
       try {
         const raw = (uid && await SecureStore.getItemAsync(`real_hours_${uid}_${selectedDateStr}`))
           || await SecureStore.getItemAsync(`real_hours_${selectedDateStr}`);
-        setDayRealHours(raw ? JSON.parse(raw) : {});
+        const merged = raw ? JSON.parse(raw) : {};
+        // LocalCache time entries são a fonte sincronizada (Firebase) — SecureStore
+        // é device-local. Sem isto, horas extras registradas em outro aparelho não
+        // aparecem aqui. Mapeia por shiftId → índice em dayShifts.
+        if (uid) {
+          const monthKey = selectedDateStr.slice(0, 7);
+          const entries = (await LocalCache.getTimeEntries(uid, monthKey).catch(() => ({}))) || {};
+          dayShifts.forEach((sh, idx) => {
+            const e = entries[sh.id];
+            if (e?.actualStart && e?.actualEnd) {
+              merged[idx] = { ...(merged[idx] || {}), startTime: e.actualStart, endTime: e.actualEnd };
+            }
+          });
+        }
+        setDayRealHours(merged);
       } catch { setDayRealHours({}); }
     })();
-  }, [selectedDateStr, user?.id]);
+  }, [selectedDateStr, user?.id, dayShifts]);
 
   const resolveGroupColor = (shift) => {
     const raw = groupColors[String(shift.group?.id)] || shift.group?.color;
@@ -321,6 +362,36 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
     setBsVisible(true);
   };
 
+  const openHoursEditor = (shift) => {
+    const idx = dayShifts.findIndex(s => String(s.id) === String(shift.id));
+    setHoursEditor({ shift, index: idx >= 0 ? idx : 0 });
+  };
+
+  const saveShiftHours = async (hours) => {
+    if (!hoursEditor?.shift) return;
+    const index = hoursEditor.index;
+    const newRealHours = {
+      ...dayRealHours,
+      [index]: {
+        ...hours,
+        shiftId: hoursEditor.shift.id || `${hoursEditor.shift.label}_${index}`,
+        shiftType: hoursEditor.shift.label || 'M',
+        shiftTime: hoursEditor.shift.time || 'Horário não informado',
+        groupName: hoursEditor.shift.group?.name || 'Sem grupo',
+        institutionName: hoursEditor.shift.group?.institution?.name || 'Sem instituição',
+        registeredAt: new Date().toISOString(),
+      },
+    };
+    const uid = String(user?.id || '');
+    if (uid) {
+      await SecureStore.setItemAsync(`real_hours_${uid}_${selectedDateStr}`, JSON.stringify(newRealHours));
+    }
+    setDayRealHours(newRealHours);
+    await persistTimeEntries(selectedDateStr, newRealHours, dayShifts);
+    const [y, m] = selectedDateStr.split('-');
+    await refreshMonthSummary(Number(m), Number(y)).catch(() => {});
+  };
+
   const handleFAB = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setAddModalVisible(true);
@@ -334,27 +405,34 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
   // Decompõe o valor de um plantão em base + fidelização + bônus + horas extras.
   // Reaproveitado pelo FocusCard (exibe a composição) e por computeShiftValue.
   const computeValueParts = (shift, index) => {
-    const baseValue = calculateShiftValueSync(shift, shift.date, savedValues);
-    let loyaltyPct = 0;
+    const instId = shift?.group?.institution?.id ?? shift?.group?.institutionId ?? null;
+    const eff = resolveShiftConfig(fullConfig || {}, instId);
+    const rates = eff.hourValues || savedValues;
+    const baseValue = calculateShiftValueSync(shift, shift.date, rates);
+
+    const loyaltyHours = (() => {
+      if (instId == null || String(instId).length === 0) return hoursReport?.realHours || 0;
+      return (daysWithShifts || []).reduce((total, day) => {
+        return total + (day.shifts || []).reduce((sum, sh) => {
+          const iid = sh?.group?.institution?.id ?? sh?.group?.institutionId ?? null;
+          if (String(iid) !== String(instId)) return sum;
+          return sum + shiftHoursOf(sh);
+        }, 0);
+      }, 0);
+    })();
+    const loyaltyPct = resolveLoyaltyPct(eff, loyaltyHours);
     let bonusPct = 0;
-    const monthlyHours = hoursReport?.realHours || 0;
-    if (fullConfig?.loyaltyEnabled && fullConfig.loyaltyOptions?.length) {
-      const tier = fullConfig.loyaltyOptions
-        .filter(o => o.minHours <= monthlyHours)
-        .sort((a, b) => b.minHours - a.minHours)[0];
-      if (tier) loyaltyPct = tier.percentage;
-    }
-    if (fullConfig?.bonusEnabled && fullConfig.bonus) {
+    if (eff.bonusEnabled && eff.bonus) {
       const month = new Date(shift.date + 'T00:00:00').getMonth() + 1;
-      if (month >= fullConfig.bonus.startMonth && month <= fullConfig.bonus.endMonth) {
-        bonusPct = parseFloat(fullConfig.bonus.percentage) || 0;
-      }
+      const sm = parseInt(eff.bonus.startMonth, 10);
+      const em = parseInt(eff.bonus.endMonth, 10);
+      if (month >= sm && month <= em) bonusPct = parseFloat(eff.bonus.percentage) || 0;
     }
     const mult = 1 + loyaltyPct / 100 + bonusPct / 100;
     const loyaltyValue = roundCurrency(baseValue * loyaltyPct / 100);
     const bonusValue = roundCurrency(baseValue * bonusPct / 100);
 
-    // extra hours from registered real hours
+    // extra hours from registered real hours — mesma taxa/hora do hospital
     const realEntry = dayRealHours[index];
     let extraValue = 0;
     if (realEntry?.startTime && realEntry?.endTime) {
@@ -371,10 +449,10 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
       let realEnd = toMin(realEntry.endTime);
       if (realEnd < realStart) realEnd += 1440;
       const extraMin = (realEnd - realStart) - scheduledMin;
-      if (extraMin > 0 && savedValues) {
+      if (extraMin > 0 && rates) {
         const period = getShiftPeriod(shift.label);
-        const useWe = shouldUseWeekendValue(shift.date, shift.label, fullConfig?.fridayNightAsWeekend);
-        const hourly = parseFloat((useWe ? savedValues.weekend : savedValues.weekday)?.[period]) || 0;
+        const useWe = shouldUseWeekendValue(shift.date, shift.label, eff.fridayNightAsWeekend);
+        const hourly = parseFloat((useWe ? rates.weekend : rates.weekday)?.[period]) || 0;
         extraValue = roundCurrency((extraMin / 60) * hourly * mult);
       }
     }
@@ -386,12 +464,35 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
   // Cálculo de valor reaproveitado pelo FocusCard e pelo CompactRow.
   const computeShiftValue = (shift, index) => computeValueParts(shift, index).total;
 
+  // Colegas do plantão — paridade com ShiftBottomSheet._getCoworkersForShift.
+  const _getCoworkersForShift = (shift) => {
+    if (shift?.id && TodayCoworkersService.hasEntry(shift.id)) {
+      return TodayCoworkersService.getCoworkers(shift.id);
+    }
+    const selfId = user?.id ? String(user.id) : null;
+    const raw = [
+      ...(shift?.originalData?.coworkers || []),
+      ...(shift?.originalData?.vacancy?.coworkers || []),
+    ];
+    const seen = new Set();
+    const persons = [];
+    for (const p of raw) {
+      if (!p?.id) continue;
+      const pid = String(p.id);
+      if (seen.has(pid)) continue;
+      if (selfId && pid === selfId) continue;
+      seen.add(pid);
+      persons.push(coworkersById?.[pid] || coworkersById?.[p.id] || p);
+    }
+    return persons;
+  };
+
   // Handler central: roteia ações do FocusCard pro fluxo certo.
   // Pra ações de risco (ceder/trocar/excluir + cancelar pendentes), abre
   // ConfirmSheet que nomeia o plantão antes. "Registrar horas" dispara direto.
   const handleShiftAction = (shift, action) => {
     if (action === 'registrar_horas' || action === 'confirmar_presenca') {
-      openShiftDetail(shift);
+      openHoursEditor(shift);
       return;
     }
     // Ações de risco: ceder/trocar/excluir + cancelar pendentes — passam pela
@@ -625,13 +726,11 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
     const originName = shift.originUserName
       || coworkersById?.[shift.originUserId]?.name
       || (shift.originUserId ? `Doutor#${String(shift.originUserId).slice(0, 6)}` : null);
-    // Colegas no mesmo plantão — precomputado p/ hoje (TodayCoworkersService) com
-    // fallback pro snapshot que veio da API (originalData.coworkers).
-    let coworkers = TodayCoworkersService.getCoworkers(shift.id);
-    if ((!coworkers || coworkers.length === 0) && shift?.originalData?.coworkers?.length > 0) {
-      coworkers = shift.originalData.coworkers;
-    }
-    coworkers = coworkers || [];
+    // Colegas no mesmo plantão — mesma resolução do ShiftBottomSheet:
+    // TodayCoworkersService quando há entrada, senão snapshot da API
+    // (coworkers + vacancy.coworkers), deduplicado, sem o próprio usuário e
+    // enriquecido via coworkersById.
+    const coworkers = _getCoworkersForShift(shift);
 
     return (
       <View
@@ -945,6 +1044,14 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
         initialShiftIndex={bsInitialIdx}
         onCede={(sh) => { setBsVisible(false); setCedeShift(sh); }}
         onTrocar={(sh) => { setBsVisible(false); setTrocarShift(sh); }}
+        onHoursChanged={async (dateKey, newHours) => {
+          const dayData = (daysWithShifts || []).find(d => d.date === dateKey);
+          if (dayData?.shifts && newHours) {
+            await persistTimeEntries(dateKey, newHours, dayData.shifts);
+            const [y, m] = dateKey.split('-');
+            refreshMonthSummary(Number(m), Number(y)).catch(() => {});
+          }
+        }}
       />
       {cedeShift && <CederFlowSheet key={`cede-${cedeShift.id}`} visible shift={cedeShift} onClose={() => setCedeShift(null)} />}
       {trocarShift && <TrocarFlowSheet key={`trocar-${trocarShift.id}`} visible shift={trocarShift} onClose={() => setTrocarShift(null)} />}
@@ -953,6 +1060,14 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
         visible={addModalVisible}
         onClose={() => setAddModalVisible(false)}
         date={selectedDateStr}
+      />
+
+      <HoursEditModal
+        visible={!!hoursEditor}
+        onClose={() => setHoursEditor(null)}
+        onSave={saveShiftHours}
+        shift={hoursEditor?.shift}
+        currentHours={hoursEditor ? (dayRealHours?.[hoursEditor.index] || {}) : {}}
       />
 
       <ConfirmActionSheet

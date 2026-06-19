@@ -76,9 +76,16 @@ export const computeMonthSummary = (userId, monthKey, daysWithShifts, timeEntrie
   // minHours-tier gate. Per-institution loyalty does not depend on it
   // (it uses currentInstitutionLoyalty pre-resolved by ShiftsContext).
   let totalPlannedHours = 0;
+  const plannedHoursByInstitution = {};
   for (const dayData of (daysWithShifts || [])) {
     for (const shift of (dayData.shifts || [])) {
-      totalPlannedHours += _scheduledMinutesForShift(shift) / 60;
+      const plannedHours = _scheduledMinutesForShift(shift) / 60;
+      totalPlannedHours += plannedHours;
+      const iid = shift?.group?.institution?.id ?? shift?.group?.institutionId ?? null;
+      if (iid != null && String(iid).length > 0) {
+        const key = String(iid);
+        plannedHoursByInstitution[key] = (plannedHoursByInstitution[key] || 0) + plannedHours;
+      }
     }
   }
 
@@ -119,12 +126,16 @@ export const computeMonthSummary = (userId, monthKey, daysWithShifts, timeEntrie
       const rateGroup  = useWeekend ? (hv.weekend || {}) : (hv.weekday || {});
       const hourlyRate = parseFloat(rateGroup[period]) || 0;
 
-      const loyaltyPct = resolveLoyaltyPct(eff, totalPlannedHours);
+      const loyaltyHours = instId != null && String(instId).length > 0
+        ? (plannedHoursByInstitution[String(instId)] || 0)
+        : totalPlannedHours;
+      const loyaltyPct = resolveLoyaltyPct(eff, loyaltyHours);
       const bonusPct   = (eff.bonusEnabled && _bonusApplies(dateStr, eff.bonus))
         ? (parseFloat(eff.bonus?.percentage) || 0)
         : 0;
 
-      const baseValue    = (scheduledMin / 60) * hourlyRate;
+      const valueMin     = Math.max(scheduledMin, actualMin);
+      const baseValue    = (valueMin / 60) * hourlyRate;
       const loyaltyBonus = roundCurrency(baseValue * loyaltyPct / 100);
       const genBonus     = roundCurrency(baseValue * bonusPct   / 100);
 

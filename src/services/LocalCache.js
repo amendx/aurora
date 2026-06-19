@@ -118,6 +118,15 @@ const _set = async (key, value) => {
  */
 const getShifts = (userId, monthKey) => _get(K.shifts(userId, monthKey));
 
+const getShiftMonthKeys = async (userId) => {
+  const allKeys = await AsyncStorage.getAllKeys();
+  const prefix = `${P}_shifts_${userId}_`;
+  return allKeys
+    .filter(k => k.startsWith(prefix))
+    .map(k => k.slice(prefix.length))
+    .filter(Boolean);
+};
+
 /**
  * @param {number}   userId
  * @param {string}   monthKey
@@ -432,6 +441,24 @@ const clearTimeEntries = async (userId) => {
   return teKeys.length;
 };
 
+const clearShifts = async (userId, monthKeys = null) => {
+  const allKeys = await AsyncStorage.getAllKeys();
+  const prefix = `${P}_shifts_${userId}_`;
+  const allowed = Array.isArray(monthKeys) && monthKeys.length > 0
+    ? new Set(monthKeys.map(String))
+    : null;
+  const shiftKeys = allKeys.filter(k => {
+    if (!k.startsWith(prefix)) return false;
+    if (!allowed) return true;
+    return allowed.has(k.slice(prefix.length));
+  });
+  if (shiftKeys.length > 0) {
+    await AsyncStorage.multiRemove(shiftKeys);
+    Logger.info(`LocalCache: cleared ${shiftKeys.length} shift keys for user ${userId}`);
+  }
+  return shiftKeys.length;
+};
+
 const clearUser = async (userId) => {
   const allKeys = await AsyncStorage.getAllKeys();
   // Keys that embed userId in the middle (e.g. aurora_shifts_{uid}_{mk})
@@ -550,6 +577,7 @@ const setFirebaseAdapter = (adapter) => {
 const LocalCache = {
   // Shifts
   getShifts,
+  getShiftMonthKeys,
   saveShifts,
 
   // Time entries
@@ -614,6 +642,7 @@ const LocalCache = {
   // Utilities
   clearUser,
   clearTimeEntries,
+  clearShifts,
 
   // Staleness
   isMonthStale,

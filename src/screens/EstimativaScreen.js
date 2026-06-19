@@ -21,6 +21,8 @@ import LocalCache from '../services/LocalCache';
 import { getFullShiftConfig } from '../utils/ShiftValueCalculator';
 import { computeMonthSummary } from '../utils/MonthSummaryComputerV2';
 import { applyPublishedHospitalConfigs, collectInstIds } from '../utils/PublishedHospitalConfig';
+import { applyLuisFrancaPreset } from '../utils/LuisFrancaPreset';
+import { isViewOnly } from '../utils/userSource';
 import { formatMoney } from '../utils/MoneyFormatter';
 
 const PRESETS = [0, 10, 15, 20, 25, 30];
@@ -77,7 +79,8 @@ export default function EstimativaScreen() {
         LocalCache.getTimeEntries(userId, monthKey),
       ]);
       const instIds = collectInstIds(daysWithShifts);
-      const eff = await applyPublishedHospitalConfigs(liveCfg, instIds);
+      let eff = await applyPublishedHospitalConfigs(liveCfg, instIds);
+      eff = applyLuisFrancaPreset(eff, daysWithShifts, isViewOnly(user), te || {});
       effRef.current = eff;
       teRef.current = te || {};
       instRef.current = instIds;

@@ -26,7 +26,7 @@
  */
 
 import { doc, setDoc, writeBatch } from './fdb';
-import { db, functions } from './config';
+import { auth, db, functions } from './config';
 import Logger from '../../utils/Logger';
 import { makeLogEntry, appendLog, TRANSFER_LOG_TYPES } from '../../utils/shiftTransferLog';
 
@@ -548,6 +548,46 @@ const FirebaseAdapter = {
   },
 
   /**
+   * Delete a single time entry from Firestore (user cleared the registered
+   * hours). Keeps cross-device state consistent — without this the doc would
+   * resurrect on the next hydrate.
+   *
+   * users/{userId}/months/{YYYY-MM}/timeEntries/{shiftId}
+   */
+  deleteTimeEntry: async (userId, monthKey, shiftId) => {
+    if (!db || !userId || !monthKey || !shiftId) return Promise.resolve();
+    try {
+      const { deleteDoc } = await import('./fdb');
+      await deleteDoc(_sub(userId, 'months', monthKey, 'timeEntries', String(shiftId)));
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] deleteTimeEntry: ${err?.message}`);
+    }
+  },
+
+  /**
+   * Hydrate a month's time entries from Firestore so registered hours
+   * (incl. horas extras) follow the user across devices.
+   *
+   * users/{userId}/months/{YYYY-MM}/timeEntries/{shiftId}
+   * @returns {Promise<Object.<string, import('../../models').TimeEntry>>}
+   */
+  fetchTimeEntries: async (userId, monthKey) => {
+    if (!db || !userId || !monthKey) return {};
+    try {
+      const { collection, getDocs } = await import('./fdb');
+      const snap = await getDocs(
+        collection(db, 'users', String(userId), 'months', String(monthKey), 'timeEntries')
+      );
+      const out = {};
+      snap.forEach(d => { out[d.id] = { ...d.data(), shiftId: d.id }; });
+      return out;
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] fetchTimeEntries [${userId}/${monthKey}]: ${err?.message}`);
+      return {};
+    }
+  },
+
+  /**
    * Persist an Aurora-native opening to Firestore.
    * openings/{openingId}
    */
@@ -1019,6 +1059,103 @@ const FirebaseAdapter = {
     } catch (err) {
       Logger.warn(`[FirebaseAdapter] fetchWebClientMonth [${userId}/${monthKey}]: ${err?.message}`);
       return empty;
+    }
+  },
+
+  getWebClientMonthKeys: async (userId) => {
+    if (!db || !userId) return [];
+    if (String(auth?.currentUser?.uid || '') !== String(userId)) return [];
+    try {
+      const { collection, getDocs } = await import('./fdb');
+      const snap = await getDocs(collection(db, 'users', String(userId), 'months'));
+      const keys = [];
+      snap.forEach(d => keys.push(d.id));
+      return keys;
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] getWebClientMonthKeys [${userId}]: ${err?.message}`);
+      return [];
+    }
+  },
+
+  deleteWebClientShiftCache: async (userId, monthKeys, opts = {}) => {
+    if (!userId) return { success: false, error: 'Usuário não identificado.' };
+    const keys = [...new Set((monthKeys || []).map(String).filter(Boolean))];
+    if (keys.length === 0) return { success: true, deletedShifts: 0, deletedMonths: 0 };
+    if (functions) {
+      try {
+        const { httpsCallable } = await import('firebase/functions');
+        const res = await httpsCallable(functions, 'deleteWebClientShiftCache')({
+          userId: String(userId),
+          monthKeys: keys,
+          webClientToken: opts.webClientToken || null,
+        });
+        const data = res.data || {};
+        if (data.ok) {
+          return {
+            success: true,
+            deletedShifts: data.deletedShifts || 0,
+            deletedMonths: data.deletedMonths || keys.length,
+          };
+        }
+      } catch (err) {
+        Logger.warn(`[FirebaseAdapter] deleteWebClientShiftCache/function [${userId}]: ${err?.message}`);
+      }
+    }
+    if (!db) return { success: false, error: 'Firebase indisponível.' };
+    if (String(auth?.currentUser?.uid || '') !== String(userId)) {
+      return { success: false, error: 'Firebase Auth não permite limpar o cache remoto deste usuário.' };
+    }
+    try {
+      const { collection, getDocs } = await import('./fdb');
+      let deletedShifts = 0;
+      const refs = [];
+      for (const monthKey of keys) {
+        const snap = await getDocs(collection(db, 'users', String(userId), 'months', monthKey, 'shifts'));
+        snap.forEach(d => {
+          refs.push(d.ref);
+          deletedShifts++;
+        });
+      }
+      for (let i = 0; i < refs.length; i += BATCH_LIMIT) {
+        const batch = writeBatch(db);
+        refs.slice(i, i + BATCH_LIMIT).forEach(ref => batch.delete(ref));
+        await batch.commit();
+      }
+      return { success: true, deletedShifts, deletedMonths: keys.length };
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] deleteWebClientShiftCache [${userId}]: ${err?.message}`);
+      return { success: false, error: err?.message || 'Falha ao limpar plantões no Firebase.' };
+    }
+  },
+
+  replaceWebClientMonthShifts: async (userId, monthKey, daysWithShifts, syncedAt, opts = {}) => {
+    if (!functions || !userId || !monthKey || !Array.isArray(daysWithShifts)) {
+      return { success: false, error: 'Cloud Function indisponível.' };
+    }
+    try {
+      const { httpsCallable } = await import('firebase/functions');
+      const cleanedDays = daysWithShifts.map(day => ({
+        ...day,
+        shifts: Array.isArray(day?.shifts)
+          ? day.shifts.map(shift => _stripShift(shift))
+          : [],
+      }));
+      const res = await httpsCallable(functions, 'replaceWebClientMonthShifts')({
+        userId: String(userId),
+        monthKey: String(monthKey),
+        daysWithShifts: cleanedDays,
+        syncedAt: syncedAt || null,
+        webClientToken: opts.webClientToken || null,
+      });
+      const data = res.data || {};
+      return {
+        success: data.ok === true,
+        writtenShifts: data.writtenShifts || 0,
+        deletedShifts: data.deletedShifts || 0,
+      };
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] replaceWebClientMonthShifts [${userId}/${monthKey}]: ${err?.message}`);
+      return { success: false, error: err?.message || 'Falha ao gravar plantões no Firebase.' };
     }
   },
 

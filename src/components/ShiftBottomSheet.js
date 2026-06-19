@@ -43,6 +43,7 @@ import { isWithinDevolutionWindow, devolutionMsLeft } from '../utils/shiftTransf
 import { getGroupVisibility } from '../utils/GroupVisibilityConfig';
 import { getGroupColors } from '../utils/GroupColorConfig';
 import TodayCoworkersService from '../services/TodayCoworkersService';
+import LocalCache from '../services/LocalCache';
 
 // ── CoworkerAvatar ─────────────────────────────────────────────────────────────
 // Small circular avatar with photo or initials fallback.
@@ -304,11 +305,19 @@ const ShiftBottomSheet = ({
         const savedHours = (uid && await SecureStore.getItemAsync(`real_hours_${uid}_${dateKey}`))
           || await SecureStore.getItemAsync(`real_hours_${dateKey}`);
 
-        if (savedHours) {
-          setRealHours(JSON.parse(savedHours));
-        } else {
-          setRealHours({});
+        const merged = savedHours ? JSON.parse(savedHours) : {};
+        // LocalCache time entries são a fonte sincronizada (Firebase); SecureStore
+        // é device-local. Sem isto, horas registradas em outro aparelho não aparecem.
+        if (uid) {
+          const entries = (await LocalCache.getTimeEntries(uid, dateKey.slice(0, 7)).catch(() => ({}))) || {};
+          shifts.forEach((sh, idx) => {
+            const e = entries[sh.id];
+            if (e?.actualStart && e?.actualEnd) {
+              merged[idx] = { ...(merged[idx] || {}), startTime: e.actualStart, endTime: e.actualEnd };
+            }
+          });
         }
+        setRealHours(merged);
       } catch (error) {
         console.warn('Erro ao carregar horas reais:', error);
       }
