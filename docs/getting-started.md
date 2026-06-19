@@ -28,13 +28,13 @@ Uma janela abrirá de autenticação. Insira suas credenciais normalmente.
 
 O Aurora buscará automaticamente seus plantões do mês atual. O calendário será preenchido em alguns segundos.
 
-### 4. Configurar valor por hora (opcional)
+### 4. Configurar valores por hospital (opcional)
 
-Vá em **Configurações → Valor do Plantão** e defina seu valor/hora. Com isso, os relatórios financeiros passarão a mostrar os valores calculados.
+Vá em **Configurações → Plantões & valores → Meus hospitais** e defina, por hospital, o valor/hora para semana e fim de semana, o adicional noturno e a fidelização. Com isso, os relatórios financeiros passarão a mostrar os valores calculados.
 
 ---
 
-## Caminho 2: Conta Aurora (Firebase)
+## Caminho 2: Conta Aurora
 
 Prefere uma conta independente? Sem problema.
 
@@ -46,9 +46,9 @@ Na tela inicial, toque em **"Criar conta"** e informe seu e-mail e senha.
 
 Você receberá um e-mail de verificação. Confirme antes de prosseguir.
 
-### 3. Vincular WebClient (opcional)
+### 3. Vincular sua plataforma de escalas (opcional)
 
-Mesmo com conta Aurora, você pode vincular sua conta WebClient depois. Vá em **Configurações → Contas** e conecte sua conta para sincronizar plantões.
+Mesmo com conta Aurora, você pode vincular sua conta da plataforma de escalas depois. Vá em **Configurações → Contas** e conecte sua conta para sincronizar plantões.
 
 ---
 
@@ -63,18 +63,29 @@ Após o primeiro login, faça isso:
 3. Ative ou desative a visibilidade de cada grupo conforme necessário
 4. Personalize cores se quiser
 
-### Configurar valor por hora
+### Configurar valores e fidelização
 
-1. Vá em **Configurações → Valor do Plantão**
-2. Insira seu valor por hora (em R$)
-3. Configure adicional noturno se aplicável
+1. Vá em **Configurações → Plantões & valores → Meus hospitais**
+2. Abra cada hospital e insira o valor por hora (semana e fim de semana)
+3. Configure adicional noturno e regras de fidelização (faixas, percentual ou automático)
 4. Salve — os relatórios atualizam automaticamente
 
 ### Explorar o calendário
 
 - Navegue para o mês atual
 - Toque num dia com plantão para ver detalhes
-- Use o bottom sheet para editar horas de entrada/saída
+- Use o bottom sheet para editar horas ou adicionar um plantão manual
+
+---
+
+## Troque, ceda e pegue plantões
+
+Aurora vai além de mostrar a sua escala — ele ajuda a mudá-la entre colegas.
+
+- **Trocar:** toque num plantão → **Trocar**, ofereça um e escolha o que quer receber. Deixe aberta para a equipe dar lances ou direcione a um colega.
+- **Ceder:** toque num plantão → **Ceder**, de forma aberta (equipe) ou direcionada (uma pessoa).
+- **Pegar:** na tela de **Vagas**, veja plantões cedidos e vagas em aberto e toque em **Quero esse plantão**.
+- **Acompanhar:** a **Central de avisos** reúne ofertas e propostas; o **Histórico** guarda o status final de tudo.
 
 ---
 
@@ -100,15 +111,15 @@ Acesse **Configurações → Valor do Plantão** e revise a configuração. Veri
 
 ### App está lento ao carregar
 
-O Aurora usa cache local — a primeira carga de cada mês pode ser mais lenta. Meses já carregados abrem instantaneamente.
+O Aurora guarda os dados no dispositivo — a primeira carga de cada mês pode ser mais lenta. Meses já carregados abrem instantaneamente.
 
 ---
 
 <div class="aurora-cta" style="margin-top: 3rem;">
-  <h2>Tudo pronto?<br><span class="gradient-text">Veja a arquitetura.</span></h2>
-  <p>Para desenvolvedores e curiosos — como o Aurora funciona por dentro.</p>
+  <h2>Tudo pronto?<br><span class="gradient-text">Explore as funcionalidades.</span></h2>
+  <p>Calendário, financeiro, trocas, vagas e avisos — tudo num só app.</p>
   <div class="aurora-cta-buttons">
-    <a href="/aurora/guide/architecture" class="aurora-btn-primary">Arquitetura técnica →</a>
+    <a href="/aurora/features" class="aurora-btn-primary">Ver funcionalidades →</a>
     <a href="/aurora/faq" class="aurora-btn-secondary">Tenho dúvidas</a>
   </div>
 </div>

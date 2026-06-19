@@ -7,6 +7,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AuthContext } from '../context/AuthContext';
 import { useShifts } from '../contexts/ShiftsContext';
+import { useGroups } from '../contexts/GroupsContext';
 import { useColors, Typography, Spacing, BorderRadius } from '../constants/DesignSystem';
 import { getShiftValues } from '../utils/ShiftValueCalculator';
 import TimeUtils from '../utils/TimeUtils';
@@ -44,9 +45,21 @@ export default function AddManualShiftModal({ visible, onClose, date }) {
   const insets = useSafeAreaInsets();
   const { user } = useContext(AuthContext);
   const { addManualShift } = useShifts();
-
-  const hospitals = user?.hospitals || [];
+  const { groups } = useGroups();
   const { daysWithShifts } = useShifts();
+
+  // Institutions known via user's groups — these carry an id so the shift can
+  // route to per-hospital financial config (HospitalDetailScreen overrides).
+  const institutions = useMemo(() => {
+    const byId = {};
+    Object.values(groups || {}).forEach(g => {
+      const i = g?.institution;
+      if (i?.id) byId[String(i.id)] = { id: String(i.id), name: i.name || g.name || '' };
+    });
+    return Object.values(byId).sort((a, b) => a.name.localeCompare(b.name));
+  }, [groups]);
+  // Legacy: free-text hospitals from the user profile (no id) — kept as fallback.
+  const legacyHospitals = user?.hospitals || [];
 
   const takenLabels = useMemo(() => {
     const day = (daysWithShifts || []).find(d => d.date === date);
@@ -54,7 +67,9 @@ export default function AddManualShiftModal({ visible, onClose, date }) {
   }, [daysWithShifts, date]);
 
   const [label, setLabel] = useState('M');
-  const [hospital, setHospital] = useState(hospitals[0] || '');
+  // Selected institution id (or '' for custom / no institution). Stored as id
+  // so we can route the manual shift to per-hospital financial config.
+  const [instId, setInstId] = useState('');
   const [customHospital, setCustomHospital] = useState('');
   const [startTime, setStartTime] = useState('07:00');
   const [endTime, setEndTime] = useState('13:00');
@@ -69,8 +84,8 @@ export default function AddManualShiftModal({ visible, onClose, date }) {
     if (visible) {
       const firstAvailable = LABELS.find(l => !takenLabels.has(l)) || 'M';
       setLabel(firstAvailable);
-      setHospital(hospitals[0] || '');
-      setCustomHospital('');
+      setInstId(institutions[0]?.id || '');
+      setCustomHospital(institutions.length === 0 ? (legacyHospitals[0] || '') : '');
       setStartTime(DEFAULT_TIMES[firstAvailable].start);
       setEndTime(DEFAULT_TIMES[firstAvailable].end);
     }
@@ -82,7 +97,8 @@ export default function AddManualShiftModal({ visible, onClose, date }) {
     setEndTime(DEFAULT_TIMES[l].end);
   };
 
-  const hospitalName = (hospital === '__custom__' || hospitals.length === 0) ? customHospital.trim() : hospital;
+  const selectedInst = institutions.find(i => i.id === instId) || null;
+  const hospitalName = selectedInst ? selectedInst.name : customHospital.trim();
   const duration = calcDuration(startTime, endTime);
   const crossesMidnight = duration !== null && (() => {
     const [sh, sm] = startTime.split(':').map(Number);
@@ -101,6 +117,9 @@ export default function AddManualShiftModal({ visible, onClose, date }) {
       monthKey: toMonthKey(date),
       label,
       hospitalName,
+      // Optional — if user picked a real hospital, route to its per-hospital
+      // financial config; falls back to global when null.
+      institution: selectedInst ? { id: selectedInst.id, name: selectedInst.name } : null,
       startTime,
       endTime,
       durationMinutes: duration,
@@ -147,28 +166,28 @@ export default function AddManualShiftModal({ visible, onClose, date }) {
 
         {/* Hospital */}
         <Text style={s.fieldLabel}>Hospital</Text>
-        {hospitals.length > 0 && (
+        {institutions.length > 0 && (
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 8 }} keyboardShouldPersistTaps="handled">
             <View style={s.hospitalRow}>
-              {hospitals.map(h => (
+              {institutions.map(i => (
                 <Pressable
-                  key={h}
-                  style={[s.hospitalChip, hospital === h && { backgroundColor: C.accentSoft, borderColor: C.primary }]}
-                  onPress={() => { setHospital(h); setCustomHospital(''); }}
+                  key={i.id}
+                  style={[s.hospitalChip, instId === i.id && { backgroundColor: C.accentSoft, borderColor: C.primary }]}
+                  onPress={() => { setInstId(i.id); setCustomHospital(''); }}
                 >
-                  <Text style={[s.hospitalChipText, hospital === h && { color: C.primary }]}>{h}</Text>
+                  <Text style={[s.hospitalChipText, instId === i.id && { color: C.primary }]}>{i.name}</Text>
                 </Pressable>
               ))}
               <Pressable
-                style={[s.hospitalChip, hospital === '__custom__' && { backgroundColor: C.accentSoft, borderColor: C.primary }]}
-                onPress={() => setHospital('__custom__')}
+                style={[s.hospitalChip, instId === '' && { backgroundColor: C.accentSoft, borderColor: C.primary }]}
+                onPress={() => setInstId('')}
               >
-                <Text style={[s.hospitalChipText, hospital === '__custom__' && { color: C.primary }]}>Outro…</Text>
+                <Text style={[s.hospitalChipText, instId === '' && { color: C.primary }]}>Outro…</Text>
               </Pressable>
             </View>
           </ScrollView>
         )}
-        {(hospital === '__custom__' || hospitals.length === 0) && (
+        {(instId === '' || institutions.length === 0) && (
           <TextInput
             style={s.input}
             value={customHospital}
@@ -209,6 +228,10 @@ export default function AddManualShiftModal({ visible, onClose, date }) {
             />
           </View>
         </View>
+
+        {/* Escala fixa NÃO entra no fluxo do médico — só o coordenador (via
+            aurora-web) cria escalas fixas. Médico cria apenas plantão avulso.
+            Ver Glossário em src/models/index.js (Escalista vs Efetivo). */}
 
         {/* Summary */}
         {duration !== null && (

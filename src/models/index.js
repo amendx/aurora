@@ -9,14 +9,65 @@
  *  - All group colors normalized with "#" prefix.
  *  - coworkerIds[] in Shift — persons resolved separately from persons cache.
  *  - MonthSummary includes a financialConfigSnapshot for reproducible historical reports.
+ *
+ * ─── GLOSSÁRIO DE MOVIMENTAÇÕES ────────────────────────────────────────────────
+ *
+ * Vocabulário central pra todo "tirar/dar plantão". Use estes termos no código,
+ * UI e notificações pra não inventar variantes.
+ *
+ *   • Cessão ao grupo     — doação 1:n. Médico libera o plantão pra qualquer
+ *                           membro do grupo pegar. Sem retorno. Coleção:
+ *                           openings/{id} com kind='cede', targetUserId=null.
+ *
+ *   • Cessão direcionada  — doação 1:1. Médico oferece o plantão direto pra
+ *                           um colega X. X aceita ou recusa. Sem retorno.
+ *                           Coleção: shiftOffers/{id}.
+ *
+ *   • Troca direcionada   — 1:1 bidirecional. A propõe trocar shiftA por
+ *                           shiftB de B. Só fecha quando B aceita.
+ *                           Coleção: shiftSwaps/{id}.
+ *
+ *   • Intenção de troca   — "quero trocar este plantão por M/T no FDS". Sem
+ *                           lances. Colegas com plantão compatível veem e
+ *                           iniciam uma troca direcionada normal. Coleção:
+ *                           tradeIntents/{id}. (Substitui swapAuctions.)
+ *
+ *   • Vaga admin temp     — vaga avulsa criada pelo coordenador. Pode ser
+ *                           ao grupo OU direcionada. Coleção: openings/{id}
+ *                           com kind='admin_temp'.
+ *
+ *   • Vaga admin fixa     — slot de escala fixa recorrente criada pelo coord
+ *                           ("todo sábado N por 3 meses"). Gera N shifts. Pode
+ *                           ser direcionada ou ao grupo. openings/{id} com
+ *                           kind='admin_fixed' + recurrenceId.
+ *
+ *   • Substituição de     — coord muda escalistaUserId de uma escala fixa
+ *     escalista             existente (ex: caco saiu, raquel virou fixa).
+ *
+ *   • Escalista           — dono original da escala fixa (`shift.escalistaUserId`).
+ *                           NÃO muda em cessão/troca de plantão fixo. Só muda
+ *                           via "substituição de escalista" pelo coord.
+ *
+ *   • Efetivo             — quem está cumprindo o plantão (`shift.currentHolderUserId`,
+ *                           == userId do doc). MUDA em cessão/troca. Em plantão
+ *                           NÃO-fixo: igual ao escalista (são a mesma pessoa).
+ *
+ *   • Doctor              — role default. Cede/troca seus plantões.
+ *   • Coordenador         — médico com role 'coordinator' num grupo. Cria/edita
+ *                           grupos, cria escalas fixas + vagas temp no grupo,
+ *                           substitui escalistas.
+ *   • Manager             — não-médico. Role 'manager' num hospital (institution).
+ *                           Cria hospitais, vincula médicos, financeiro. SÓ atua
+ *                           via web app — Aurora app ignora a flag.
  */
 
 /**
  * @typedef {Object} Shift
- * Normalized shift as stored internally. Derived from PlantaoAPI daily API response.
+ * Normalized shift as stored internally. Derived from PlantaoAPI daily API response
+ * OR criado/recebido via fluxos aurora (criação manual, cessão, troca, vaga admin).
  *
- * @property {string}  id                       - Shift ID from API
- * @property {number}  userId                   - Owner user ID
+ * @property {string}  id                       - Shift ID
+ * @property {string|number} userId             - Owner = currentHolderUserId (path do doc)
  * @property {string}  date                     - "YYYY-MM-DD"
  * @property {string}  monthKey                 - "YYYY-MM" — primary partition key
  * @property {'M'|'T'|'N'|'D'} label           - Normalized: M=morning, T=afternoon, N=night, D=carryover
@@ -29,9 +80,40 @@
  * @property {{ minutesThisMonth: number, minutesNextMonth: number }|null} splitHours
  *   - Non-null only for night shifts on last day of month and carryover D shifts.
  *   - Use splitHours.minutesThisMonth for all calculations within this month.
- * @property {{ id: number, name: string, color: string, institutionId: number|null, institutionName: string|null }} group
- * @property {number[]} coworkerIds            - Person IDs; resolve from persons cache
+ * @property {{ id: number|string, name: string, color: string, institutionId: number|string|null, institutionName: string|null }} group
+ * @property {Array<number|string>} coworkerIds - Person IDs; resolve from persons cache
  * @property {string}  syncedAt               - ISO timestamp of hydration
+ *
+ * ── Movimentações (extensões — ver Glossário) ──
+ *
+ * @property {boolean} [isFixedSchedule]       - true = shift faz parte de uma escala
+ *                                                 fixa recorrente (todo X de Y).
+ *                                                 CRIADO APENAS pelo coordenador via
+ *                                                 aurora-web. Médico não tem flag de
+ *                                                 escala fixa em AddManualShiftModal.
+ * @property {string|null} [escalistaUserId]   - Dono fixo da escala. Quando
+ *                                                 isFixedSchedule===true: NÃO muda em
+ *                                                 cessão/troca; só muda via "substituição
+ *                                                 de escalista" (coord). Quando NÃO fixo:
+ *                                                 igual ao currentHolderUserId (mesma pessoa).
+ *                                                 null em shifts legados sem backfill.
+ * @property {string|number} [currentHolderUserId] - Quem cumpre. == userId do doc.
+ *                                                 Atualizado em toda cessão/troca.
+ *                                                 Em shift não-fixo: igual ao escalistaUserId.
+ * @property {string|null} [recurrenceId]      - Liga shifts da mesma escala fixa
+ *                                                 recorrente. Só em isFixedSchedule.
+ * @property {string|null} [originUserId]      - Recebido via cessão/troca: uid da origem.
+ * @property {string|null} [originUserName]    - Nome da origem (display).
+ * @property {boolean} [isFixedSchedule_origin] - O shift original (antes de transferência)
+ *                                                 era de escala fixa? Mostra "Origem: fixa".
+ * @property {'aurora'|'webClient'|'received'|'aurora_opening'} [source] - Origem do shift.
+ * @property {boolean} [isManual]              - Criado manualmente pelo médico via
+ *                                                 AddManualShiftModal. Tracking pessoal,
+ *                                                 fora de escala/grupo formal.
+ *                                                 NÃO é cedível nem trocável — gate em
+ *                                                 ShiftBottomSheet bloqueia botões.
+ * @property {string|null} [originalShiftId]   - ID do shift original antes de transfer.
+ * @property {string|null} [transferredAt]     - ISO de quando foi transferido.
  */
 
 /**
@@ -90,6 +172,20 @@
  * @property {{ percentage: number, startMonth: string, endMonth: string }} bonus
  *   - startMonth / endMonth as "YYYY-MM" (migration converts legacy numeric month)
  * @property {boolean} fridayNightAsWeekend
+ * @property {Object<string, { autoFromHours?: boolean, loyaltyOptions?: Array, manualPercentage?: number }>} [institutionLoyalty]
+ *   Per-hospital loyalty config (keyed by institution id). Pre-existing slot.
+ * @property {Object<string, { percentage: number, minHours: number, hoursWorked?: number, earnedAt?: string }>} [currentInstitutionLoyalty]
+ *   Per-hospital earned loyalty tier resolved at API-load time, keyed by institution id.
+ * @property {Object<string, {
+ *   hourValues?: { weekday: { day: number, night: number }, weekend: { day: number, night: number } },
+ *   bonusEnabled?: boolean,
+ *   bonus?: { percentage: number, startMonth: string|number, endMonth: string|number },
+ *   fridayNightAsWeekend?: boolean
+ * }>} [institutionConfig]
+ *   Per-hospital overrides of the four global financial pieces (hour values,
+ *   bonus, friday-night-as-weekend rule). Field-level fallback: any field
+ *   absent on the institution uses the global value. Resolved by
+ *   src/utils/HospitalConfigResolver.js.
  * @property {string}  updatedAt            - ISO timestamp
  */
 
@@ -272,6 +368,202 @@
  * LocalCache key: aurora_grpdaily_{groupId}_{YYYY-MM-DD}
  * TTL: 30 min for today, no expiry for past dates.
  * Stored shape: { dynamic_schedule: ApiDynamicScheduleSlot[], fetchedAt: ISO }
+ */
+
+/**
+ * @typedef {Object} Opening
+ * Unified model for a claimable shift slot. Cobre 3 tipos via `kind`:
+ *   - 'cede'        → cessão ao grupo (médico cedeu seu plantão)
+ *   - 'admin_temp'  → vaga avulsa criada por coordenador
+ *   - 'admin_fixed' → slot de escala fixa pendente (sem efetivo definido)
+ *
+ * @property {string}           id
+ * @property {'aurora'|'webClient'} source
+ * @property {'cede'|'admin_temp'|'admin_fixed'} [kind] - Default 'cede' pra legados.
+ * @property {'active'|'claimed'|'cancelled'|'expired'} status
+ * @property {string}           startISO
+ * @property {string|null}      endISO
+ * @property {string}           dateKey       - "YYYY-MM-DD"
+ * @property {string}           monthKey      - "YYYY-MM"
+ * @property {string}           label         - M | T | N | D | REF | APO | custom
+ * @property {number}           durationMinutes
+ * @property {number}           totalSlots
+ * @property {number}           availableSlots
+ * @property {{ id: string, name: string, color: string, institution: { id: number, name: string, city: string, uf: string } }} group
+ * @property {{ id: string, name: string, photo: string|null, description: string, council: string }[]} coworkers
+ * @property {number|null}      estimatedValue
+ * @property {boolean}          claimable
+ * @property {string|null}      claimedByUserId
+ * @property {string|null}      schedulePublicId
+ * @property {string|null}      webClientTransactionId
+ * @property {string}           createdAt
+ * @property {string|null}      createdBy
+ * @property {'doctor'|'coordinator'} [createdByRole] - Quem criou. Default 'doctor' em legados.
+ * @property {string|null}      [targetUserId]        - Se setado: vaga direcionada a esse uid.
+ *                                                       null = aberta ao grupo.
+ * @property {string|null}      [recurrenceId]        - Liga vagas da mesma escala fixa (kind='admin_fixed').
+ * @property {string|null}      [restrictedToGroupId] - Só membros desse grupo veem/pegam.
+ * @property {string|null}      [originShiftId]       - Back-ref ao shift original (kind='cede').
+ * @property {string|null}      [originUserId]        - Médico que cedeu (kind='cede').
+ * @property {string|null}      [originUserName]
+ * @property {Object|null}      [originShiftSnapshot] - Snapshot completo do shift origem.
+ */
+
+/**
+ * @typedef {Object} TradeIntent
+ * Intenção de troca aberta — substitui o leilão (swapAuctions). Sem lances:
+ * publico "quero trocar este plantão por preferências X", colegas com plantão
+ * compatível veem a intent e iniciam uma troca direcionada normal apontando
+ * pra mim. Firestore: tradeIntents/{intentId}.
+ *
+ * @property {string} id
+ * @property {string} initiatorUserId
+ * @property {string} initiatorName
+ * @property {Shift}  offeredShift                - Plantão que eu ofereço pra trocar.
+ * @property {{
+ *   labels: Array<'M'|'T'|'N'>,                  - Turnos que aceito receber.
+ *   periodScope: 'any'|'weekday'|'weekend',      - Restrição de dia.
+ *   groupIds: string[],                          - Grupos onde a troca pode rolar.
+ * }} preferences
+ * @property {'open'|'fulfilled'|'cancelled'|'expired'} status
+ * @property {string|null} matchedSwapId          - Se virou troca: shiftSwaps/{id}.
+ * @property {string} createdAt                    - ISO
+ * @property {string} expiresAt                    - ISO = offeredShift.startISO
+ * @property {string} [respondedAt]                - ISO, quando fulfilled/cancelled
+ */
+
+/**
+ * @typedef {Object} ShiftOffer
+ * A targeted cede — one doctor offers a specific shift to one colleague.
+ * Firestore path: shiftOffers/{id}
+ *
+ * @property {string} id
+ * @property {'cede'} kind
+ * @property {string} fromUserId            - Firebase UID of the doctor giving up the shift
+ * @property {string} toUserId              - Firebase UID of the targeted colleague
+ * @property {Object} shiftSnapshot         - Immutable snapshot of the shift at offer time
+ * @property {'pending'|'accepted'|'rejected'|'cancelled'|'expired'} status
+ * @property {string} groupId               - Group of the shift (eligibility scope)
+ * @property {string} monthKey
+ * @property {string} createdAt             - ISO
+ * @property {string|null} respondedAt      - ISO; null while pending
+ * @property {string} expiresAt             - ISO = shiftSnapshot.startISO
+ */
+
+/**
+ * @typedef {Object} ShiftSwap
+ * A targeted swap — initiator picks both their shift AND the colleague's shift to trade.
+ * Firestore path: shiftSwaps/{id}
+ *
+ * @property {string} id
+ * @property {'swap'} kind
+ * @property {string} initiatorUserId
+ * @property {string} targetUserId
+ * @property {Object} shiftA                - Initiator's shift snapshot
+ * @property {Object} shiftB                - Target's shift snapshot
+ * @property {'pending'|'accepted'|'rejected'|'cancelled'|'expired'} status
+ * @property {string[]} eligibleGroupIds    - Groups both users are members of (audit)
+ * @property {string[]} monthKeys           - [shiftA.monthKey, shiftB.monthKey]
+ * @property {string} createdAt
+ * @property {string|null} respondedAt
+ * @property {string} expiresAt             - ISO = min(shiftA.startISO, shiftB.startISO)
+ */
+
+/**
+ * @typedef {Opening|ShiftOffer|ShiftSwap|TradeIntent} Movement
+ * União de todas as movimentações que aparecem em Movimentações/Vagas/Histórico.
+ * Use `MovementHelpers.classifyMovement(item)` pra discriminar em runtime.
+ */
+
+/**
+ * @typedef {Object} UserRoles
+ * Roles do usuário, scoped por entidade. Default ausente = doctor.
+ * Manager só atua via web — Aurora app ignora a flag.
+ *
+ * Shape: `users/{uid}.roles` é um Object com chaves variáveis:
+ *   {
+ *     [groupId]:                'coordinator',
+ *     [`institution:${instId}`]: 'manager',
+ *   }
+ *
+ * Exemplos:
+ *   user.roles['xZ-BNeGG_joK'] === 'coordinator'  // coord do grupo X
+ *   user.roles['institution:aurora_hospital_luis_franca'] === 'manager'  // manager do hospital
+ *
+ * @property {Object<string, 'coordinator'|'manager'>} [roles]
+ */
+
+/**
+ * @typedef {Object} SwapAuction
+ * [DEPRECATED-AUCTION] Substituído por TradeIntent (sem lances). Mantido
+ * apenas pra ler histórico até a Fase 3 da refatoração de movimentações.
+ *
+ * Leilão de troca aberto ao grupo. Firestore: swapAuctions/{auctionId}
+ * Subcoleção: swapAuctions/{auctionId}/bids/{bidId}
+ *
+ * Ciclo de vida do `status`:
+ *   - 'open'      → aceitando lances. Filtrado da UI quando expiresAt passar.
+ *   - 'matched'   → iniciador aceitou um lance; troca consumada.
+ *   - 'cancelled' → iniciador cancelou manualmente.
+ *   - 'expired'   → expiresAt (= startISO do plantão ofertado) passou e ninguém
+ *                   pegou. Marcado automaticamente em SwapAuctionsContext.refresh
+ *                   via FirebaseAdapter.expireSwapAuction.
+ *
+ * REGRA: `expiresAt` é setado como `offeredShift.startISO` no createAuction.
+ *        Quando agora > expiresAt e status ainda é 'open', o leilão expira
+ *        automaticamente no próximo refresh (qualquer cliente). Isso garante
+ *        que leilão de plantão passado não fica "vivo" pra sempre.
+ *
+ * @property {string} id
+ * @property {string} initiatorUserId
+ * @property {string} initiatorName
+ * @property {Shift}  offeredShift            - Plantão que o iniciador oferece
+ * @property {{ labels: string[], periodScope: 'any'|'weekday'|'weekend', groupIds: string[] }} preferences
+ * @property {'open'|'matched'|'cancelled'|'expired'} status
+ * @property {string|null} matchedBidId
+ * @property {string} createdAt               - ISO
+ * @property {string} expiresAt               - ISO = offeredShift.startISO
+ * @property {string} [expiredAt]             - ISO, quando foi auto-expirado
+ * @property {string} [respondedAt]           - ISO, quando cancelado/matched
+ */
+
+/**
+ * @typedef {Object} Notification
+ * In-app inbox entry. Firestore path: users/{uid}/notifications/{id}
+ *
+ * Tipos atuais:
+ *   - 'ceder_in_my_group'    → alguém do meu grupo abriu uma cessão
+ *   - 'ceder_offered_to_me'  → me ofereceram cessão direcionada
+ *   - 'swap_proposed_to_me'  → me propuseram troca direcionada
+ *   - 'offer_outcome'        → resultado de movimento que eu iniciei
+ *
+ * Tipos novos (Fase 2/3 do plano de movimentações):
+ *   - 'vaga_no_grupo'        → coord publicou vaga temp/fixa no meu grupo
+ *   - 'vaga_direcionada'     → coord criou vaga direcionada pra mim
+ *   - 'escalista_alterado'   → coord substituiu o escalista de uma escala minha
+ *   - 'troca_compativel'     → intenção de troca de colega bate com meus plantões
+ *
+ * @property {string} id
+ * @property {'ceder_in_my_group'|'ceder_offered_to_me'|'swap_proposed_to_me'|'offer_outcome'|'vaga_no_grupo'|'vaga_direcionada'|'escalista_alterado'|'troca_compativel'} type
+ * @property {string} title
+ * @property {string} body
+ * @property {Object} payload               - Free-form per-type data (e.g. { offerId, swapId, openingId, intentId })
+ * @property {boolean} read
+ * @property {string} createdAt             - ISO
+ */
+
+/**
+ * @typedef {Object} NotificationPrefs
+ * Firestore path: users/{uid}/settings/notifications
+ *
+ * @property {boolean} enabled                  - Master switch
+ * @property {boolean} cededInMyGroups          - Someone in my group opened a cede
+ * @property {boolean} swapProposalsToMe        - Someone proposed a swap with me
+ * @property {boolean} myOfferOutcomes          - Outcomes of offers/swaps I initiated
+ * @property {boolean} [adminVagasInMyGroups]   - Vagas temp/fixas criadas pelo coord no meu grupo
+ * @property {boolean} [directedToMe]           - Algo direcionado a mim (cessão direcionada, vaga direcionada, etc)
+ * @property {boolean} [escalistaChanges]       - Substituição de escalista que me afeta
+ * @property {boolean} [tradeIntentMatches]     - Intenções de troca compatíveis com meus plantões
  */
 
 export default {};

@@ -23,6 +23,7 @@ import { useGroups } from '../contexts/GroupsContext';
 import { getGroupVisibility, saveGroupVisibility } from '../utils/GroupVisibilityConfig';
 import { getGroupColors } from '../utils/GroupColorConfig';
 import TodayCoworkersService from '../services/TodayCoworkersService';
+import { isAuroraOnly } from '../utils/userSource';
 import { useColors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
 
 const GroupVisibilityScreen = ({ navigation }) => {
@@ -76,7 +77,8 @@ const GroupVisibilityScreen = ({ navigation }) => {
     await saveGroupVisibility(userId, enabledIds);
     // Invalidate coworkers cache so "Quem está também" reflects new group selection
     TodayCoworkersService.clear();
-    if (user?.source !== 'aurora') {
+    // Aurora-only (native ou migrado) não recomputa via PlantaoAPI — clear() basta.
+    if (!isAuroraOnly(user)) {
       TodayCoworkersService.compute(userId, token, userId).catch(() => {});
     }
     setSaving(false);
@@ -282,7 +284,7 @@ const makeStyles = (C) => ({
 
   listContent: {
     paddingHorizontal: Spacing.lg,
-    paddingBottom: Spacing.xl,
+    paddingBottom: Spacing.lg,
   },
 
   sectionLabel: {

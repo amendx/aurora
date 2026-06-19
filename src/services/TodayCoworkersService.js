@@ -223,8 +223,12 @@ const TodayCoworkersService = {
    * @param {string}        token
    * @param {string|number} currentUserId  — self, always excluded
    */
-  compute: async (userId, token, currentUserId) => {
+  compute: async (userId, token, currentUserId, { force = false } = {}) => {
     if (!userId || !token) return;
+    if (!force && _cachedUserId === String(userId) && _cache.size > 0) {
+      Logger.info('[TodayCoworkers] cache already ready for this user — skipped');
+      return;
+    }
     if (_computing) {
       Logger.info('[TodayCoworkers] compute already in progress — skipped');
       return;

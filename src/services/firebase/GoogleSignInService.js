@@ -22,7 +22,7 @@
  */
 
 import { GoogleAuthProvider, signInWithCredential } from 'firebase/auth';
-import { doc, setDoc, getDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, setDoc, getDoc, serverTimestamp } from './fdb';
 import { auth, db } from './config';
 import { initUserDefaults, getFirebaseIdToken } from './SignupService';
 

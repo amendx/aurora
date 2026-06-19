@@ -42,10 +42,15 @@ const K = {
   groups:          (uid)      => `${P}_groups_${uid}`,
   groupMembers:    (uid, gid) => `${P}_grpmbr_${uid}_${gid}`,
   groupDaily:      (gid, dt)  => `${P}_grpdaily_${gid}_${dt}`,
+  groupSchedule:   (gid, mk)  => `${P}_grpsched_${gid}_${mk}`,
   persons:         (uid)      => `${P}_persons_${uid}`,
   financialConfig: (uid)      => `${P}_finconfig_${uid}`,
   migrationVersion:(uid)      => `${P}_migration_v_${uid}`,
   manualShifts:    (uid, mk)  => `${P}_manual_${uid}_${mk}`,
+  regularShifts:   (uid, mk)  => `${P}_regular_${uid}_${mk}`,
+  openings:        (uid, mk)  => `${P}_openings_${uid}_${mk}`,
+  openingsLastFetch: (uid)    => `${P}_openings_last_fetch_${uid}`,
+  availability:    (uid)      => `${P}_availability_${uid}`, // Aura (IA do Aurora): bloqueios/folgas/regras
 };
 
 // ── Staleness helpers ─────────────────────────────────────────────────────────
@@ -112,6 +117,15 @@ const _set = async (key, value) => {
  * @returns {Promise<{ syncedAt: string, daysWithShifts: object[] }|null>}
  */
 const getShifts = (userId, monthKey) => _get(K.shifts(userId, monthKey));
+
+const getShiftMonthKeys = async (userId) => {
+  const allKeys = await AsyncStorage.getAllKeys();
+  const prefix = `${P}_shifts_${userId}_`;
+  return allKeys
+    .filter(k => k.startsWith(prefix))
+    .map(k => k.slice(prefix.length))
+    .filter(Boolean);
+};
 
 /**
  * @param {number}   userId
@@ -246,6 +260,30 @@ const saveGroupDaily = (groupId, dateStr, dynamicSchedule) =>
     dynamic_schedule: dynamicSchedule,
     fetchedAt: new Date().toISOString(),
   });
+
+// ── Group Schedules (Meus Grupos calendar view) ───────────────────────────────
+// Per group, per month. Stores normalized DaySchedule[] (see OpeningNormalizer.normalizeGroupDaySchedule).
+// Wrapped in { syncedAt, days: { [dateStr]: DaySchedule } } so isMonthStale rules apply identically to user shifts.
+
+/**
+ * @param {string} groupId
+ * @param {string} monthKey  "YYYY-MM"
+ * @returns {Promise<{ syncedAt: string, days: Object }|null>}
+ */
+const getGroupSchedule = (groupId, monthKey) => _get(K.groupSchedule(groupId, monthKey));
+
+/**
+ * @param {string} groupId
+ * @param {string} monthKey  "YYYY-MM"
+ * @param {Object} days   - map { [dateStr]: DaySchedule }
+ * @param {string} [syncedAt] - ISO timestamp (defaults to now)
+ */
+const saveGroupSchedule = async (groupId, monthKey, days, syncedAt) => {
+  const ts = syncedAt || new Date().toISOString();
+  const result = await _set(K.groupSchedule(groupId, monthKey), { syncedAt: ts, days });
+  if (_fb) _fb.saveGroupScheduleMonth(groupId, monthKey, days, ts).catch(() => {});
+  return result;
+};
 
 // ── Group Members ─────────────────────────────────────────────────────────────
 
@@ -388,6 +426,39 @@ const setMigrationVersion = (userId, version) => _set(K.migrationVersion(userId)
  *   aurora_migration_v_{userId}     — re-running migration wastes time and is safe
  *                                     but unnecessary; preserve across logouts.
  */
+/**
+ * Wipe only this user's time entries (aurora_te_{uid}_*). Used to recover from
+ * the pre-fix bug where unscoped real_hours_ SecureStore keys leaked another
+ * user's entries into this user's LocalCache during migration.
+ */
+const clearTimeEntries = async (userId) => {
+  const allKeys = await AsyncStorage.getAllKeys();
+  const teKeys = allKeys.filter(k => k.startsWith(`${P}_te_${userId}_`));
+  if (teKeys.length > 0) {
+    await AsyncStorage.multiRemove(teKeys);
+    Logger.info(`LocalCache: cleared ${teKeys.length} time-entry keys for user ${userId}`);
+  }
+  return teKeys.length;
+};
+
+const clearShifts = async (userId, monthKeys = null) => {
+  const allKeys = await AsyncStorage.getAllKeys();
+  const prefix = `${P}_shifts_${userId}_`;
+  const allowed = Array.isArray(monthKeys) && monthKeys.length > 0
+    ? new Set(monthKeys.map(String))
+    : null;
+  const shiftKeys = allKeys.filter(k => {
+    if (!k.startsWith(prefix)) return false;
+    if (!allowed) return true;
+    return allowed.has(k.slice(prefix.length));
+  });
+  if (shiftKeys.length > 0) {
+    await AsyncStorage.multiRemove(shiftKeys);
+    Logger.info(`LocalCache: cleared ${shiftKeys.length} shift keys for user ${userId}`);
+  }
+  return shiftKeys.length;
+};
+
 const clearUser = async (userId) => {
   const allKeys = await AsyncStorage.getAllKeys();
   // Keys that embed userId in the middle (e.g. aurora_shifts_{uid}_{mk})
@@ -423,9 +494,68 @@ const saveManualShift = async (userId, shift) => {
   return _set(K.manualShifts(userId, shift.monthKey), updated);
 };
 
+// Replace the entire manualShifts list for a month. Used when Firestore is
+// authoritative (aurora hydration) so deleted shifts get evicted locally.
+const setManualShifts = (userId, monthKey, shifts) =>
+  _set(K.manualShifts(userId, monthKey), Array.isArray(shifts) ? shifts : []);
+
 const deleteManualShift = async (userId, shiftId, monthKey) => {
   const existing = await getManualShifts(userId, monthKey);
   return _set(K.manualShifts(userId, monthKey), existing.filter(s => s.id !== shiftId));
+};
+
+// Regular shifts for aurora users — shifts they received via cede / swap.
+// Distinguished from manualShifts so the source is preserved (manual = self-created,
+// regular = came from a coordinator opening or another doctor's cede).
+const getRegularShifts = async (userId, monthKey) => {
+  const raw = await _get(K.regularShifts(userId, monthKey));
+  return Array.isArray(raw) ? raw : [];
+};
+
+const saveRegularShifts = (userId, monthKey, shifts) =>
+  _set(K.regularShifts(userId, monthKey), Array.isArray(shifts) ? shifts : []);
+
+const saveRegularShift = async (userId, shift) => {
+  const existing = await getRegularShifts(userId, shift.monthKey);
+  const updated = existing.filter(s => s.id !== shift.id);
+  updated.push(shift);
+  return _set(K.regularShifts(userId, shift.monthKey), updated);
+};
+
+const deleteRegularShift = async (userId, shiftId, monthKey) => {
+  const existing = await getRegularShifts(userId, monthKey);
+  return _set(K.regularShifts(userId, monthKey), existing.filter(s => s.id !== shiftId));
+};
+
+// ── Openings ──────────────────────────────────────────────────────────────────
+
+const OPENINGS_TTL_MS = 15 * 60_000; // 15 min
+
+const getOpenings = async (userId, monthKey) => {
+  const raw = await _get(K.openings(userId, monthKey));
+  return Array.isArray(raw) ? raw : [];
+};
+
+const saveOpenings = async (userId, monthKey, openings) => {
+  await _set(K.openings(userId, monthKey), openings);
+  await _set(K.openingsLastFetch(userId), new Date().toISOString());
+};
+
+const isOpeningsStale = async (userId) => {
+  const ts = await _get(K.openingsLastFetch(userId));
+  if (!ts) return true;
+  return Date.now() - new Date(ts).getTime() > OPENINGS_TTL_MS;
+};
+
+// ── Aura (IA do Aurora): disponibilidade ──────────────────────────────────────
+// Bloqueios recorrentes + folgas + regras de fadiga. Per-user, sem monthKey.
+
+const getAvailability = (userId) => _get(K.availability(userId));
+
+const saveAvailability = async (userId, config) => {
+  const result = await _set(K.availability(userId), config);
+  if (_fb) _fb.saveAvailabilityConfig(userId, config).catch(() => {});
+  return result;
 };
 
 // ── Firebase adapter registration ─────────────────────────────────────────────
@@ -447,6 +577,7 @@ const setFirebaseAdapter = (adapter) => {
 const LocalCache = {
   // Shifts
   getShifts,
+  getShiftMonthKeys,
   saveShifts,
 
   // Time entries
@@ -467,6 +598,10 @@ const LocalCache = {
   getGroupDaily,
   saveGroupDaily,
 
+  // Group schedule (Meus Grupos: per groupId × monthKey)
+  getGroupSchedule,
+  saveGroupSchedule,
+
   // Group members
   getGroupMembers,
   saveGroupMembers,
@@ -482,7 +617,23 @@ const LocalCache = {
   // Manual shifts (aurora-source users)
   getManualShifts,
   saveManualShift,
+  setManualShifts,
   deleteManualShift,
+
+  // Regular shifts (aurora users — received via cede / swap)
+  getRegularShifts,
+  saveRegularShifts,
+  saveRegularShift,
+  deleteRegularShift,
+
+  // Openings
+  getOpenings,
+  saveOpenings,
+  isOpeningsStale,
+
+  // Aura (IA do Aurora): disponibilidade (bloqueios/folgas/regras)
+  getAvailability,
+  saveAvailability,
 
   // Migration
   getMigrationVersion,
@@ -490,6 +641,8 @@ const LocalCache = {
 
   // Utilities
   clearUser,
+  clearTimeEntries,
+  clearShifts,
 
   // Staleness
   isMonthStale,

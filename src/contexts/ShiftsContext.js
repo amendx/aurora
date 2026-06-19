@@ -2,56 +2,196 @@ import React, { createContext, useContext, useState, useEffect, useRef } from 'r
 import * as SecureStore from 'expo-secure-store';
 import WebClientApiService from '../services/WebClientApiService';
 import LocalCache, { isMonthStale } from '../services/LocalCache';
-import { computeMonthSummary } from '../utils/MonthSummaryComputer';
+// V2 resolves financial config per-shift via HospitalConfigResolver so
+// each hospital's overrides (hour values, bonus, friday-night rule, loyalty)
+// take precedence over the global FinancialConfig. Rollback to the original
+// global-only behaviour by switching this import back to '../utils/MonthSummaryComputer'.
+import { computeMonthSummary } from '../utils/MonthSummaryComputerV2';
+import { buildHybridConfig, isPastMonthKey } from '../utils/HospitalConfigResolver';
+import { applyPublishedHospitalConfigs, collectInstIds } from '../utils/PublishedHospitalConfig';
+import { applyLuisFrancaPreset } from '../utils/LuisFrancaPreset';
+
+/**
+ * Build the config to recompute a month's summary with.
+ *
+ * First overlays the manager-published hospital configs (institutions/{id}.config,
+ * the SOURCE OF TRUTH for money at each hospital) onto the live config, so both
+ * current and past months price each shift with its hospital's published rates.
+ *
+ * Then, for past months, bonus + loyalty come from the prior saved summary's
+ * snapshot (frozen) while hour values + friday-night rule stay live (retroactive
+ * by design — buildHybridConfig). Current/future months use the live config.
+ */
+const _resolveSummaryConfig = async (userId, fullMonthKey, liveConfig, daysWithShifts, viewOnly = false) => {
+  const instIds = collectInstIds(daysWithShifts);
+  let live = await applyPublishedHospitalConfigs(liveConfig, instIds);
+  if (isPastMonthKey(fullMonthKey)) {
+    try {
+      const prior = await LocalCache.getSummary(userId, fullMonthKey);
+      const snap = prior?.financialConfigSnapshot;
+      if (snap) live = buildHybridConfig(live, snap);
+    } catch (_) {}
+  }
+  // Preset LUIS FRANÇA é fórmula fixa: aplica POR ÚLTIMO pra vencer o freeze do
+  // snapshot de mês passado (senão a fidelização/taxas congeladas divergem entre
+  // dispositivos conforme qual salvou o summary primeiro). timeEntries entram pra
+  // faixa de fidelização ser por horas reais (incl. extras), não planejadas.
+  const teForLoyalty = (await LocalCache.getTimeEntries(userId, fullMonthKey).catch(() => ({}))) || {};
+  live = applyLuisFrancaPreset(live, daysWithShifts, viewOnly, teForLoyalty);
+  return live;
+};
 import { getFullShiftConfig } from '../utils/ShiftValueCalculator';
 import TimeUtils from '../utils/TimeUtils';
 import Logger from '../utils/Logger';
 import { AuthContext } from '../context/AuthContext';
 import TodayCoworkersService from '../services/TodayCoworkersService';
 import FirebaseAdapter from '../services/firebase/FirebaseAdapter';
+import { makeLogEntry, TRANSFER_LOG_TYPES } from '../utils/shiftTransferLog';
+import { isAuroraOnly, isViewOnly } from '../utils/userSource';
 
 // Context para gerenciar dados dos plantões globalmente (APENAS MONTHLY)
 const ShiftsContext = createContext({});
 
-/**
- * Recompute standardHours from actual shift time strings.
- * Synchronous — safe to call in cache-restore paths without extra API calls.
- */
-const _recomputeStandardHours = (daysWithShifts) => {
-  let total = 0;
-  (daysWithShifts || []).forEach(day => {
-    (day.shifts || []).forEach(shift => {
-      const type = shift.carryover ? 'N' : (shift.label?.charAt(0) || 'M');
-      let hours = 0;
-      if (shift.splitHours) {
-        hours = shift.splitHours.hoursThisMonth;
-      } else {
-        const timeStr = shift.time || '';
-        let parts = timeStr.split(' – ');
-        if (parts.length !== 2) parts = timeStr.split(' - ');
-        if (parts.length === 2) {
-          const norm = t => t.replace(/\s*\([^)]*\)/, '').replace('h', ':').trim();
-          const actualMin = TimeUtils.calculateDurationMinutes(norm(parts[0]), norm(parts[1]));
-          if (actualMin !== null && actualMin > 0) hours = actualMin / 60;
-        }
-        if (!hours) hours = type === 'N' ? 12 : 6;
-      }
-      total += hours;
-    });
-  });
-  return total;
+const _plannedMinutesOfShift = (shift) => {
+  if (shift?.splitHours?.minutesThisMonth != null) return shift.splitHours.minutesThisMonth;
+  if (shift?.splitHours?.hoursThisMonth != null) return shift.splitHours.hoursThisMonth * 60;
+  if (typeof shift?.durationMinutes === 'number' && shift.durationMinutes > 0) return shift.durationMinutes;
+  const type = shift?.carryover ? 'N' : (shift?.label?.charAt(0) || 'M');
+  const timeStr = shift?.time || '';
+  let parts = timeStr.split(' – ');
+  if (parts.length !== 2) parts = timeStr.split(' - ');
+  if (parts.length === 2) {
+    const norm = t => t.replace(/\s*\([^)]*\)/, '').replace('h', ':').trim();
+    const minutes = TimeUtils.calculateDurationMinutes(norm(parts[0]), norm(parts[1]));
+    if (minutes !== null && minutes > 0) return minutes;
+  }
+  return TimeUtils.getShiftStandardMinutes(shift?.label) || (type === 'N' ? 12 * 60 : 6 * 60);
 };
 
-/**
- * Patch a stored hoursReport with recomputed standardHours, preserving manual extras.
- * Works even when storedReport is null/undefined (e.g. old cache format without hoursReport).
- */
+// Merge local + remote time entries by latest edit. Used to hydrate registered
+// hours (incl. horas extras) from Firestore so they follow the user across devices.
+const _entryTs = (e) => Date.parse(e?.updatedAt || e?.editedAt || 0) || 0;
+const _mergeTimeEntries = (local = {}, remote = {}) => {
+  const out = { ...(local || {}) };
+  for (const [id, rem] of Object.entries(remote || {})) {
+    const loc = out[id];
+    if (!loc || _entryTs(rem) > _entryTs(loc)) out[id] = rem;
+  }
+  return out;
+};
+
+// Pull a month's time entries from Firestore and merge into LocalCache.
+// No-op when Firebase unavailable or nothing remote. Returns merged map.
+const _hydrateTimeEntries = async (userId, fullMonthKey) => {
+  if (!userId) return {};
+  const local = (await LocalCache.getTimeEntries(userId, fullMonthKey).catch(() => ({}))) || {};
+  try {
+    const remote = await FirebaseAdapter.fetchTimeEntries(userId, fullMonthKey);
+    if (remote && Object.keys(remote).length) {
+      const merged = _mergeTimeEntries(local, remote);
+      await LocalCache.saveTimeEntries(userId, fullMonthKey, merged);
+      return merged;
+    }
+  } catch (err) {
+    Logger.warn(`[ShiftsContext] hydrate time entries: ${err?.message}`);
+  }
+  return local;
+};
+
+const _buildHoursReport = (daysWithShifts, timeEntries = {}, storedReport = null) => {
+  const breakdown = { M: { count: 0, hours: 0 }, T: { count: 0, hours: 0 }, N: { count: 0, hours: 0 } };
+  let totalShifts = 0;
+  let standardMinutes = 0;
+  let extraMinutes = 0;
+  const hasEntries = Object.keys(timeEntries || {}).length > 0;
+  (daysWithShifts || []).forEach(day => {
+    (day.shifts || []).forEach(shift => {
+      totalShifts++;
+      const type = shift?.carryover ? 'N' : (shift?.label?.charAt(0) || 'M');
+      if (!breakdown[type]) breakdown[type] = { count: 0, hours: 0 };
+      const plannedMin = _plannedMinutesOfShift(shift);
+      standardMinutes += plannedMin;
+      breakdown[type].count++;
+      breakdown[type].hours += plannedMin / 60;
+      const entry = timeEntries?.[shift.id];
+      if (entry?.actualDurationMinutes) {
+        const diff = entry.actualDurationMinutes - plannedMin;
+        if (diff > 0) extraMinutes += diff;
+      }
+    });
+  });
+  if (!hasEntries && storedReport) {
+    extraMinutes = Math.max(0, ((storedReport.realHours || 0) - (storedReport.standardHours || 0)) * 60);
+  }
+  const standardHours = standardMinutes / 60;
+  return { ...(storedReport || {}), totalShifts, standardHours, realHours: standardHours + (extraMinutes / 60), breakdown };
+};
+
 const _patchHoursReport = (storedReport, daysWithShifts) => {
-  const newStd = _recomputeStandardHours(daysWithShifts);
-  const extras = storedReport
-    ? Math.max(0, (storedReport.realHours || 0) - (storedReport.standardHours || 0))
-    : 0;
-  return { ...(storedReport || {}), standardHours: newStd, realHours: newStd + extras };
+  return _buildHoursReport(daysWithShifts, {}, storedReport);
+};
+
+// [WEBCLIENT-BRIDGE] — remove when webClient is fully retired.
+// Overlay de plantões aurora "órfãos" sobre os dias vindos do PlantaoAPI.
+// Quando user.auroraSnapshotAt existe (= user já passou pelo aurora-only),
+// Firestore pode ter plantões que NÃO existem no PlantaoAPI:
+//   - source 'received' (trocas/cessões aceitas em modo aurora-only)
+//   - source 'aurora' isManual (criados manualmente)
+//   - source 'aurora' isFixedSchedule (escala fixa criada no app)
+// Esses ficam visíveis com source aurora e podem ser cedidos/trocados normalmente.
+// Shifts com snapshotFromWebClient:true são descartados (duplicariam o webClient).
+const _mergeAuroraOverlay = async (userId, daysWithShifts, fullMonthKey) => {
+  if (!userId || !fullMonthKey) return daysWithShifts;
+  try {
+    const { manualShifts, regularShifts } = await FirebaseAdapter.fetchAuroraMonth(userId, fullMonthKey);
+    const auroraOrphans = [...(manualShifts || []), ...(regularShifts || [])]
+      .filter(sh => sh && sh.snapshotFromWebClient !== true);
+    if (auroraOrphans.length === 0) return daysWithShifts;
+
+    const keyOf = (sh) => `${sh.date || (sh.startISO || '').slice(0, 10)}_${sh.label || ''}_${sh.group?.id || ''}`;
+    const wcKeys = new Set();
+    const wcIds = new Set();
+    (daysWithShifts || []).forEach(d => (d.shifts || []).forEach(sh => {
+      wcKeys.add(keyOf(sh));
+      if (sh?.id != null) wcIds.add(String(sh.id));
+    }));
+
+    // group orphans by date so we know which day to push into / create.
+    const byDate = {};
+    for (const sh of auroraOrphans) {
+      if (sh?.id != null && wcIds.has(String(sh.id))) continue; // já existe (merge anterior)
+      if (wcKeys.has(keyOf(sh))) continue; // webClient wins por (date+label+group)
+      const date = sh.date || (sh.startISO || '').slice(0, 10);
+      if (!date) continue;
+      (byDate[date] = byDate[date] || []).push(sh);
+    }
+    if (Object.keys(byDate).length === 0) return daysWithShifts;
+
+    const mapByDate = {};
+    (daysWithShifts || []).forEach(d => { mapByDate[d.date] = d; });
+    for (const [date, list] of Object.entries(byDate)) {
+      if (mapByDate[date]) {
+        mapByDate[date] = {
+          ...mapByDate[date],
+          shifts: [...(mapByDate[date].shifts || []), ...list],
+          shiftsCount: (mapByDate[date].shiftsCount || 0) + list.length,
+        };
+      } else {
+        const d = new Date(date + 'T00:00:00');
+        mapByDate[date] = {
+          day: d.getDate(),
+          date,
+          shifts: list,
+          shiftsCount: list.length,
+          originalData: null,
+        };
+      }
+    }
+    return Object.values(mapByDate).sort((a, b) => a.date.localeCompare(b.date));
+  } catch (err) {
+    Logger.warn(`_mergeAuroraOverlay falhou: ${err?.message}`);
+    return daysWithShifts;
+  }
 };
 
 const _manualShiftsToDaysWithShifts = (manualShifts) => {
@@ -73,8 +213,20 @@ export const ShiftsProvider = ({ children }) => {
   // user?.id covers real logins; user?.data?.id covers mock token response shape.
   const userId = user?.id || user?.data?.id || 0;
 
+  // Ref pra sempre apontar pro user mais recente. Necessário porque
+  // _loadMonthlyShiftsImpl é capturado em closures que callers de fora podem
+  // disparar antes do próximo re-render — sem ref, eles enxergariam a versão
+  // anterior do user (e ex. auroraOnlyMode=false logo após o toggle).
+  const userRef = useRef(user);
+  userRef.current = user;
+
   // In-memory cache: { 'YYYY-M': { daysWithShifts, hoursReport, totalShifts } }
   const monthsCache = useRef({});
+
+  // Dedup concurrent loads for the same month — multiple callers (HomeScreen,
+  // CalendarScreen, ShiftsContext auto-load effect) all mount together and
+  // would otherwise fire 3× parallel monthly+daily fetches before state flips.
+  const inFlightRef = useRef({});
 
   // Estado global dos plantões
   const [shiftsData, setShiftsData] = useState({
@@ -120,24 +272,92 @@ export const ShiftsProvider = ({ children }) => {
   };
 
   // Carregar dados dos plantões para um mês específico (APENAS MONTHLY)
-  const loadMonthlyShifts = async (month, year, forceReload = false) => {
-    // Aurora users have no WebClient shifts — load only manual shifts.
-    if (user?.source === 'aurora') {
+  const loadMonthlyShifts = (month, year, forceReload = false) => {
+    const _monthKey = `${year}-${month}`;
+    if (!forceReload && inFlightRef.current[_monthKey]) {
+      return inFlightRef.current[_monthKey];
+    }
+    const promise = _loadMonthlyShiftsImpl(month, year, forceReload).finally(() => {
+      if (inFlightRef.current[_monthKey] === promise) delete inFlightRef.current[_monthKey];
+    });
+    inFlightRef.current[_monthKey] = promise;
+    return promise;
+  };
+
+  const _loadMonthlyShiftsImpl = async (month, year, forceReload = false) => {
+    // Aurora users have no WebClient/PlantaoAPI backing — Firestore is source of truth.
+    // Hydrate LocalCache from Firestore (both manual + regular shifts), then render.
+    // [WEBCLIENT-BRIDGE] `|| user?.auroraOnlyMode` rotea webClient migrado
+    // pelo mesmo caminho aurora. Remova com o resto da bridge.
+    // userRef pra sempre ler o user mais recente — após setAuroraOnlyMode(true),
+    // callers podem chamar antes de ShiftsContext re-renderizar.
+    const _user = userRef.current;
+    if (isAuroraOnly(_user)) {
       const fullMonthKey = `${year}-${String(month).padStart(2, '0')}`;
       const memKey = `${year}-${month}`;
-      const manualShifts = userId ? await LocalCache.getManualShifts(userId, fullMonthKey) : [];
-      const daysWithShifts = _manualShiftsToDaysWithShifts(manualShifts);
-      const totalMinutes = manualShifts.reduce((acc, s) => acc + (s.durationMinutes || 0), 0);
-      const hoursReport = { standardHours: totalMinutes / 60, realHours: totalMinutes / 60 };
-      // Populate in-memory cache so refreshMonthSummary can find it
-      monthsCache.current[memKey] = { daysWithShifts, hoursReport, totalShifts: manualShifts.length };
+
+      if (userId) {
+        try {
+          const remote = await FirebaseAdapter.fetchAuroraMonth(userId, fullMonthKey);
+          // Authoritative reads → Firestore is source of truth, replace cache.
+          // Non-authoritative (network/permission error) → leave local as-is.
+          if (remote.manualAuthoritative)  await LocalCache.setManualShifts(userId, fullMonthKey, remote.manualShifts);
+          if (remote.regularAuthoritative) await LocalCache.saveRegularShifts(userId, fullMonthKey, remote.regularShifts);
+        } catch (err) {
+          Logger.warn(`[ShiftsContext] aurora hydration failed: ${err?.message}`);
+        }
+      }
+
+      const [manualShifts, regularShifts] = userId
+        ? await Promise.all([
+            LocalCache.getManualShifts(userId, fullMonthKey),
+            LocalCache.getRegularShifts(userId, fullMonthKey),
+          ])
+        : [[], []];
+
+      // [WEBCLIENT-BRIDGE] Snapshots antigos podem não ter startISO/endISO,
+      // que ShiftBottomSheet usa pra gate de Ceder/Trocar (`startTs > now`).
+      // Calcula a partir de date+time se faltar.
+      const _ensureISOs = (sh) => {
+        if (sh?.startISO && sh?.endISO) return sh;
+        const date = sh?.date;
+        const tstr = sh?.time || '';
+        let parts = tstr.split(' – ');
+        if (parts.length !== 2) parts = tstr.split(' - ');
+        if (!date || parts.length !== 2) return sh;
+        const norm = s => s.replace(/\s*\([^)]*\)/, '').replace('h', ':').trim();
+        const startHM = norm(parts[0]);
+        const endHM = norm(parts[1]);
+        const [sh1, sm] = startHM.split(':').map(Number);
+        const [eh, em] = endHM.split(':').map(Number);
+        if ([sh1, sm, eh, em].some(isNaN)) return sh;
+        const crossesMidnight = (eh * 60 + em) < (sh1 * 60 + sm);
+        const startISO = `${date}T${startHM}:00`;
+        let endISO;
+        if (crossesMidnight) {
+          const next = new Date(date + 'T00:00:00');
+          next.setDate(next.getDate() + 1);
+          endISO = `${next.toISOString().slice(0, 10)}T${endHM}:00`;
+        } else {
+          endISO = `${date}T${endHM}:00`;
+        }
+        return { ...sh, startISO, endISO, crossesMidnight };
+      };
+      const allShifts = [...manualShifts, ...regularShifts].map(_ensureISOs);
+      const daysWithShifts = _manualShiftsToDaysWithShifts(allShifts);
+      const auroraTimeEntries = userId
+        ? await _hydrateTimeEntries(userId, fullMonthKey)
+        : {};
+      const hoursReport = _buildHoursReport(daysWithShifts, auroraTimeEntries, null);
+      monthsCache.current[memKey] = { daysWithShifts, hoursReport, totalShifts: allShifts.length };
       // Compute and persist summary
       let auroraMonthSummary = null;
       try {
-        const [financialConfig, timeEntries] = await Promise.all([
+        const [liveConfig, timeEntries] = await Promise.all([
           getFullShiftConfig(),
           LocalCache.getTimeEntries(userId, fullMonthKey),
         ]);
+        const financialConfig = await _resolveSummaryConfig(userId, fullMonthKey, liveConfig, daysWithShifts, isViewOnly(_user));
         auroraMonthSummary = computeMonthSummary(userId, fullMonthKey, daysWithShifts, timeEntries || {}, financialConfig);
         await LocalCache.saveSummary(userId, fullMonthKey, auroraMonthSummary);
       } catch (_) {}
@@ -147,7 +367,7 @@ export const ShiftsProvider = ({ children }) => {
         currentYear: year,
         daysWithShifts,
         hoursReport,
-        totalShifts: manualShifts.length,
+        totalShifts: allShifts.length,
         monthSummary: auroraMonthSummary,
         loading: false,
         error: null,
@@ -161,7 +381,12 @@ export const ShiftsProvider = ({ children }) => {
     // 1. In-memory cache (fastest — same session, no async)
     if (!forceReload && monthsCache.current[monthKey]) {
       const cached = monthsCache.current[monthKey];
-      const hoursReport = _patchHoursReport(cached.hoursReport, cached.daysWithShifts);
+      const fullMonthKeyForSummary = `${year}-${String(month).padStart(2, '0')}`;
+      const timeEntries = userId
+        ? (await LocalCache.getTimeEntries(userId, fullMonthKeyForSummary).catch(() => ({}))) || {}
+        : {};
+      const hoursReport = _buildHoursReport(cached.daysWithShifts, timeEntries, cached.hoursReport);
+      monthsCache.current[monthKey] = { ...cached, hoursReport };
       setShiftsData(prev => ({
         ...prev,
         ...cached,
@@ -170,7 +395,13 @@ export const ShiftsProvider = ({ children }) => {
         currentYear: year,
         loading: false,
         loadedFor: monthKey,
+        monthSummary: null,
       }));
+      if (userId) {
+        LocalCache.getSummary(userId, fullMonthKeyForSummary)
+          .then(s => { if (s) setShiftsData(prev => prev.loadedFor === monthKey ? { ...prev, monthSummary: s } : prev); })
+          .catch(() => {});
+      }
       // Ensure coworkers are computed even when shifts come from memory cache
       if (token && !TodayCoworkersService.isReady(userId)) {
         TodayCoworkersService.compute(userId, token, userId).catch(() => {});
@@ -184,21 +415,30 @@ export const ShiftsProvider = ({ children }) => {
       const persisted = await LocalCache.getShifts(userId, fullMonthKey);
       if (persisted && !isMonthStale(persisted.syncedAt, fullMonthKey)) {
         Logger.info('📦 Restaurando do LocalCache para', fullMonthKey, '(syncedAt:', persisted.syncedAt, ')');
-        const { daysWithShifts, hoursReport: rawReport, totalShifts } = persisted;
-        const hoursReport = _patchHoursReport(rawReport, daysWithShifts);
+        const { daysWithShifts, hoursReport: rawReport } = persisted;
+        const timeEntries = (await LocalCache.getTimeEntries(userId, fullMonthKey).catch(() => ({}))) || {};
+        const hoursReport = _buildHoursReport(daysWithShifts, timeEntries, rawReport);
+        // saveShifts doesn't persist totalShifts — derive from daysWithShifts
+        // so the cache stays consistent with the actual list.
+        const totalShifts = (daysWithShifts || []).reduce(
+          (sum, d) => sum + (d.shifts?.length || 0), 0
+        );
         // Warm up in-memory cache so subsequent tab switches are instant
         monthsCache.current[monthKey] = { daysWithShifts, hoursReport, totalShifts };
+        let cachedMonthSummary = null;
+        try { cachedMonthSummary = await LocalCache.getSummary(userId, fullMonthKey); } catch {}
         setShiftsData(prev => ({
           ...prev,
           currentMonth: month,
           currentYear: year,
           daysWithShifts: daysWithShifts || [],
-          totalShifts: totalShifts || 0,
+          totalShifts,
           hoursReport: hoursReport || null,
           loading: false,
           error: null,
           lastUpdated: persisted.syncedAt ? new Date(persisted.syncedAt) : null,
           loadedFor: monthKey,
+          monthSummary: cachedMonthSummary,
         }));
         // Ensure coworkers are computed even when shifts come from cache
         if (token && !TodayCoworkersService.isReady(userId)) {
@@ -236,12 +476,26 @@ export const ShiftsProvider = ({ children }) => {
 
       const monthlyData = monthlyResponse.data;
 
-      // PASSO 2: Processar os dados do monthly (estrutura correta)
-      if (!monthlyData.data || !monthlyData.data.current || !monthlyData.data.current.days) {
+      // PASSO 2: Processar os dados do monthly. O campo `current` da PlantaoAPI
+      // reflete a noção do SERVIDOR de "mês corrente", que pode estar dessincronizada
+      // do mês pedido na URL (cache server-side, timezone, virada de mês). Em vez
+      // de confiar nele, procuramos os dias do mês solicitado em current/previous/next
+      // filtrando por `date`.
+      if (!monthlyData.data) {
         throw new Error('Estrutura de dados do monthly inválida');
       }
-
-      const currentMonthDays = monthlyData.data.current.days;
+      const fullMonthKeyForFilter = `${year}-${String(month).padStart(2, '0')}`;
+      const _allReturnedDays = [
+        ...(Array.isArray(monthlyData.data?.previous?.days) ? monthlyData.data.previous.days : []),
+        ...(Array.isArray(monthlyData.data?.current?.days)  ? monthlyData.data.current.days  : []),
+        ...(Array.isArray(monthlyData.data?.next?.days)     ? monthlyData.data.next.days     : []),
+      ];
+      const currentMonthDays = _allReturnedDays.filter(
+        d => typeof d?.date === 'string' && d.date.startsWith(fullMonthKeyForFilter)
+      );
+      if (currentMonthDays.length === 0) {
+        Logger.warn(`[ShiftsContext] monthly API não retornou dias para ${fullMonthKeyForFilter} (current.days vinha de outro mês?)`);
+      }
 
       // PASSO 3: Buscar detalhes diários para cada dia com plantões
       const daysWithShifts = [];
@@ -322,18 +576,16 @@ export const ShiftsProvider = ({ children }) => {
       }
 
       // ── Day-1 carryover: inject derived shift from previous month's last night ──
-      // Check the API monthly response for "previous" month's last day
-      const prevDays = monthlyData.data?.previous?.days;
-      
-      if (prevDays && Array.isArray(prevDays)) {
-        // Get the actual last day of the previous month (not just the last day with shifts)
+      // Procura o último dia do mês anterior em qualquer bucket retornado pela API
+      // (current/previous/next), pelos mesmos motivos do filtro acima — não dá pra
+      // confiar que `previous.days` realmente contém o mês anterior solicitado.
+      {
         const prevMonth = month === 1 ? 12 : month - 1;
         const prevYear = month === 1 ? year - 1 : year;
         const lastDayOfPrevMonth = new Date(prevYear, prevMonth, 0).getDate(); // Day 0 = last day of previous month
         const expectedLastDay = `${prevYear}-${String(prevMonth).padStart(2, '0')}-${String(lastDayOfPrevMonth).padStart(2, '0')}`;
-        
-        // Only look for carryover if the actual last day of the month has shifts
-        const prevLastDay = prevDays.find(d => d.date === expectedLastDay);
+
+        const prevLastDay = _allReturnedDays.find(d => d?.date === expectedLastDay);
 
         if (prevLastDay) {
           // Try to get the actual shift detail for that day from the API
@@ -404,10 +656,8 @@ export const ShiftsProvider = ({ children }) => {
 
           }
         } else {
-          Logger.info(`🔍 CARRYOVER: No prevLastDay found in previous month data`);
+          Logger.info(`🔍 CARRYOVER: No prevLastDay found for ${expectedLastDay} in API response`);
         }
-      } else {
-        Logger.info(`🔍 CARRYOVER: No previous month data available`);
       }
       // ────────────────────────────────────────────────────────────────────────
 
@@ -533,9 +783,10 @@ export const ShiftsProvider = ({ children }) => {
       let totalExtras = 0;
       try {
         const fullMonthKey = `${year}-${String(month).padStart(2, '0')}`;
-        // Try LocalCache first (post-migration data)
+        // Pull registered hours from Firestore so horas extras follow the user
+        // across devices, then read the merged LocalCache result.
         const cachedEntries = userId
-          ? (await LocalCache.getTimeEntries(userId, fullMonthKey)) || {}
+          ? await _hydrateTimeEntries(userId, fullMonthKey)
           : {};
 
         for (const dayData of daysWithShifts) {
@@ -557,11 +808,12 @@ export const ShiftsProvider = ({ children }) => {
 
           if (handledByCache) continue;
 
-          // Fallback: read legacy SecureStore key (pre-migration or un-migrated entries)
-          // Key format: real_hours_{YYYY-MM-DD}
-          // Value: { [shiftIndex]: { startTime, endTime, ... } }
+          // Fallback: read legacy SecureStore key (pre-migration or un-migrated entries).
+          // Chave escopada por uid pra não vazar entre sessões. Fallback à chave
+          // antiga (sem uid) só pra entradas anteriores ao escopo.
           try {
-            const raw = await SecureStore.getItemAsync(`real_hours_${dateStr}`);
+            const raw = (userId && await SecureStore.getItemAsync(`real_hours_${userId}_${dateStr}`))
+              || await SecureStore.getItemAsync(`real_hours_${dateStr}`);
             if (!raw) continue;
             const realHoursMap = JSON.parse(raw);
 
@@ -588,44 +840,110 @@ export const ShiftsProvider = ({ children }) => {
 
       const realHours = standardHours + totalExtras;
 
-      const hoursReport = {
+      let hoursReport = {
         totalShifts,
         standardHours, // Horas previstas (fixas)
         realHours, // Horas reais (previstas + extras)
         breakdown: realBreakdown
       };
 
+      // Merge Aurora-received shifts (claimed from openings) into the calendar.
+      // WebClient API doesn't know about Aurora pool claims — Firestore/LocalCache do.
+      if (userId) {
+        try {
+          const fullMonthKey = `${year}-${String(month).padStart(2, '0')}`;
+          // Hydrate Aurora-received shifts from Firestore so they survive
+          // logout/login on webClient users. Authoritative when readable.
+          try {
+            const remote = await FirebaseAdapter.fetchAuroraMonth(userId, fullMonthKey);
+            if (remote.regularAuthoritative) {
+              await LocalCache.saveRegularShifts(userId, fullMonthKey, remote.regularShifts);
+            }
+          } catch (hydrateErr) {
+            Logger.warn(`[ShiftsContext] hydrate regular shifts: ${hydrateErr?.message}`);
+          }
+          const received = await LocalCache.getRegularShifts(userId, fullMonthKey);
+          (received || []).forEach(rec => {
+            if (!rec?.date) return;
+            const idx = daysWithShifts.findIndex(d => d.date === rec.date);
+            if (idx >= 0) {
+              if (!daysWithShifts[idx].shifts.some(s => String(s.id) === String(rec.id))) {
+                daysWithShifts[idx] = {
+                  ...daysWithShifts[idx],
+                  shifts: [...daysWithShifts[idx].shifts, rec],
+                  shiftsCount: daysWithShifts[idx].shiftsCount + 1,
+                };
+              }
+            } else {
+              const d = new Date(rec.date + 'T00:00:00');
+              daysWithShifts.push({ day: d.getDate(), date: rec.date, shifts: [rec], shiftsCount: 1, originalData: null });
+            }
+          });
+          daysWithShifts.sort((a, b) => a.date.localeCompare(b.date));
+        } catch (mergeErr) {
+          Logger.warn(`[ShiftsContext] merge aurora regular shifts: ${mergeErr?.message}`);
+        }
+      }
+
+      // Recount after Aurora-received merge so monthsCache stays consistent
+      // with daysWithShifts (totalShifts above was computed pre-merge).
+      const mergedTotalShifts = daysWithShifts.reduce(
+        (sum, d) => sum + (d.shifts?.length || 0), 0
+      );
+
       // Salvar no cache em memória
-      monthsCache.current[monthKey] = { daysWithShifts, hoursReport, totalShifts };
+      // [WEBCLIENT-BRIDGE] — remove when webClient is fully retired.
+      // Sobrepor plantões aurora "órfãos" (recebidos, manuais, escala fixa) que
+      // não têm contrapartida no PlantaoAPI. Só pra usuários que já passaram pelo
+      // aurora-only (auroraSnapshotAt presente) — sem custo pros demais.
+      let displayDays = daysWithShifts;
+      let displayTotal = mergedTotalShifts;
+      if (userRef.current?.auroraSnapshotAt && userId) {
+        const fullMonthKey = `${year}-${String(month).padStart(2, '0')}`;
+        displayDays = await _mergeAuroraOverlay(userId, daysWithShifts, fullMonthKey);
+        displayTotal = displayDays.reduce((acc, d) => acc + (d.shifts?.length || 0), 0);
+      }
+
+      if (userId) {
+        const fullMonthKey = `${year}-${String(month).padStart(2, '0')}`;
+        const timeEntries = (await LocalCache.getTimeEntries(userId, fullMonthKey).catch(() => ({}))) || {};
+        hoursReport = _buildHoursReport(displayDays, timeEntries, hoursReport);
+      }
+
+      monthsCache.current[monthKey] = { daysWithShifts: displayDays, hoursReport, totalShifts: displayTotal };
 
       // Persistir no LocalCache (sobrevive a reinicializações do app)
       if (userId) {
         const fullMonthKey = `${year}-${String(month).padStart(2, '0')}`;
         const syncedAt = new Date().toISOString();
+        var webClientMonthSummary = null;
         try {
-          await LocalCache.saveShifts(userId, fullMonthKey, daysWithShifts, syncedAt, hoursReport);
+          await LocalCache.saveShifts(userId, fullMonthKey, displayDays, syncedAt, hoursReport);
 
           // Trigger today-coworkers computation now that shifts are in cache
           if (token) {
             TodayCoworkersService.compute(userId, token, userId).catch(() => {});
           }
 
-          // Recompute MonthSummary with current financial config
-          const [financialConfig, timeEntries] = await Promise.all([
+          // Recompute MonthSummary. For past months, freeze bonus + loyalty
+          // from the prior saved snapshot; hour values + friday-night rule
+          // come from the live config (retroactive by design).
+          const [liveConfig, timeEntries] = await Promise.all([
             getFullShiftConfig(),
             LocalCache.getTimeEntries(userId, fullMonthKey),
           ]);
-          const summary = computeMonthSummary(
-            userId, fullMonthKey, daysWithShifts, timeEntries || {}, financialConfig
+          const financialConfig = await _resolveSummaryConfig(userId, fullMonthKey, liveConfig, displayDays, isViewOnly(_user));
+          webClientMonthSummary = computeMonthSummary(
+            userId, fullMonthKey, displayDays, timeEntries || {}, financialConfig
           );
-          await LocalCache.saveSummary(userId, fullMonthKey, summary);
-          Logger.info(`💾 LocalCache: ${daysWithShifts.length} dias + summary salvos para ${fullMonthKey}`);
+          await LocalCache.saveSummary(userId, fullMonthKey, webClientMonthSummary);
+          Logger.info(`💾 LocalCache: ${displayDays.length} dias + summary salvos para ${fullMonthKey}`);
         } catch (cacheErr) {
           Logger.warn('LocalCache: erro ao persistir shifts/summary:', cacheErr?.message);
         }
       }
 
-      Logger.info(`✅ RESULTADO FINAL: ${totalShifts} plantões em ${daysWithShifts.length} dias`);
+      Logger.info(`✅ RESULTADO FINAL: ${displayTotal} plantões em ${displayDays.length} dias`);
       Logger.info(`🕐 Total de horas: ${hoursReport.standardHours}h`);
 
       // Debug detalhado das horas para HomeScreen
@@ -637,9 +955,10 @@ export const ShiftsProvider = ({ children }) => {
         currentMonth: month,
         currentYear: year,
         monthlyCalendar: monthlyData,
-        daysWithShifts,
-        totalShifts,
+        daysWithShifts: displayDays,
+        totalShifts: displayTotal,
         hoursReport,
+        monthSummary: typeof webClientMonthSummary !== 'undefined' ? webClientMonthSummary : null,
         loading: false,
         error: null,
         lastUpdated: new Date(),
@@ -663,6 +982,145 @@ export const ShiftsProvider = ({ children }) => {
   const loadTwoMonthsData = (month, year) => loadMonthlyShifts(month, year);
 
   /**
+   * Refresh leve (pull-to-refresh). Source-aware:
+   *  - aurora: re-lê só do Firestore (loadMonthlyShifts já faz isso pro aurora).
+   *  - webClient: 1 chamada getMonthlyCalendar pra detectar mudança de escala.
+   *      • Se a contagem por dia NÃO mudou → não chama getDailyShifts; apenas
+   *        re-mescla a camada Aurora (trocas/cessões recebidas) do Firestore.
+   *      • Se mudou (hospital alterou escala) ou não há cache → reload completo.
+   */
+  const refreshShifts = async (month, year) => {
+    // Aurora (ou [WEBCLIENT-BRIDGE] modo aurora-only): o branch aurora do
+    // loadMonthlyShifts sempre re-hidrata do Firestore.
+    const _user = userRef.current;
+    if (isAuroraOnly(_user)) {
+      return loadMonthlyShifts(month, year, true);
+    }
+    if (!token || !userId) {
+      return loadMonthlyShifts(month, year, true);
+    }
+
+    const memKey = `${year}-${month}`;
+    const fullMonthKey = `${year}-${String(month).padStart(2, '0')}`;
+
+    // Cache base pra comparar (memória → LocalCache)
+    let cached = monthsCache.current[memKey];
+    if (!cached?.daysWithShifts) {
+      const persisted = await LocalCache.getShifts(userId, fullMonthKey).catch(() => null);
+      if (persisted?.daysWithShifts) {
+        cached = { daysWithShifts: persisted.daysWithShifts, hoursReport: persisted.hoursReport };
+      }
+    }
+    if (!cached?.daysWithShifts) {
+      // Sem base pra diff → reload completo
+      return loadMonthlyShifts(month, year, true);
+    }
+
+    try {
+      const monthlyResponse = await WebClientApiService.getMonthlyCalendar(token, month, year);
+      if (!monthlyResponse?.success) {
+        return loadMonthlyShifts(month, year, true);
+      }
+      // Mesma defesa do loadMonthlyShifts: o `current` do servidor pode estar
+      // dessincronizado do mês pedido. Filtra por `date` em todos os buckets.
+      const _monthKey = `${year}-${String(month).padStart(2, '0')}`;
+      const _data = monthlyResponse?.data?.data;
+      const apiDays = [
+        ...(Array.isArray(_data?.previous?.days) ? _data.previous.days : []),
+        ...(Array.isArray(_data?.current?.days)  ? _data.current.days  : []),
+        ...(Array.isArray(_data?.next?.days)     ? _data.next.days     : []),
+      ].filter(d => typeof d?.date === 'string' && d.date.startsWith(_monthKey));
+      if (apiDays.length === 0) {
+        Logger.warn(`[refreshShifts] API não retornou dias para ${_monthKey} — fallback reload`);
+        return loadMonthlyShifts(month, year, true);
+      }
+
+      // Contagem por dia: API vs cache (ignorando carryover, que é derivado)
+      const apiCount = {};
+      apiDays.forEach(d => { apiCount[d.date] = d.shifts ? d.shifts.length : 0; });
+      const cacheCount = {};
+      cached.daysWithShifts.forEach(d => {
+        cacheCount[d.date] = (d.shifts || []).filter(s => !s.carryover).length;
+      });
+      const dates = new Set([...Object.keys(apiCount), ...Object.keys(cacheCount)]);
+      let scheduleChanged = false;
+      for (const dt of dates) {
+        if ((apiCount[dt] || 0) !== (cacheCount[dt] || 0)) { scheduleChanged = true; break; }
+      }
+
+      if (scheduleChanged) {
+        // Escala do hospital mudou → precisa dos detalhes → reload completo (1+N)
+        Logger.info('🔄 refreshShifts: escala mudou, reload completo');
+        return loadMonthlyShifts(month, year, true);
+      }
+
+      // Escala igual → só atualizar a camada Aurora (trocas/cessões) do Firestore.
+      Logger.info('🔄 refreshShifts: escala igual, re-merge Firestore (sem daily calls)');
+
+      // 1. Base = cache sem os plantões da camada Aurora (received).
+      const baseDays = cached.daysWithShifts.map(d => ({
+        ...d,
+        shifts: (d.shifts || []).filter(s => s.source !== 'received'),
+      }));
+
+      // 2. Re-ler regular shifts do Firestore (authoritative) e re-mesclar.
+      try {
+        const remote = await FirebaseAdapter.fetchAuroraMonth(userId, fullMonthKey);
+        if (remote.regularAuthoritative) {
+          await LocalCache.saveRegularShifts(userId, fullMonthKey, remote.regularShifts);
+        }
+      } catch (e) {
+        Logger.warn(`[refreshShifts] hydrate regular: ${e?.message}`);
+      }
+      const received = await LocalCache.getRegularShifts(userId, fullMonthKey).catch(() => []);
+      (received || []).forEach(rec => {
+        if (!rec?.date) return;
+        const idx = baseDays.findIndex(d => d.date === rec.date);
+        if (idx >= 0) {
+          if (!baseDays[idx].shifts.some(s => String(s.id) === String(rec.id))) {
+            baseDays[idx] = {
+              ...baseDays[idx],
+              shifts: [...baseDays[idx].shifts, rec],
+            };
+          }
+        } else {
+          const dt = new Date(rec.date + 'T00:00:00');
+          baseDays.push({ day: dt.getDate(), date: rec.date, shifts: [rec], shiftsCount: 1, originalData: null });
+        }
+      });
+      baseDays.forEach(d => { d.shiftsCount = (d.shifts || []).length; });
+      baseDays.sort((a, b) => a.date.localeCompare(b.date));
+
+      // [WEBCLIENT-BRIDGE] — remove when webClient is fully retired.
+      // Overlay de aurora-órfãos (igual ao caminho completo de loadMonthly).
+      let mergedDays = baseDays;
+      if (userRef.current?.auroraSnapshotAt) {
+        mergedDays = await _mergeAuroraOverlay(userId, baseDays, fullMonthKey);
+      }
+      const totalShifts = mergedDays.reduce((sum, d) => sum + (d.shifts?.length || 0), 0);
+      const timeEntries = (await LocalCache.getTimeEntries(userId, fullMonthKey).catch(() => ({}))) || {};
+      const hoursReport = _buildHoursReport(mergedDays, timeEntries, cached.hoursReport);
+      monthsCache.current[memKey] = { daysWithShifts: mergedDays, hoursReport, totalShifts };
+      await LocalCache.saveShifts(userId, fullMonthKey, mergedDays, new Date().toISOString(), hoursReport).catch(() => {});
+
+      setShiftsData(prev => ({
+        ...prev,
+        currentMonth: month,
+        currentYear: year,
+        daysWithShifts: mergedDays,
+        totalShifts,
+        hoursReport,
+        loading: false,
+        error: null,
+        loadedFor: memKey,
+      }));
+    } catch (err) {
+      Logger.warn(`[refreshShifts] falhou, fallback reload: ${err?.message}`);
+      return loadMonthlyShifts(month, year, true);
+    }
+  };
+
+  /**
    * Write time entries for a day into LocalCache and mark the month summary dirty.
    * Called after ShiftBottomSheet saves real hours (via CalendarScreen.handleHoursChanged).
    *
@@ -674,10 +1132,17 @@ export const ShiftsProvider = ({ children }) => {
     if (!userId || !dateKey || !hoursMap) return;
     const monthKey = dateKey.slice(0, 7); // "YYYY-MM"
     try {
+      const nextTimeEntries = { ...((await LocalCache.getTimeEntries(userId, monthKey).catch(() => ({}))) || {}) };
+      const removedIds = [];
       for (let i = 0; i < (dayShifts || []).length; i++) {
         const shift = dayShifts[i];
         const rh = hoursMap[i];
-        if (!shift || !rh?.startTime || !rh?.endTime) continue;
+        if (!shift?.id) continue;
+        if (!rh?.startTime || !rh?.endTime) {
+          if (nextTimeEntries[shift.id]) removedIds.push(shift.id);
+          delete nextTimeEntries[shift.id];
+          continue;
+        }
 
         const actualDurationMinutes =
           TimeUtils.calculateDurationMinutes(rh.startTime, rh.endTime) ?? 0;
@@ -706,12 +1171,28 @@ export const ShiftsProvider = ({ children }) => {
           actualDurationMinutes,
           editedAt:              new Date().toISOString(),
         };
-        await LocalCache.saveTimeEntry(userId, monthKey, shift.id, entry);
-        FirebaseAdapter.saveTimeEntry(userId, monthKey, shift.id, entry).catch(
-          err => Logger.warn(`[Firebase] saveTimeEntry failed for ${shift.id}: ${err?.message}`)
-        );
+        nextTimeEntries[shift.id] = entry;
       }
+      await LocalCache.saveTimeEntries(userId, monthKey, nextTimeEntries);
+      // saveTimeEntries only upserts; cleared entries must be deleted from
+      // Firestore explicitly or they resurrect on the next cross-device hydrate.
+      removedIds.forEach(id =>
+        FirebaseAdapter.deleteTimeEntry(userId, monthKey, id).catch(() => {})
+      );
       await LocalCache.markSummaryDirty(userId, monthKey);
+      const memKey = `${Number(monthKey.slice(0, 4))}-${Number(monthKey.slice(5, 7))}`;
+      const cached = monthsCache.current[memKey];
+      if (cached?.daysWithShifts) {
+        const timeEntries = (await LocalCache.getTimeEntries(userId, monthKey).catch(() => ({}))) || {};
+        const hoursReport = _buildHoursReport(cached.daysWithShifts, timeEntries, cached.hoursReport);
+        monthsCache.current[memKey] = { ...cached, hoursReport };
+        await LocalCache.saveShifts(userId, monthKey, cached.daysWithShifts, new Date().toISOString(), hoursReport).catch(() => {});
+        setShiftsData(prev => (
+          prev.loadedFor === memKey
+            ? { ...prev, hoursReport }
+            : prev
+        ));
+      }
       Logger.info(`💾 TimeEntries persisted for ${dateKey}, summary marked dirty`);
     } catch (err) {
       Logger.warn('persistTimeEntries error:', err?.message);
@@ -736,14 +1217,23 @@ export const ShiftsProvider = ({ children }) => {
       return;
     }
     try {
-      const [financialConfig, timeEntries] = await Promise.all([
+      const [liveConfig, timeEntries] = await Promise.all([
         getFullShiftConfig(),
         LocalCache.getTimeEntries(userId, fullMonthKey),
       ]);
+      const financialConfig = await _resolveSummaryConfig(userId, fullMonthKey, liveConfig, cached.daysWithShifts, isViewOnly(userRef.current));
       const summary = computeMonthSummary(
         userId, fullMonthKey, cached.daysWithShifts, timeEntries || {}, financialConfig
       );
+      const hoursReport = _buildHoursReport(cached.daysWithShifts, timeEntries || {}, cached.hoursReport);
+      monthsCache.current[memKey] = { ...cached, hoursReport };
       await LocalCache.saveSummary(userId, fullMonthKey, summary);
+      await LocalCache.saveShifts(userId, fullMonthKey, cached.daysWithShifts, new Date().toISOString(), hoursReport).catch(() => {});
+      setShiftsData(prev => (
+        prev.loadedFor === memKey
+          ? { ...prev, hoursReport, monthSummary: summary }
+          : prev
+      ));
       Logger.info(`🔄 MonthSummary refreshed for ${fullMonthKey}`);
     } catch (err) {
       Logger.warn('refreshMonthSummary error:', err?.message);
@@ -774,13 +1264,57 @@ export const ShiftsProvider = ({ children }) => {
     });
   };
 
-  // Auto-carregar dados do mês atual quando o token estiver disponível
+  // Reset em troca de usuário: limpa state, in-memory cache e fetches pendentes,
+  // e dispara auto-load para o novo usuário. Sem isso, monthsCache.current e
+  // shiftsData vazam entre sessões (ex.: logout aurora → login webClient mostra
+  // os plantões do usuário anterior).
+  const prevUserIdRef = useRef(userId);
+  const loadedForUserIdRef = useRef(null);
   useEffect(() => {
-    if (token && user?.source !== 'aurora' && !shiftsData.loading && !shiftsData.daysWithShifts.length) {
+    if (prevUserIdRef.current !== userId) {
+      Logger.info(`🔄 userId mudou (${prevUserIdRef.current} → ${userId}), limpando estado`);
+      monthsCache.current = {};
+      inFlightRef.current = {};
+      loadedForUserIdRef.current = null;
+      setShiftsData({
+        currentMonth: null,
+        currentYear: null,
+        monthlyCalendar: null,
+        daysWithShifts: [],
+        totalShifts: 0,
+        loading: false,
+        error: null,
+        lastUpdated: null,
+        loadedFor: null,
+        monthSummary: null,
+      });
+      prevUserIdRef.current = userId;
+    }
+
+    // [WEBCLIENT-BRIDGE] `!user?.auroraOnlyMode` evita disparar getCurrentMonthData
+    // (caminho PlantaoAPI) quando webClient migrou pra aurora-only.
+    if (token && userId && !isAuroraOnly(user) && loadedForUserIdRef.current !== userId) {
       Logger.info('🔄 Token disponível, carregando dados do mês atual...');
+      loadedForUserIdRef.current = userId;
       getCurrentMonthData();
     }
-  }, [token]);
+  }, [token, userId, user?.source, user?.auroraOnlyMode]);
+
+  // [WEBCLIENT-BRIDGE] — auto-reload quando aurora-only liga/desliga, pra
+  // garantir que o branch correto rode com os flags atualizados (botões de
+  // Ceder/Trocar dependem de source='aurora' no shift, que só aparece após
+  // o aurora-load gravar do Firestore na cache).
+  const prevAuroraOnlyRef = useRef(!!user?.auroraOnlyMode);
+  useEffect(() => {
+    const wasOn = prevAuroraOnlyRef.current;
+    const isOn = !!user?.auroraOnlyMode;
+    prevAuroraOnlyRef.current = isOn;
+    if (wasOn === isOn) return;
+    if (!userId) return;
+    const now = new Date();
+    Logger.info(`🔄 auroraOnlyMode flipou (${wasOn} → ${isOn}), re-carregando mês atual`);
+    loadMonthlyShifts(now.getMonth() + 1, now.getFullYear(), true).catch(() => {});
+  }, [user?.auroraOnlyMode, userId]);
 
   const contextValue = {
     // Dados
@@ -789,6 +1323,7 @@ export const ShiftsProvider = ({ children }) => {
     // Métodos
     loadMonthlyShifts,
     loadTwoMonthsData,
+    refreshShifts,
     getCurrentMonthData,
     clearShiftsData,
     persistTimeEntries,
@@ -812,6 +1347,11 @@ export const ShiftsProvider = ({ children }) => {
     addManualShift: async (shiftData) => {
       if (!userId) return;
       const pad2 = n => String(n).padStart(2, '0');
+      // Optional institution carries through to shift.group.institution so the
+      // resolver in HospitalConfigResolver can route to per-hospital config.
+      // null/undefined institution → manual shift falls back to global config.
+      const inst = shiftData.institution || null;
+      const groupId = inst?.id ? `manual_${inst.id}` : 'manual';
       const shift = {
         id: `manual_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
         userId,
@@ -825,19 +1365,40 @@ export const ShiftsProvider = ({ children }) => {
         crossesMidnight: shiftData.crossesMidnight || false,
         carryover: false,
         splitHours: null,
-        group: { id: 'manual', name: shiftData.hospitalName, color: '#3FA9A7', institutionId: null, institutionName: shiftData.hospitalName },
+        group: {
+          id: groupId,
+          name: shiftData.hospitalName,
+          color: '#3FA9A7',
+          institutionId: inst?.id || null,
+          institutionName: inst?.name || shiftData.hospitalName,
+          institution: inst ? { id: inst.id, name: inst.name } : null,
+        },
         coworkerIds: [],
         syncedAt: new Date().toISOString(),
         isManual: true,
+        // Plantão criado pelo médico nunca é escala fixa — só coord cria fixas
+        // via aurora-web. Ver Glossário em models/index.js.
+        isFixedSchedule: false,
+        escalistaUserId: String(userId),
+        currentHolderUserId: String(userId),
         time: `${shiftData.startTime} - ${shiftData.endTime} (${shiftData.label})`,
         originalData: null,
+        // Ponto de partida do timeline. Append-only daqui pra frente; ver
+        // src/utils/shiftTransferLog.js + memory project-shift-transferlog.
+        transferLog: [makeLogEntry({
+          type: TRANSFER_LOG_TYPES.CREATE,
+          toUserId: userId,
+          toUserName: user?.name || null,
+          actorUserId: userId,
+        })],
+        cededAt: null,
       };
       await LocalCache.saveManualShift(userId, shift);
 
       // Write to Firestore
       try {
         const { db } = await import('../services/firebase/config');
-        const { doc, setDoc, serverTimestamp } = await import('firebase/firestore');
+        const { doc, setDoc, serverTimestamp } = await import('../services/firebase/fdb');
         if (db) await setDoc(doc(db, 'users', String(userId), 'manualShifts', shift.id), { ...shift, createdAt: serverTimestamp() });
       } catch (_) {}
 
@@ -855,21 +1416,21 @@ export const ShiftsProvider = ({ children }) => {
           const newDay = { day: d.getDate(), date: shift.date, shiftsCount: 1, shifts: [shift], originalData: null };
           updatedDays = [...existing, newDay].sort((a, b) => a.date.localeCompare(b.date));
         }
-        const allShifts = updatedDays.flatMap(d => d.shifts);
-        const totalMinutes = allShifts.reduce((acc, s) => acc + (s.durationMinutes || 0), 0);
-        const hoursReport = { standardHours: totalMinutes / 60, realHours: totalMinutes / 60 };
+        const totalShifts = updatedDays.reduce((sum, d) => sum + (d.shifts?.length || 0), 0);
+        const hoursReport = _patchHoursReport(prev.hoursReport, updatedDays);
         const memKey = `${prev.currentYear}-${prev.currentMonth}`;
-        monthsCache.current[memKey] = { daysWithShifts: updatedDays, hoursReport, totalShifts: allShifts.length };
-        // Recompute summary async then push to state
+        monthsCache.current[memKey] = { daysWithShifts: updatedDays, hoursReport, totalShifts };
+        // Recompute summary async then push to state (past months: freeze bonus/loyalty)
         const fullMonthKey = `${prev.currentYear}-${String(prev.currentMonth).padStart(2, '0')}`;
         Promise.all([getFullShiftConfig(), LocalCache.getTimeEntries(userId, fullMonthKey)])
-          .then(([cfg, te]) => {
+          .then(async ([liveCfg, te]) => {
+            const cfg = await _resolveSummaryConfig(userId, fullMonthKey, liveCfg, updatedDays, isViewOnly(userRef.current));
             const s = computeMonthSummary(userId, fullMonthKey, updatedDays, te || {}, cfg);
             LocalCache.saveSummary(userId, fullMonthKey, s);
             setShiftsData(p => ({ ...p, monthSummary: s }));
           })
           .catch(() => {});
-        return { ...prev, daysWithShifts: updatedDays, hoursReport, totalShifts: allShifts.length };
+        return { ...prev, daysWithShifts: updatedDays, hoursReport, totalShifts };
       });
     },
 
@@ -878,7 +1439,7 @@ export const ShiftsProvider = ({ children }) => {
       await LocalCache.deleteManualShift(userId, shiftId, monthKey);
       try {
         const { db } = await import('../services/firebase/config');
-        const { doc, deleteDoc } = await import('firebase/firestore');
+        const { doc, deleteDoc } = await import('../services/firebase/fdb');
         if (db) await deleteDoc(doc(db, 'users', userId, 'manualShifts', shiftId));
       } catch {}
       setShiftsData(prev => {
@@ -887,7 +1448,105 @@ export const ShiftsProvider = ({ children }) => {
           shifts: d.shifts.filter(s => s.id !== shiftId),
           shiftsCount: d.shifts.filter(s => s.id !== shiftId).length,
         })).filter(d => d.shiftsCount > 0);
-        return { ...prev, daysWithShifts: updated, totalShifts: Math.max(0, (prev.totalShifts || 0) - 1) };
+        const hoursReport = _patchHoursReport(prev.hoursReport, updated);
+        return { ...prev, daysWithShifts: updated, hoursReport, totalShifts: Math.max(0, (prev.totalShifts || 0) - 1) };
+      });
+    },
+
+    /**
+     * Remove a shift from LocalCache (both buckets) + state + monthsCache.
+     * Firestore deletion is performed by the caller (e.g. OffersContext) since
+     * it already owns the cede semantics. This action only synchronizes the
+     * local view so the calendar updates instantly after Ceder.
+     */
+    removeShiftLocally: async (shiftId, monthKey) => {
+      if (!userId || !shiftId || !monthKey) return;
+      await Promise.all([
+        LocalCache.deleteManualShift(userId, shiftId, monthKey),
+        LocalCache.deleteRegularShift(userId, shiftId, monthKey),
+      ]);
+      // Update monthsCache for every month that holds the shift (defensive)
+      Object.entries(monthsCache.current).forEach(([k, cached]) => {
+        const days = (cached?.daysWithShifts || []).map(d => ({
+          ...d,
+          shifts: (d.shifts || []).filter(s => String(s.id) !== String(shiftId)),
+        })).filter(d => d.shifts.length > 0)
+          .map(d => ({ ...d, shiftsCount: d.shifts.length }));
+        // Recompute hoursReport — sem isso, total de horas fica congelado no
+        // valor anterior à remoção (count cai, horas não).
+        const hoursReport = _patchHoursReport(cached?.hoursReport, days);
+        monthsCache.current[k] = {
+          ...cached,
+          daysWithShifts: days,
+          hoursReport,
+          totalShifts: days.reduce((n, d) => n + d.shifts.length, 0),
+        };
+      });
+      setShiftsData(prev => {
+        const updated = (prev.daysWithShifts || []).map(d => ({
+          ...d,
+          shifts: (d.shifts || []).filter(s => String(s.id) !== String(shiftId)),
+        })).filter(d => d.shifts.length > 0)
+          .map(d => ({ ...d, shiftsCount: d.shifts.length }));
+        const hoursReport = _patchHoursReport(prev.hoursReport, updated);
+        return {
+          ...prev,
+          daysWithShifts: updated,
+          hoursReport,
+          totalShifts: updated.reduce((n, d) => n + d.shifts.length, 0),
+        };
+      });
+    },
+
+    /**
+     * Add a newly-claimed Aurora shift to the calendar instantly (used by
+     * OpeningsScreen after a successful claim). Persists to LocalCache regular
+     * bucket so it survives reloads on both aurora + webClient users.
+     */
+    addClaimedShiftLocally: async (shift) => {
+      if (!userId || !shift?.id || !shift?.monthKey) return;
+      await LocalCache.saveRegularShift(userId, shift);
+      setShiftsData(prev => {
+        const days = [...(prev.daysWithShifts || [])];
+        const idx = days.findIndex(d => d.date === shift.date);
+        if (idx >= 0) {
+          if (!days[idx].shifts.some(s => String(s.id) === String(shift.id))) {
+            days[idx] = { ...days[idx], shifts: [...days[idx].shifts, shift], shiftsCount: days[idx].shifts.length + 1 };
+          }
+        } else {
+          const d = new Date((shift.date || '') + 'T00:00:00');
+          days.push({ day: d.getDate(), date: shift.date, shifts: [shift], shiftsCount: 1, originalData: null });
+          days.sort((a, b) => a.date.localeCompare(b.date));
+        }
+        const hoursReport = _patchHoursReport(prev.hoursReport, days);
+        return { ...prev, daysWithShifts: days, hoursReport, totalShifts: (prev.totalShifts || 0) + 1 };
+      });
+    },
+
+    /**
+     * Re-insert a previously-removed shift snapshot (used by cede cancel).
+     * Writes to the appropriate LocalCache bucket and patches state.
+     */
+    restoreShiftLocally: async (shift) => {
+      if (!userId || !shift?.id || !shift?.monthKey) return;
+      if (shift.isManual) {
+        await LocalCache.saveManualShift(userId, shift);
+      } else {
+        await LocalCache.saveRegularShift(userId, shift);
+      }
+      setShiftsData(prev => {
+        const days = [...(prev.daysWithShifts || [])];
+        const idx = days.findIndex(d => d.date === shift.date);
+        if (idx >= 0) {
+          if (!days[idx].shifts.some(s => String(s.id) === String(shift.id))) {
+            days[idx] = { ...days[idx], shifts: [...days[idx].shifts, shift], shiftsCount: days[idx].shifts.length + 1 };
+          }
+        } else {
+          const d = new Date(shift.date + 'T00:00:00');
+          days.push({ day: d.getDate(), date: shift.date, shifts: [shift], shiftsCount: 1, originalData: null });
+          days.sort((a, b) => a.date.localeCompare(b.date));
+        }
+        return { ...prev, daysWithShifts: days, totalShifts: (prev.totalShifts || 0) + 1 };
       });
     },
 
@@ -895,7 +1554,9 @@ export const ShiftsProvider = ({ children }) => {
       const monthKey = `${year}-${month}`;
       if (monthsCache.current[monthKey]) return; // already warm
 
-      if (!userId || !token) return;
+      // Aurora não precisa de token webClient — só exige userId. O token só é
+      // requerido no fallback webClient (não-aurora) mais abaixo.
+      if (!userId) return;
 
       const fullMonthKey = `${year}-${String(month).padStart(2, '0')}`;
 
@@ -904,28 +1565,36 @@ export const ShiftsProvider = ({ children }) => {
         const persisted = await LocalCache.getShifts(userId, fullMonthKey);
         if (persisted) {
           const { daysWithShifts, hoursReport: rawReport, totalShifts } = persisted;
-          const hoursReport = _patchHoursReport(rawReport, daysWithShifts);
+          const timeEntries = (await LocalCache.getTimeEntries(userId, fullMonthKey).catch(() => ({}))) || {};
+          const hoursReport = _buildHoursReport(daysWithShifts, timeEntries, rawReport);
           monthsCache.current[monthKey] = { daysWithShifts, hoursReport, totalShifts };
           return;
         }
       } catch (_) {}
 
-      // Fallback: API fetch, store only in in-memory cache
+      // Relatórios e Gráficos são analytics: leem SÓ o shadow (Firestore +
+      // LocalCache), nunca webClient — pra qualquer source. Meses sem shadow
+      // simplesmente aparecem vazios em vez de disparar requisição webClient.
       try {
-        const monthlyResponse = await WebClientApiService.getMonthlyCalendar(token, month, year);
-        if (!monthlyResponse.success) return;
-        const days = monthlyResponse.data?.data?.current?.days || [];
-        const daysWithShifts = [];
-        for (const dayData of days) {
-          if (!dayData.shifts?.length) continue;
-          const dateObj = new Date(dayData.date + 'T12:00:00.000Z');
-          const daily = await WebClientApiService.getDailyShifts(token, dateObj);
-          if (daily.success && daily.data?.length) {
-            daysWithShifts.push({ date: dayData.date, shifts: daily.data.map(s => ({ id: s.id, label: s.label || s.shift_type || 'M', time: s.time || '', date: dayData.date, group: s.group || { name: s.group_name || '' }, originalData: s })) });
-          }
-        }
-        monthsCache.current[monthKey] = { daysWithShifts, hoursReport: null, totalShifts: daysWithShifts.reduce((n, d) => n + (d.shifts?.length || 0), 0) };
-      } catch (_) {}
+        const remote = await FirebaseAdapter.fetchAuroraMonth(userId, fullMonthKey);
+        if (remote.manualAuthoritative)  await LocalCache.setManualShifts(userId, fullMonthKey, remote.manualShifts);
+        if (remote.regularAuthoritative) await LocalCache.saveRegularShifts(userId, fullMonthKey, remote.regularShifts);
+      } catch (err) {
+        Logger.warn(`[prefetchMonth] firestore hydration: ${err?.message}`);
+      }
+      const [manualShifts, regularShifts] = await Promise.all([
+        LocalCache.getManualShifts(userId, fullMonthKey),
+        LocalCache.getRegularShifts(userId, fullMonthKey),
+      ]);
+      const allShifts = [...manualShifts, ...regularShifts];
+      const daysWithShifts = _manualShiftsToDaysWithShifts(allShifts);
+      const timeEntries = (await LocalCache.getTimeEntries(userId, fullMonthKey).catch(() => ({}))) || {};
+      const hoursReport = _buildHoursReport(daysWithShifts, timeEntries, null);
+      monthsCache.current[monthKey] = {
+        daysWithShifts,
+        hoursReport,
+        totalShifts: allShifts.length,
+      };
     },
   };
 

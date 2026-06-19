@@ -4,7 +4,7 @@ import { StorageService } from '../utils/StorageService';
 import { runMigration } from '../services/StorageMigration';
 import LocalCache from '../services/LocalCache';
 import FirebaseAdapter from '../services/firebase/FirebaseAdapter';
-import { syncCurrentMonthToFirebase } from '../services/firebase/LoginSyncService';
+import { syncCurrentMonthToFirebase, hydratePastMonthsFromFirebase } from '../services/firebase/LoginSyncService';
 import {
   createAccount,
   loginAuroraUser,
@@ -22,7 +22,7 @@ import Logger from '../utils/Logger';
 // Returns true only if Firestore has a doc for this email with source:'aurora'.
 const _isAuroraAccountInFirestore = async (email) => {
   if (!db || !email) return false;
-  const { collection, query, where, getDocs } = await import('firebase/firestore');
+  const { collection, query, where, getDocs } = await import('../services/firebase/fdb');
   const snap = await getDocs(query(collection(db, 'users'), where('email', '==', email)));
   if (snap.empty) return false;
   return snap.docs[0].data()?.source === 'aurora';
@@ -39,6 +39,26 @@ const _activateFirebase = () => LocalCache.setFirebaseAdapter(FirebaseAdapter);
 const _deactivateFirebase = () => LocalCache.setFirebaseAdapter(null);
 
 const _isAurora = (userData) => userData?.source === 'aurora';
+
+// Reads persistent user-level flags from Firestore — these survive logout
+// (AsyncStorage gets cleared) so they must be re-hydrated from the cloud
+// on every login. Returns {} if Firestore unavailable or doc absent.
+const _loadFirestoreUserFlags = async (uid) => {
+  if (!db || !uid) return {};
+  try {
+    const { doc, getDoc } = await import('../services/firebase/fdb');
+    const snap = await getDoc(doc(db, 'users', String(uid)));
+    if (!snap.exists()) return {};
+    const d = snap.data() || {};
+    return {
+      showOnboarding: d.showOnboarding,
+      auroraOnlyMode: d.auroraOnlyMode,
+      auroraSnapshotAt: d.auroraSnapshotAt,
+    };
+  } catch {
+    return {};
+  }
+};
 
 const AuthContext = createContext({});
 
@@ -83,8 +103,14 @@ export const AuthProvider = ({ children }) => {
           _activateFirebase();
           FirebaseAdapter.saveUser(userData?.id, null, userData).catch(() => {});
 
+          // Hydrate immutable past months from Firestore for both user types
+          // so Charts/Reports don't re-fetch on fresh device or after logout.
+          hydratePastMonthsFromFirebase(userData?.id, userData?.source).catch(() => {});
+
           // WebClient-only background tasks — skip for Aurora users who have no WebClient token.
-          if (!_isAurora(userData)) {
+          // [WEBCLIENT-BRIDGE] e tb skip se usuário webClient migrou pra aurora-only:
+          // ele não precisa mais bater no PlantaoAPI.
+          if (!_isAurora(userData) && !userData?.auroraOnlyMode) {
             syncCurrentMonthToFirebase(userData?.id).catch(() => {});
             TodayCoworkersService.compute(userData?.id, activeToken, userData?.id).catch(() => {});
           }
@@ -112,6 +138,13 @@ export const AuthProvider = ({ children }) => {
       // onAuthStateChanged to get the real answer after the SDK initializes.
       if (_isAurora(userData)) {
         return waitForAuroraAuth();
+      }
+
+      // [WEBCLIENT-BRIDGE] usuário webClient que já migrou pra aurora-only não
+      // depende mais do PlantaoAPI. Confia no token local — sessão persiste mesmo
+      // se a API estiver indisponível ou o token tiver expirado lá.
+      if (userData?.auroraOnlyMode === true && tokenToValidate) {
+        return true;
       }
 
       const response = await fetch(`${process.env.EXPO_PUBLIC_API_URL}/users/profile`, {
@@ -150,11 +183,14 @@ export const AuthProvider = ({ children }) => {
           const { userInfo: rawAuroraInfo, idToken } = aurora;
           const prevUserData = await StorageService.getUserData();
           const isFirstLogin = !prevUserData || prevUserData.id !== rawAuroraInfo.id;
+          const fsFlags = await _loadFirestoreUserFlags(rawAuroraInfo.id);
           const userInfo = {
             ...rawAuroraInfo,
-            showOnboarding: isFirstLogin
-              ? true
-              : (rawAuroraInfo.showOnboarding ?? prevUserData?.showOnboarding ?? false),
+            showOnboarding: fsFlags.showOnboarding != null
+              ? fsFlags.showOnboarding
+              : (isFirstLogin ? true : (rawAuroraInfo.showOnboarding ?? prevUserData?.showOnboarding ?? false)),
+            auroraOnlyMode: fsFlags.auroraOnlyMode === true,
+            auroraSnapshotAt: fsFlags.auroraSnapshotAt || null,
           };
           await StorageService.saveToken(idToken);
           await StorageService.saveUserData(userInfo);
@@ -164,6 +200,7 @@ export const AuthProvider = ({ children }) => {
           setThemeUserId(userInfo?.id || null);
           _activateFirebase();
           FirebaseAdapter.saveUser(userInfo.id, null, userInfo).catch(() => {});
+          hydratePastMonthsFromFirebase(userInfo.id, 'aurora').catch(() => {});
           Logger.info(`✅ Login concluído — email: ${email} source: aurora`);
           return { success: true };
         }
@@ -185,57 +222,85 @@ export const AuthProvider = ({ children }) => {
       }
 
       // ── Step 2: WebClient API (original PlantaoAPI users) ─────────────────
-      const result = await WebClientApiService.login(email, password);
-
-      let apiData = null;
-      if (result && result.message && result.data) {
-        apiData = result.data;
-      } else if (result && result.success && result.data) {
-        apiData = result.data.data || result.data;
-      }
-
-      if (!apiData) {
-        return { success: false, error: result?.error || 'Credenciais inválidas.' };
-      }
-
-      const extractedToken = apiData.token;
-      if (!extractedToken) {
-        return { success: false, error: 'Token não recebido pelo servidor.' };
-      }
-
-      const prevUserData = await StorageService.getUserData();
-      const isFirstLogin = !prevUserData || prevUserData.id !== (apiData.id || apiData.user_id);
-
-      const userInfo = {
-        id: apiData.id || apiData.user_id,
-        name: apiData.name || apiData.full_name || apiData.username || email,
-        email: apiData.email || email,
-        username: apiData.username || '',
-        role: apiData.role || '',
-        photo: apiData.photo || null,
-        council: apiData.council || { id: '', state: '' },
-        phone: apiData.phone || '',
-        is_premium: apiData.is_premium || false,
-        showOnboarding: isFirstLogin ? true : (prevUserData?.showOnboarding ?? false),
-        // source intentionally absent — treated as 'webClient' everywhere
-      };
-
-      await StorageService.saveToken(extractedToken);
-      await StorageService.saveUserData(userInfo);
-      setToken(extractedToken);
-      setUser(userInfo);
-      setIsAuthenticated(true);
-      setThemeUserId(userInfo.id);
-      _fireMigration(userInfo.id);
-      _activateFirebase();
-      FirebaseAdapter.saveUser(userInfo.id, apiData, userInfo).catch(() => {});
-      syncCurrentMonthToFirebase(userInfo.id).catch(() => {});
-      TodayCoworkersService.compute(userInfo.id, extractedToken, userInfo.id).catch(() => {});
-
-      Logger.info(`✅ Login concluído — email: ${email} source: webClient`);
-      return { success: true };
+      return await _webClientLogin(email, password);
     } catch (error) {
       Logger.error('❌ Erro no processo de login:', error.message);
+      return { success: false, error: error.message };
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Login direto no PlantaoAPI, sem tentar Firebase antes. Usado pelo botão
+  // dedicado "Entrar com conta PlantãoAPI" (fluxo só-visualização) e como
+  // fallback do login() acima.
+  const _webClientLogin = async (email, password) => {
+    const result = await WebClientApiService.login(email, password);
+
+    let apiData = null;
+    if (result && result.message && result.data) {
+      apiData = result.data;
+    } else if (result && result.success && result.data) {
+      apiData = result.data.data || result.data;
+    }
+
+    if (!apiData) {
+      return { success: false, error: result?.error || 'Credenciais inválidas.' };
+    }
+
+    const extractedToken = apiData.token;
+    if (!extractedToken) {
+      return { success: false, error: 'Token não recebido pelo servidor.' };
+    }
+
+    const prevUserData = await StorageService.getUserData();
+    const wcUid = apiData.id || apiData.user_id;
+    const isFirstLogin = !prevUserData || prevUserData.id !== wcUid;
+    const fsFlags = await _loadFirestoreUserFlags(wcUid);
+
+    const userInfo = {
+      id: wcUid,
+      name: apiData.name || apiData.full_name || apiData.username || email,
+      email: apiData.email || email,
+      username: apiData.username || '',
+      role: apiData.role || '',
+      photo: apiData.photo || null,
+      council: apiData.council || { id: '', state: '' },
+      phone: apiData.phone || '',
+      is_premium: apiData.is_premium || false,
+      showOnboarding: fsFlags.showOnboarding != null
+        ? fsFlags.showOnboarding
+        : (isFirstLogin ? true : (prevUserData?.showOnboarding ?? false)),
+      auroraOnlyMode: fsFlags.auroraOnlyMode === true,
+      auroraSnapshotAt: fsFlags.auroraSnapshotAt || null,
+      // source intentionally absent — treated as 'webClient' (só-visualização)
+    };
+
+    await StorageService.saveToken(extractedToken);
+    await StorageService.saveUserData(userInfo);
+    setToken(extractedToken);
+    setUser(userInfo);
+    setIsAuthenticated(true);
+    setThemeUserId(userInfo.id);
+    _fireMigration(userInfo.id);
+    _activateFirebase();
+    FirebaseAdapter.saveUser(userInfo.id, apiData, userInfo).catch(() => {});
+    syncCurrentMonthToFirebase(userInfo.id).catch(() => {});
+    hydratePastMonthsFromFirebase(userInfo.id, userInfo.source).catch(() => {});
+    TodayCoworkersService.compute(userInfo.id, extractedToken, userInfo.id).catch(() => {});
+
+    Logger.info(`✅ Login concluído — email: ${email} source: webClient`);
+    return { success: true };
+  };
+
+  // Entrada dedicada PlantaoAPI (pula Firebase). Modo só-visualização.
+  const loginWebClient = async (email, password) => {
+    try {
+      setLoading(true);
+      Logger.info(`🔐 Login PlantãoAPI — email: ${email}`);
+      return await _webClientLogin(email, password);
+    } catch (error) {
+      Logger.error('❌ Erro no login PlantãoAPI:', error.message);
       return { success: false, error: error.message };
     } finally {
       setLoading(false);
@@ -277,11 +342,14 @@ export const AuthProvider = ({ children }) => {
 
       const prevUserData = await StorageService.getUserData();
       const isFirstLogin = !prevUserData || prevUserData.id !== rawUserInfo.id;
+      const fsFlags = await _loadFirestoreUserFlags(rawUserInfo.id);
       const userInfo = {
         ...rawUserInfo,
-        showOnboarding: isFirstLogin
-          ? true
-          : (rawUserInfo.showOnboarding ?? prevUserData?.showOnboarding ?? false),
+        showOnboarding: fsFlags.showOnboarding != null
+          ? fsFlags.showOnboarding
+          : (isFirstLogin ? true : (rawUserInfo.showOnboarding ?? prevUserData?.showOnboarding ?? false)),
+        auroraOnlyMode: fsFlags.auroraOnlyMode === true,
+        auroraSnapshotAt: fsFlags.auroraSnapshotAt || null,
       };
 
       await StorageService.saveToken(idToken);
@@ -293,6 +361,7 @@ export const AuthProvider = ({ children }) => {
       setThemeUserId(userInfo.id);
       _activateFirebase();
       FirebaseAdapter.saveUser(userInfo.id, null, userInfo).catch(() => {});
+      hydratePastMonthsFromFirebase(userInfo.id, 'aurora').catch(() => {});
 
       Logger.info(`✅ Login concluído — email: ${userInfo.email} source: aurora (google)`);
       return { success: true };
@@ -320,6 +389,7 @@ export const AuthProvider = ({ children }) => {
       }
 
       await StorageService.clearAll();
+      TodayCoworkersService.clear();
       _deactivateFirebase();
       setThemeUserId(null);
       setUser(null);
@@ -340,7 +410,7 @@ export const AuthProvider = ({ children }) => {
       const { _compressAndUpload } = await import('../services/firebase/SignupService');
       const photoUrl = await _compressAndUpload(user.id, photoUri);
       const { db: firestoreDb } = await import('../services/firebase/config');
-      const { doc, setDoc } = await import('firebase/firestore');
+      const { doc, setDoc } = await import('../services/firebase/fdb');
       if (firestoreDb) {
         await setDoc(doc(firestoreDb, 'users', user.id), { photo: photoUrl }, { merge: true });
       }
@@ -362,7 +432,7 @@ export const AuthProvider = ({ children }) => {
     setUser(updated);
     try {
       const { db: firestoreDb } = await import('../services/firebase/config');
-      const { doc, setDoc } = await import('firebase/firestore');
+      const { doc, setDoc } = await import('../services/firebase/fdb');
       if (firestoreDb && user.id) {
         await setDoc(doc(firestoreDb, 'users', user.id), { showOnboarding: false }, { merge: true });
       }
@@ -376,18 +446,48 @@ export const AuthProvider = ({ children }) => {
     setUser(updated);
   };
 
+  // [WEBCLIENT-BRIDGE] — remove when webClient is fully retired.
+  // Toggles "aurora-only" mode for webClient users. When true, ShiftsContext
+  // reads only from Firestore (snapshot). When false, reads from PlantaoAPI.
+  // Persists to Firestore so it survives logout (AsyncStorage gets cleared).
+  const setAuroraOnlyMode = async (enabled, snapshotAt = null) => {
+    if (!user) return { success: false };
+    const updated = {
+      ...user,
+      auroraOnlyMode: !!enabled,
+      ...(snapshotAt ? { auroraSnapshotAt: snapshotAt } : {}),
+    };
+    await StorageService.saveUserData(updated).catch(() => {});
+    setUser(updated);
+    try {
+      const { doc, setDoc } = await import('../services/firebase/fdb');
+      if (db && user.id) {
+        await setDoc(doc(db, 'users', String(user.id)), {
+          auroraOnlyMode: !!enabled,
+          ...(snapshotAt ? { auroraSnapshotAt: snapshotAt } : {}),
+        }, { merge: true });
+      }
+      return { success: true };
+    } catch (err) {
+      Logger.warn('setAuroraOnlyMode firestore write failed:', err?.message);
+      return { success: false, error: err?.message };
+    }
+  };
+
   const value = {
     isAuthenticated,
     user,
     token,
     loading,
     login,
+    loginWebClient,
     signup,
     loginWithGoogle,
     logout,
     updatePhoto,
     completeOnboarding,
     updateUser,
+    setAuroraOnlyMode,
   };
 
   return (

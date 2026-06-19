@@ -13,7 +13,7 @@ const _saveToFirestore = async (userId, preference) => {
   if (!userId) return;
   try {
     const { db } = require('../services/firebase/config');
-    const { doc, setDoc } = require('firebase/firestore');
+    const { doc, setDoc } = require('../services/firebase/fdb');
     if (!db) return;
     await setDoc(doc(db, 'users', userId, 'settings', 'appearance'), { theme: preference }, { merge: true });
   } catch {}
@@ -23,7 +23,7 @@ const _loadFromFirestore = async (userId) => {
   if (!userId) return null;
   try {
     const { db } = require('../services/firebase/config');
-    const { doc, getDoc } = require('firebase/firestore');
+    const { doc, getDoc } = require('../services/firebase/fdb');
     if (!db) return null;
     const snap = await getDoc(doc(db, 'users', userId, 'settings', 'appearance'));
     const v = snap.data()?.theme;

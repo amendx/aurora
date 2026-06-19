@@ -6,6 +6,7 @@ import {
   ScrollView,
   RefreshControl,
   TouchableOpacity,
+  Pressable,
   Alert,
   ActivityIndicator,
   Dimensions,
@@ -14,12 +15,30 @@ import {
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useGroups } from '../contexts/GroupsContext';
 import { AuthContext } from '../context/AuthContext';
-import WebClientApiService from '../services/WebClientApiService';
 import Logger from '../utils/Logger';
 import { COLOR_PALETTE, getGroupColors, saveGroupColor } from '../utils/GroupColorConfig';
 import { useColors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
 
 const { width } = Dimensions.get('window');
+
+// Coerções defensivas — aceita string ou objeto e devolve string vazia/válida.
+// Usado pra renderizar campos vindos do model NormalizedUser (council = {id,state})
+// ou do webClient (council = string) sem quebrar React.
+const _str = (v) => {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  return ''; // qualquer objeto/array — quem chama trata via campo específico
+};
+const _councilStr = (c) => {
+  if (!c) return '';
+  if (typeof c === 'string') return c;
+  if (typeof c === 'object') {
+    const parts = [c.crm, c.id, c.state].filter(Boolean);
+    return parts.length ? parts.join(' · ') : '';
+  }
+  return String(c);
+};
 
 const MemberCard = ({ member, type }) => {
   const C = useColors();
@@ -58,10 +77,10 @@ const MemberCard = ({ member, type }) => {
       </View>
 
       <View style={s.memberInfo}>
-        <Text style={s.memberName}>{member.name || member.full_name}</Text>
-        <Text style={s.memberRole}>{member.role}</Text>
-        {member.council && (
-          <Text style={s.memberCouncil}>{member.council}</Text>
+        <Text style={s.memberName}>{_str(member.name || member.full_name)}</Text>
+        {!!_str(member.role) && <Text style={s.memberRole}>{_str(member.role)}</Text>}
+        {!!_councilStr(member.council) && (
+          <Text style={s.memberCouncil}>{_councilStr(member.council)}</Text>
         )}
         <Text style={[s.memberType, { color: typeIcon.color }]}>{typeLabel}</Text>
       </View>
@@ -99,23 +118,27 @@ const makeMemberStyles = (C) => ({
   },
   memberName: {
     fontSize: 14,
-    fontWeight: '600',
+    fontFamily: Typography.fontFamily.semiBold,
     color: C.text.primary,
   },
   memberRole: {
     fontSize: 12,
+    fontFamily: Typography.fontFamily.regular,
     color: C.text.secondary,
     marginTop: 2,
   },
   memberCouncil: {
     fontSize: 11,
+    fontFamily: Typography.fontFamily.regular,
     color: C.text.tertiary,
     marginTop: 1,
   },
   memberType: {
-    fontSize: 11,
-    fontWeight: '500',
+    fontSize: 10.5,
+    fontFamily: Typography.fontFamily.semiBold,
     marginTop: 2,
+    letterSpacing: 0.3,
+    textTransform: 'uppercase',
   },
 });
 
@@ -128,15 +151,38 @@ const GroupCard = ({ group, initialExpanded = false, onCardLayout, customColor, 
   const [loadingMembers, setLoadingMembers] = useState(false);
   const [memberSearch, setMemberSearch] = useState('');
   const { token } = useContext(AuthContext);
+  const { getGroupMembers } = useGroups();
 
   const displayColor = customColor || group.color || C.primary;
 
-  const partialMembers = [
-    ...(group.manager ? [{ ...group.manager, type: 'manager' }] : []),
-    ...(group.assists || []).map(m => ({ ...m, type: 'assist' })),
-    ...(group.analysts || []).map(m => ({ ...m, type: 'analyst' })),
-    ...(group.observers || []).map(m => ({ ...m, type: 'observer' })),
-  ];
+  // Aurora groups (isAuroraGroup) vêm com membros no contexto via
+  // fetchAuroraGroupMembers. WebClient groups têm manager/assists/etc no doc
+  // do grupo e fetchFullGroupDetails bate na PlantãoAPI.
+  const isAuroraGroup = group.isAuroraGroup === true;
+
+  const auroraMembers = isAuroraGroup
+    ? (getGroupMembers(group.id) || []).map(m => {
+        const p = m.person || {};
+        return {
+          id: p.id || m.userId,
+          name: p.name || '',
+          full_name: p.name || '',
+          photo: p.photo || null,
+          council: p.council || '',
+          role: p.role || 'Médico',
+          type: m.memberType || 'member',
+        };
+      })
+    : [];
+
+  const partialMembers = isAuroraGroup
+    ? auroraMembers
+    : [
+        ...(group.manager ? [{ ...group.manager, type: 'manager' }] : []),
+        ...(group.assists || []).map(m => ({ ...m, type: 'assist' })),
+        ...(group.analysts || []).map(m => ({ ...m, type: 'analyst' })),
+        ...(group.observers || []).map(m => ({ ...m, type: 'observer' })),
+      ];
 
   const totalMembers = group.total_users || partialMembers.length;
 
@@ -150,33 +196,8 @@ const GroupCard = ({ group, initialExpanded = false, onCardLayout, customColor, 
     : displayMembers;
 
   const fetchFullGroupDetails = async () => {
-    if (fullMembers || !token) return;
-
-    setLoadingMembers(true);
-    try {
-      const response = await WebClientApiService.getGroupMembers(token, group.id);
-      if (response.success && response.data && response.data.length > 0) {
-        const members = response.data.map(m => ({
-          id: m.id,
-          name: m.name || m.full_name || '',
-          full_name: m.full_name || m.name || '',
-          photo: m.photo || null,
-          council: m.council || '',
-          email: m.email || '',
-          phone: m.phone || '',
-          role: m.role || m.description || '',
-          type: m.member_type || m.type || 'analyst',
-        }));
-        setFullMembers(members);
-        Logger.info(`👥 Grupo ${group.name}: ${members.length} membros carregados via /members`);
-      } else {
-        Logger.warn(`⚠️ Nenhum membro retornado para grupo ${group.name}`);
-      }
-    } catch (error) {
-      Logger.error(`Erro ao buscar membros do grupo ${group.id}:`, error);
-    } finally {
-      setLoadingMembers(false);
-    }
+    // Sem webClient: membros vêm do contexto (grupos aurora) ou do próprio doc
+    // do grupo (manager/assists/analysts/observers). Nada a buscar na PlantãoAPI.
   };
 
   const handleToggleExpand = () => {
@@ -269,7 +290,7 @@ const GroupCard = ({ group, initialExpanded = false, onCardLayout, customColor, 
                     ]}
                   >
                     {displayColor === color && (
-                      <Ionicons name="checkmark" size={14} color={C.background.primary} />
+                      <Ionicons name="checkmark" size={12} color="#fff" />
                     )}
                   </TouchableOpacity>
                 ))}
@@ -278,7 +299,7 @@ const GroupCard = ({ group, initialExpanded = false, onCardLayout, customColor, 
                     onPress={() => onColorChange && onColorChange(null)}
                     style={s.colorSwatchReset}
                   >
-                    <Ionicons name="refresh" size={14} color={C.text.secondary} />
+                    <Ionicons name="refresh" size={12} color={C.text.tertiary} />
                   </TouchableOpacity>
                 )}
               </View>
@@ -361,34 +382,37 @@ const makeGroupCardStyles = (C) => ({
     marginRight: 12,
   },
   groupName: {
-    fontSize: 18,
-    fontWeight: '600',
+    fontSize: 16,
+    fontFamily: Typography.fontFamily.bold,
     color: C.text.primary,
     flex: 1,
   },
   personalBadge: {
-    backgroundColor: C.primary,
-    paddingHorizontal: 8,
+    backgroundColor: C.accentSoft,
+    paddingHorizontal: 7,
     paddingVertical: 2,
-    borderRadius: 8,
+    borderRadius: 999,
     marginLeft: 8,
   },
   personalBadgeText: {
-    fontSize: 10,
-    color: C.background.primary,
-    fontWeight: '500',
+    fontSize: 9.5,
+    fontFamily: Typography.fontFamily.bold,
+    color: C.primary,
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
   },
   groupInstitution: {
-    fontSize: 14,
+    fontSize: 13,
+    fontFamily: Typography.fontFamily.regular,
     color: C.text.secondary,
-    marginBottom: 8,
-    marginLeft: 24,
+    marginBottom: 6,
+    marginLeft: 22,
   },
   groupStats: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 16,
-    marginLeft: 24,
+    gap: 14,
+    marginLeft: 22,
   },
   statItem: {
     flexDirection: 'row',
@@ -397,7 +421,8 @@ const makeGroupCardStyles = (C) => ({
   },
   statText: {
     fontSize: 12,
-    color: C.text.secondary,
+    fontFamily: Typography.fontFamily.regular,
+    color: C.text.tertiary,
   },
   adminBadge: {
     flexDirection: 'row',
@@ -406,7 +431,7 @@ const makeGroupCardStyles = (C) => ({
     backgroundColor: C.warning + '18',
     paddingHorizontal: 6,
     paddingVertical: 2,
-    borderRadius: 6,
+    borderRadius: 999,
   },
   groupMembers: {
     borderTopWidth: StyleSheet.hairlineWidth,
@@ -416,10 +441,12 @@ const makeGroupCardStyles = (C) => ({
     paddingBottom: 16,
   },
   membersTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: C.text.primary,
-    marginBottom: 16,
+    fontSize: 11.5,
+    fontFamily: Typography.fontFamily.semiBold,
+    color: C.text.tertiary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginBottom: 12,
   },
   membersLoadingContainer: {
     flexDirection: 'row',
@@ -429,7 +456,8 @@ const makeGroupCardStyles = (C) => ({
     gap: 8,
   },
   membersLoadingText: {
-    fontSize: 14,
+    fontSize: 13,
+    fontFamily: Typography.fontFamily.regular,
     color: C.text.secondary,
   },
   noMembersText: {
@@ -456,42 +484,45 @@ const makeGroupCardStyles = (C) => ({
     paddingVertical: 2,
   },
   colorPickerSection: {
-    marginBottom: 16,
-    paddingBottom: 16,
+    marginBottom: Spacing.md,
+    paddingBottom: Spacing.md,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: C.border.light,
   },
   colorPickerLabel: {
-    fontSize: 13,
-    fontWeight: '500',
-    color: C.text.secondary,
+    fontSize: 11.5,
+    fontFamily: Typography.fontFamily.semiBold,
+    color: C.text.tertiary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
     marginBottom: 10,
   },
   colorPaletteRow: {
     flexDirection: 'row',
-    gap: 10,
-    flexWrap: 'wrap',
+    gap: 6,
     alignItems: 'center',
   },
   colorSwatch: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
   },
   colorSwatchSelected: {
-    borderWidth: 2.5,
-    borderColor: C.background.primary,
-    ...Shadows.medium,
+    borderWidth: 2,
+    borderColor: C.background.card,
+    ...Shadows.small,
   },
   colorSwatchReset: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: C.border.light,
+    backgroundColor: C.background.secondary,
+    borderWidth: 0.5,
+    borderColor: C.border.light,
   },
 });
 
@@ -568,41 +599,10 @@ const GroupsScreen = ({ navigation, focusGroupId = null, onRefreshReady }) => {
 
   const loadAllGroups = async () => {
     if (allGroupsLoaded || allGroupsLoading) return;
-    setAllGroupsLoading(true);
-    try {
-      const response = await WebClientApiService.getGroups(token, true);
-      if (response?.data?.items) {
-        const normalized = response.data.items
-          .map(g => ({
-            id: g.id,
-            name: g.name || '',
-            color: (g.color || '007AFF').startsWith('#') ? g.color : `#${g.color || '007AFF'}`,
-            is_personal: g.is_personal || false,
-            is_removed: g.is_removed || false,
-            logo: g.logo || null,
-            is_admin: g.is_admin || false,
-            total_users: g.total_users || 0,
-            created_at: g.created_at || null,
-            has_workingtime: g.has_workingtime || false,
-            has_amount: g.has_amount || false,
-            unread_notices: g.unread_notices || 0,
-            institution: g.institution ? { id: g.institution.id, name: g.institution.name || '' } : null,
-            manager: g.manager || null,
-            assists: Array.isArray(g.assists) ? g.assists : [],
-            analysts: Array.isArray(g.analysts) ? g.analysts : [],
-            observers: Array.isArray(g.observers) ? g.observers : [],
-          }))
-          .filter(g => !g.is_removed);
-        setAllGroups(normalized);
-        Logger.info(`🏢 Todos os grupos carregados: ${normalized.length}`);
-      }
-      setAllGroupsLoaded(true);
-    } catch (err) {
-      Logger.error('Erro ao carregar todos os grupos:', err);
-      Alert.alert('Erro', 'Não foi possível carregar todos os grupos');
-    } finally {
-      setAllGroupsLoading(false);
-    }
+    // Sem webClient: "Todos" reflete os grupos já conhecidos no contexto
+    // (mesma fonte de "Meus"), sem descobrir grupos via PlantãoAPI.
+    setAllGroups((rawGroups || []).filter(g => !g.is_removed));
+    setAllGroupsLoaded(true);
   };
 
   const handleTabChange = (tab) => {
@@ -648,36 +648,32 @@ const GroupsScreen = ({ navigation, focusGroupId = null, onRefreshReady }) => {
   }, []);
 
   const renderTabs = () => (
-    <View style={s.tabContainer}>
-      <TouchableOpacity
+    <View style={s.tabsBar}>
+      <Pressable
         style={[s.tab, activeTab === 'meus' && s.tabActive]}
         onPress={() => handleTabChange('meus')}
       >
         <Text style={[s.tabText, activeTab === 'meus' && s.tabTextActive]}>
-          Meus Grupos
+          Meus grupos
         </Text>
-        <View style={[s.tabBadge, activeTab === 'meus' && s.tabBadgeActive]}>
-          <Text style={[s.tabBadgeText, activeTab === 'meus' && s.tabBadgeTextActive]}>
-            {meusGrupos.length}
-          </Text>
-        </View>
-      </TouchableOpacity>
+        <Text style={[s.tabCount, activeTab === 'meus' && s.tabCountActive]}>
+          {meusGrupos.length}
+        </Text>
+      </Pressable>
 
-      <TouchableOpacity
+      <Pressable
         style={[s.tab, activeTab === 'todos' && s.tabActive]}
         onPress={() => handleTabChange('todos')}
       >
         <Text style={[s.tabText, activeTab === 'todos' && s.tabTextActive]}>
-          Todos os Grupos
+          Todos os grupos
         </Text>
         {allGroupsLoaded && (
-          <View style={[s.tabBadge, activeTab === 'todos' && s.tabBadgeActive]}>
-            <Text style={[s.tabBadgeText, activeTab === 'todos' && s.tabBadgeTextActive]}>
-              {allGroups.length}
-            </Text>
-          </View>
+          <Text style={[s.tabCount, activeTab === 'todos' && s.tabCountActive]}>
+            {allGroups.length}
+          </Text>
         )}
-      </TouchableOpacity>
+      </Pressable>
     </View>
   );
 
@@ -777,7 +773,6 @@ const GroupsScreen = ({ navigation, focusGroupId = null, onRefreshReady }) => {
           </View>
         )}
 
-        <View style={s.bottomSpacing} />
       </ScrollView>
     );
   };
@@ -807,9 +802,10 @@ const makeStyles = (C) => ({
     paddingVertical: 60,
   },
   loadingText: {
-    fontSize: 16,
+    fontSize: 14,
+    fontFamily: Typography.fontFamily.regular,
     color: C.text.secondary,
-    marginTop: 16,
+    marginTop: Spacing.md,
   },
   errorContainer: {
     flex: 1,
@@ -819,86 +815,59 @@ const makeStyles = (C) => ({
     paddingVertical: 60,
   },
   errorTitle: {
-    fontSize: 18,
-    fontWeight: '600',
+    fontSize: 17,
+    fontFamily: Typography.fontFamily.bold,
     color: C.text.primary,
-    marginTop: 16,
+    marginTop: Spacing.md,
     textAlign: 'center',
   },
   errorMessage: {
-    fontSize: 14,
+    fontSize: 13,
+    fontFamily: Typography.fontFamily.regular,
     color: C.text.secondary,
     textAlign: 'center',
-    marginTop: 8,
-    lineHeight: 20,
+    marginTop: Spacing.sm,
+    lineHeight: 19,
   },
   retryButton: {
     backgroundColor: C.primary,
-    paddingHorizontal: 24,
+    paddingHorizontal: 22,
     paddingVertical: 12,
-    borderRadius: BorderRadius.md,
-    marginTop: 24,
+    borderRadius: 999,
+    marginTop: Spacing.lg,
   },
   retryButtonText: {
-    color: C.background.primary,
+    color: '#fff',
     fontSize: 14,
-    fontWeight: '600',
+    fontFamily: Typography.fontFamily.semiBold,
   },
-  bottomSpacing: {
-    height: 40,
-  },
-  tabContainer: {
+  // Padrão segmented pill — mesmo de TrocasAbertasScreen.
+  tabsBar: {
     flexDirection: 'row',
-    marginHorizontal: 20,
-    marginTop: 16,
-    marginBottom: 8,
-    backgroundColor: C.background.primary,
-    borderRadius: BorderRadius.md,
+    marginHorizontal: Spacing.screen,
+    marginTop: Spacing.md,
+    marginBottom: Spacing.sm,
     padding: 4,
-    ...Shadows.small,
+    borderRadius: 999,
+    backgroundColor: C.background.elevated,
+    borderWidth: 0.5,
+    borderColor: C.border.light,
+    gap: 4,
   },
   tab: {
     flex: 1,
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: 8,
-    borderRadius: BorderRadius.sm,
+    alignItems: 'center',
     gap: 6,
+    paddingVertical: 9,
+    borderRadius: 999,
   },
-  tabActive: {
-    backgroundColor: C.primary,
-  },
-  tabText: {
-    fontSize: 13,
-    fontWeight: '500',
-    color: C.text.secondary,
-  },
-  tabTextActive: {
-    color: C.background.primary,
-    fontWeight: '600',
-  },
-  tabBadge: {
-    backgroundColor: C.border.light,
-    borderRadius: 10,
-    minWidth: 20,
-    height: 20,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 5,
-  },
-  tabBadgeActive: {
-    backgroundColor: 'rgba(255, 255, 255, 0.3)',
-  },
-  tabBadgeText: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: C.text.secondary,
-  },
-  tabBadgeTextActive: {
-    color: C.background.primary,
-  },
+  tabActive: { backgroundColor: C.background.card, ...Shadows.small },
+  tabText: { fontSize: 14, fontFamily: Typography.fontFamily.semiBold, color: C.text.tertiary },
+  tabTextActive: { color: C.text.primary },
+  tabCount: { fontSize: 11, fontWeight: '700', color: C.text.quaternary },
+  tabCountActive: { color: C.primary },
   emptyTabContainer: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -912,17 +881,18 @@ const makeStyles = (C) => ({
     marginTop: 12,
   },
   searchContainer: {
-    paddingHorizontal: 20,
-    marginBottom: 12,
+    paddingHorizontal: Spacing.screen,
+    marginBottom: Spacing.md,
   },
   searchInputWrapper: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: C.background.primary,
-    borderRadius: BorderRadius.md,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    ...Shadows.small,
+    backgroundColor: C.background.elevated,
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderWidth: 0.5,
+    borderColor: C.border.light,
   },
   searchIcon: {
     marginRight: 8,
@@ -930,8 +900,9 @@ const makeStyles = (C) => ({
   searchInput: {
     flex: 1,
     fontSize: 14,
+    fontFamily: Typography.fontFamily.regular,
     color: C.text.primary,
-    paddingVertical: 4,
+    paddingVertical: 2,
   },
   clearSearchButton: {
     padding: 4,

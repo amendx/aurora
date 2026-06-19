@@ -1,5 +1,11 @@
 import Logger from '../utils/Logger';
 
+const _fetch = (url, opts) => {
+  const path = typeof url === 'string' ? url.replace(/^https?:\/\/[^/]+/, '') : 'fetch';
+  Logger.api(opts?.method || 'GET', path);
+  return fetch(url, opts);
+};
+
 const API_BASE_URL  = process.env.EXPO_PUBLIC_API_URL;
 const API_ORIGIN    = process.env.EXPO_PUBLIC_API_ORIGIN ?? '';
 const API_REFERER   = process.env.EXPO_PUBLIC_API_REFERER ?? '';
@@ -14,7 +20,7 @@ export class WebClientApiService {
 
     try {
       
-      const response = await fetch(loginUrl, {
+      const response = await _fetch(loginUrl, {
         method: 'POST',
         headers: {
           'Accept': 'application/json',
@@ -78,7 +84,7 @@ export class WebClientApiService {
     try {
       Logger.info(`🌐 Fazendo requisição de logout para: ${logoutUrl}`);
       
-      const response = await fetch(logoutUrl, {
+      const response = await _fetch(logoutUrl, {
         method: 'POST',
         headers: {
           'Accept': 'application/json',
@@ -121,7 +127,7 @@ export class WebClientApiService {
     
     
     try {
-      const response = await fetch(calendarUrl, {
+      const response = await _fetch(calendarUrl, {
         method: 'GET',
         headers: {
           'Accept': 'application/json',
@@ -185,7 +191,7 @@ export class WebClientApiService {
     
     
     try {
-      const response = await fetch(calendarUrl, {
+      const response = await _fetch(calendarUrl, {
         method: 'GET',
         headers: {
           'Accept': 'application/json',
@@ -320,7 +326,7 @@ export class WebClientApiService {
     
     
     try {
-      const response = await fetch(dailyUrl, {
+      const response = await _fetch(dailyUrl, {
         method: 'GET',
         headers: {
           'Accept': 'application/json',
@@ -377,7 +383,7 @@ export class WebClientApiService {
 
     try {
       
-      const response = await fetch(groupsUrl, {
+      const response = await _fetch(groupsUrl, {
         method: 'GET',
         headers: {
           'Accept': 'application/json',
@@ -418,7 +424,7 @@ export class WebClientApiService {
     const url = `${API_BASE_URL}/groups/${groupId}`;
 
     try {
-      const response = await fetch(url, {
+      const response = await _fetch(url, {
         method: 'GET',
         headers: {
           'Accept': 'application/json',
@@ -459,7 +465,7 @@ export class WebClientApiService {
       while (hasMore) {
         const url = `${API_BASE_URL}/groups/${groupId}/members?page=${page}&limit=${limit}`;
 
-        const response = await fetch(url, {
+        const response = await _fetch(url, {
           method: 'GET',
           headers: {
             'Accept': 'application/json',
@@ -524,7 +530,7 @@ export class WebClientApiService {
   static async getGroupDailyCalendar(token, groupId, dateStr) {
     try {
       const url = `${API_BASE_URL}/groups/${groupId}/calendar/daily/${dateStr}`;
-      const response = await fetch(url, {
+      const response = await _fetch(url, {
         method: 'GET',
         headers: {
           'Accept': 'application/json',
@@ -554,7 +560,7 @@ export class WebClientApiService {
     try {
       const params = groupIds.map(id => `groups[]=${encodeURIComponent(id)}`).join('&');
       const url = `${API_BASE_URL}/transactions?${params}&date=${dateStr}`;
-      const response = await fetch(url, {
+      const response = await _fetch(url, {
         method: 'GET',
         headers: {
           'Accept': 'application/json',
@@ -576,7 +582,7 @@ export class WebClientApiService {
   static async getInstitution(token, id) {
     try {
       const url = `${API_BASE_URL}/institutions/${id}`;
-      const response = await fetch(url, {
+      const response = await _fetch(url, {
         method: 'GET',
         headers: {
           'Accept': 'application/json',
@@ -601,10 +607,57 @@ export class WebClientApiService {
    * GET /groups/{groupId}/shifts/{shiftId}
    * Useful: data.coworkers[], data.label, data.start_date, data.group.institution
    */
+  static async getPendingShifts(token, page = 1, limit = 20) {
+    try {
+      const url = `${API_BASE_URL}/groups/shifts/pendents?page=${page}&limit=${limit}`;
+      const response = await _fetch(url, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+          'Accept-Version': '2.0',
+          'Authorization': `Bearer ${token}`,
+          'Origin': API_ORIGIN,
+        },
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const json = await response.json();
+      const arr = Array.isArray(json) ? json
+                : Array.isArray(json.data) ? json.data
+                : Array.isArray(json.data?.items) ? json.data.items
+                : [];
+      Logger.info(`[API] getPendingShifts p${page}: keys=${Object.keys(json).join(',')} arrLen=${arr.length}`);
+      return { success: true, data: arr };
+    } catch (err) {
+      Logger.warn(`[API] getPendingShifts: ${err.message}`);
+      return { success: false, data: [] };
+    }
+  }
+
+  static async getNotifications(token) {
+    try {
+      const url = `${API_BASE_URL}/notifications`;
+      const response = await _fetch(url, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+          'Accept-Version': '2.0',
+          'Authorization': `Bearer ${token}`,
+          'Origin': API_ORIGIN,
+        },
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const json = await response.json();
+      return { success: true, data: json.data?.items || [] };
+    } catch (err) {
+      Logger.warn(`[API] getNotifications: ${err.message}`);
+      return { success: false, data: [] };
+    }
+  }
+
   static async getShiftDetail(token, groupId, shiftId) {
     try {
       const url = `${API_BASE_URL}/groups/${groupId}/shifts/${shiftId}`;
-      const response = await fetch(url, {
+      const response = await _fetch(url, {
         method: 'GET',
         headers: {
           'Accept': 'application/json',

@@ -16,6 +16,8 @@ import {
   Animated,
   Dimensions,
   useColorScheme,
+  Keyboard,
+  TouchableWithoutFeedback,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -25,6 +27,7 @@ import * as WebBrowser from 'expo-web-browser';
 import * as Google from 'expo-auth-session/providers/google';
 import * as ImagePicker from 'expo-image-picker';
 import { AuthContext } from '../context/AuthContext';
+import SoffiaLogo from '../components/SoffiaLogo';
 import { useColors, useTheme, Typography, Spacing } from '../constants/DesignSystem';
 // import { GOOGLE_WEB_CLIENT_ID, GOOGLE_IOS_CLIENT_ID } from '../services/firebase/GoogleSignInService'; // re-enable with androidClientId
 import Logger from '../utils/Logger';
@@ -55,7 +58,7 @@ const CRM_STATES = [
 const HEADINGS = [
   'Que bom ter você de volta',
   'Já estava ficando com saudade',
-  'Quanto tempo!',
+  'Quanto tempo, hein!',
   'Oi sumido(a) 👀',
   'Olha quem apareceu!',
   'Finalmente! A gente tava preocupado',
@@ -63,7 +66,7 @@ const HEADINGS = [
   'Vai um plantãozinho aí?',
   'Descansou? Tá na hora de trabalhar 😅',
   'Mais um plantão? Você é forte demais',
-  'Bem-vindo(a) de volta, herói(ína)',
+  'Bem-vindo(a) de volta, guerreiro(a)',
 ];
 
 function Orb({ x, y, size, color, delay }) {
@@ -120,7 +123,7 @@ function UField({ label, value, onChangeText, placeholder, keyboardType, autoCap
 }
 
 export default function AuthScreen() {
-  const { login, loginWithGoogle, signup } = useContext(AuthContext);
+  const { login, loginWebClient, loginWithGoogle, signup } = useContext(AuthContext);
   const C = useColors();
   const { isDark, preference } = useTheme();
   const systemScheme = useColorScheme();
@@ -144,6 +147,7 @@ export default function AuthScreen() {
   const [isPasswordVisible, setPasswordVisible] = useState(false);
   const [isLoading, setIsLoading]               = useState(false);
   const [isGoogleLoading, setGoogleLoading]     = useState(false);
+  const [isSoffiaLoading, setSoffiaLoading]     = useState(false);
 
   // ── Signup state ──────────────────────────────────────────────────────────
   const [suName, setSuName]                       = useState('');
@@ -234,6 +238,14 @@ export default function AuthScreen() {
     Alert.alert('Indisponível', 'Login com Google temporariamente desabilitado.');
   };
 
+  const handleSoffiaLogin = async () => {
+    if (!email || !password) { Alert.alert('Erro', 'Por favor, preencha todos os campos'); return; }
+    setSoffiaLoading(true);
+    const result = await loginWebClient(email, password);
+    setSoffiaLoading(false);
+    if (!result.success) Alert.alert('Erro no Login', result.error || 'Falha na autenticação');
+  };
+
   const pickPhoto = async () => {
     setPickingPhoto(true);
     try {
@@ -274,14 +286,27 @@ export default function AuthScreen() {
 
       {/* Animated card */}
       <Animated.View style={[s.cardContainer, { top: cardTopAnim }]}>
-        <Svg viewBox="0 0 390 60" preserveAspectRatio="none" width={W} height={50}>
+        <Svg viewBox="0 0 390 60" preserveAspectRatio="none" width={W} height={50} style={{ marginBottom: -2 }}>
           <Path d="M0 30 Q97 0 195 30 T390 30 V60 H0 Z" fill={C.background.card} />
         </Svg>
 
         <KeyboardAvoidingView
           style={s.cardBody}
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          keyboardVerticalOffset={0}
         >
+          <ScrollView
+            // paddingBottom generoso (≈ altura do teclado iOS/Android) garante
+            // que SEMPRE há espaço pra rolar e revelar o botão, em qualquer
+            // tamanho de fonte (Dynamic Type / Android font scale).
+            contentContainerStyle={{ flexGrow: 1, paddingBottom: 280 }}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+            showsVerticalScrollIndicator={false}
+            bounces={true}
+            alwaysBounceVertical={true}
+            automaticallyAdjustKeyboardInsets={false}
+          >
           <Animated.View style={[s.cardContent, { opacity: contentOpacity }]}>
             {mode === 'login' ? (
               <LoginContent
@@ -292,6 +317,7 @@ export default function AuthScreen() {
                 isLoading={isLoading} isGoogleLoading={isGoogleLoading}
                 isEmailValid={isEmailValid} canSubmit={canSubmit}
                 handleLogin={handleLogin} handleGooglePress={handleGooglePress}
+                handleSoffiaLogin={handleSoffiaLogin} isSoffiaLoading={isSoffiaLoading}
                 onShowSignup={() => switchMode('signup')}
                 C={C} s={s}
               />
@@ -321,6 +347,7 @@ export default function AuthScreen() {
               />
             )}
           </Animated.View>
+          </ScrollView>
         </KeyboardAvoidingView>
       </Animated.View>
 
@@ -347,7 +374,8 @@ export default function AuthScreen() {
   );
 }
 
-function LoginContent({ heading, email, setEmail, password, setPassword, isPasswordVisible, setPasswordVisible, isLoading, isGoogleLoading, isEmailValid, canSubmit, handleLogin, handleGooglePress, onShowSignup, C, s }) {
+function LoginContent({ heading, email, setEmail, password, setPassword, isPasswordVisible, setPasswordVisible, isLoading, isGoogleLoading, isEmailValid, canSubmit, handleLogin, handleGooglePress, handleSoffiaLogin, isSoffiaLoading, onShowSignup, C, s }) {
+  const passwordRef = useRef(null);
   return (
     <View style={s.cardScroll}>
       <Text style={s.heading}>{heading}</Text>
@@ -366,6 +394,9 @@ function LoginContent({ heading, email, setEmail, password, setPassword, isPassw
             autoCapitalize="none"
             autoCorrect={false}
             autoComplete="email"
+            returnKeyType="next"
+            onSubmitEditing={() => passwordRef.current?.focus()}
+            blurOnSubmit={false}
           />
           {isEmailValid && <Ionicons name="checkmark-circle" size={18} color={C.primary} />}
         </View>
@@ -380,6 +411,7 @@ function LoginContent({ heading, email, setEmail, password, setPassword, isPassw
         </View>
         <View style={[s.fieldRow, password.length > 0 && s.fieldRowActive]}>
           <TextInput
+            ref={passwordRef}
             style={s.fieldInput}
             value={password}
             onChangeText={setPassword}
@@ -389,6 +421,8 @@ function LoginContent({ heading, email, setEmail, password, setPassword, isPassw
             autoCapitalize="none"
             autoCorrect={false}
             autoComplete="password"
+            returnKeyType="go"
+            onSubmitEditing={() => { if (canSubmit) handleLogin(); else Keyboard.dismiss(); }}
           />
           <Pressable onPress={() => setPasswordVisible(!isPasswordVisible)} hitSlop={8}>
             <Ionicons name={isPasswordVisible ? 'eye-outline' : 'eye-off-outline'} size={18} color={C.text.tertiary} />
@@ -413,9 +447,25 @@ function LoginContent({ heading, email, setEmail, password, setPassword, isPassw
         <View style={s.dividerLine} />
       </View>
 
-      <Pressable style={({ pressed }) => [s.socialBtn, s.socialBtnSubtle, pressed && { opacity: 0.8 }]}>
-        <Ionicons name="business-outline" size={16} color={C.text.tertiary} />
-        <Text style={[s.socialBtnText, { color: C.text.tertiary }]}>Entrar com conta PlantãoAPI</Text>
+      <Pressable
+        onPress={handleSoffiaLogin}
+        disabled={!canSubmit || isSoffiaLoading}
+        style={({ pressed }) => [
+          s.socialBtn,
+          (!canSubmit || isSoffiaLoading)
+            ? { backgroundColor: C.border.light, borderColor: C.border.light }
+            : { backgroundColor: '#256FFF', borderColor: '#256FFF' },
+          pressed && { opacity: 0.8 },
+        ]}
+      >
+        {isSoffiaLoading ? (
+          <ActivityIndicator size="small" color="#fff" />
+        ) : (
+          <>
+            <SoffiaLogo size={18} color={(!canSubmit) ? C.text.tertiary : '#fff'} />
+            <Text style={[s.socialBtnText, { color: (!canSubmit) ? C.text.tertiary : '#fff' }]}>Entrar com Soffia</Text>
+          </>
+        )}
       </Pressable>
 
       <View style={s.signupRow}>
@@ -604,16 +654,19 @@ const makeStyles = (C) => StyleSheet.create({
   cardContainer: {
     position: 'absolute',
     left: 0, right: 0, bottom: 0,
-  },
-  cardBody: {
-    flex: 1,
-    backgroundColor: C.background.card,
     ...Platform.select({
       ios:     { shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.08, shadowRadius: 16 },
       android: { elevation: 8 },
     }),
   },
-  cardContent: { flex: 1 },
+  cardBody: {
+    flex: 1,
+    backgroundColor: C.background.card,
+  },
+  // Sem flex:1 — deixa o conteúdo ter altura natural pra que o ScrollView
+  // consiga rolar quando o teclado encolhe o viewport (independente do tamanho
+  // de fonte do sistema, iOS/Android Dynamic Type).
+  cardContent: {},
   cardScroll: { paddingHorizontal: 24, paddingTop: 8, paddingBottom: 16 },
 
   backRow: {

@@ -20,6 +20,12 @@ import { formatMoney, formatMoneyCompact } from '../utils/MoneyFormatter';
 import TimeUtils from '../utils/TimeUtils';
 import { AuthContext } from '../context/AuthContext';
 import LocalCache from '../services/LocalCache';
+import { getMonthTotalValue, getMonthTotalHours } from '../utils/MonthSummaryComputer';
+import { buildHybridConfig, isPastMonthKey } from '../utils/HospitalConfigResolver';
+import { applyPublishedHospitalConfigs, collectInstIds } from '../utils/PublishedHospitalConfig';
+import { applyLuisFrancaPreset } from '../utils/LuisFrancaPreset';
+import { isViewOnly } from '../utils/userSource';
+import { ChartsView } from './ChartsScreen';
 
 // ── Skeleton ──────────────────────────────────────────────────────────────────
 const SkeletonBox = ({ width = '100%', height = 20, style }) => {
@@ -73,8 +79,11 @@ const formatHoursWithExtras = (plannedMinutes, extraMinutes) => {
 
 const SCREEN_W = Dimensions.get('window').width;
 
-export default function ReportsScreen({ onExportReady } = {}) {
-  const { daysWithShifts, loading, loadMonthlyShifts } = useShifts();
+export default function ReportsScreen({ onExportReady, initialTab = 'resumo' } = {}) {
+  const [tab, setTab] = useState(initialTab); // 'resumo' | 'graficos'
+  const { loading, prefetchMonth, getMonthCache } = useShifts();
+  const [reportsDaysWithShifts, setReportsDaysWithShifts] = useState([]);
+  const daysWithShifts = reportsDaysWithShifts;
   const C = useColors();
   const insets = useSafeAreaInsets();
   const s = makeStyles(C);
@@ -85,6 +94,9 @@ export default function ReportsScreen({ onExportReady } = {}) {
   const [computing, setComputing] = useState(false);
   const [chartData, setChartData] = useState([]);
   const [chartLoading, setChartLoading] = useState(true);
+  // Header reads from the canonical month summary (same source as Home hero,
+  // Calendar hero, Charts bars) — never recompute totals in this screen.
+  const [viewMonthSummary, setViewMonthSummary] = useState(null);
 
   // Refs for debouncing month navigation
   const navigationTimeoutRef = useRef(null);
@@ -109,22 +121,26 @@ export default function ReportsScreen({ onExportReady } = {}) {
     isNavigatingRef.current = true;
 
     // Wait 500ms after the last click before loading data
-    navigationTimeoutRef.current = setTimeout(() => {
-      const month = pendingDateRef.current.getMonth() + 1;
-      const year = pendingDateRef.current.getFullYear();
+    navigationTimeoutRef.current = setTimeout(async () => {
+      const m = pendingDateRef.current.getMonth() + 1;
+      const y = pendingDateRef.current.getFullYear();
 
-      loadMonthlyShifts(month, year);
+      await prefetchMonth(m, y);
+      setReportsDaysWithShifts(getMonthCache(m, y)?.daysWithShifts || []);
 
       isNavigatingRef.current = false;
       pendingDateRef.current = null;
     }, 500);
-  }, [loadMonthlyShifts]);
+  }, [prefetchMonth, getMonthCache]);
 
   // Load data immediately on mount, then rely on navigateToMonth for subsequent changes
   useEffect(() => {
     // Only load on initial mount
     if (!isNavigatingRef.current) {
-      loadMonthlyShifts(month, year);
+      (async () => {
+        await prefetchMonth(month, year);
+        setReportsDaysWithShifts(getMonthCache(month, year)?.daysWithShifts || []);
+      })();
     }
 
     // Cleanup function to clear timeout on unmount
@@ -148,8 +164,46 @@ export default function ReportsScreen({ onExportReady } = {}) {
   const buildRows = async () => {
     setComputing(true);
     try {
-      const config = await getFullShiftConfig();
-      const fracExtra = config.fractionalExtraHours ?? true;
+      const liveConfig = await getFullShiftConfig();
+      const fracExtra = liveConfig.fractionalExtraHours ?? true;
+
+      // Past-month freeze: bonus + loyalty come from the prior saved summary's
+      // snapshot; hour values + friday-night rule come from the live config.
+      // Current/future months use the live config wholesale.
+      const viewMonthKey = `${viewDate.getFullYear()}-${String(viewDate.getMonth() + 1).padStart(2, '0')}`;
+      let breakdownConfig = liveConfig;
+      if (user?.id && isPastMonthKey(viewMonthKey)) {
+        try {
+          const prior = await LocalCache.getSummary(user.id, viewMonthKey);
+          const snap = prior?.financialConfigSnapshot;
+          if (snap) breakdownConfig = buildHybridConfig(liveConfig, snap);
+        } catch (_) {}
+      }
+      // Overlay manager-published hospital configs (source of truth) for this
+      // month's hospitals — mirrors the MonthSummary path in ShiftsContext.
+      breakdownConfig = await applyPublishedHospitalConfigs(
+        breakdownConfig,
+        collectInstIds(daysWithShifts),
+      );
+      const teForLoyalty = user?.id
+        ? ((await LocalCache.getTimeEntries(user.id, viewMonthKey).catch(() => ({}))) || {})
+        : {};
+      breakdownConfig = applyLuisFrancaPreset(breakdownConfig, daysWithShifts, isViewOnly(user), teForLoyalty);
+
+      // Pre-pass: total planned hours for the month — needed by the legacy
+      // global-loyalty tier filter inside calculateShiftValueWithBreakdown.
+      // Without this, totalMonthlyHours=0 skips every tier with minHours>0,
+      // making the header read R$ X (sem fidelização) while the bar chart
+      // (LocalCache.getSummary) correctly includes it.
+      let totalMonthlyHours = 0;
+      for (const dayData of daysWithShifts) {
+        for (const shift of (dayData.shifts || [])) {
+          const planned = shift.splitHours
+            ? TimeUtils.decimalHoursToMinutes(shift.splitHours.hoursThisMonth)
+            : TimeUtils.getShiftStandardMinutes(shift.label);
+          totalMonthlyHours += planned / 60;
+        }
+      }
 
       const built = [];
       let totalHours = 0;
@@ -159,10 +213,13 @@ export default function ReportsScreen({ onExportReady } = {}) {
         const dateStr = dayData.date; // YYYY-MM-DD
         const dateKey = dateStr;
 
-        // Load registered real hours for this day (extra hours)
+        // Load registered real hours for this day (extra hours).
+        // Chave escopada por uid (fallback à legada).
         let realHoursMap = {};
         try {
-          const saved = await SecureStore.getItemAsync(`real_hours_${dateKey}`);
+          const uid = String(user?.id || '');
+          const saved = (uid && await SecureStore.getItemAsync(`real_hours_${uid}_${dateKey}`))
+            || await SecureStore.getItemAsync(`real_hours_${dateKey}`);
           if (saved) realHoursMap = JSON.parse(saved);
         } catch (_) {}
 
@@ -222,7 +279,7 @@ export default function ReportsScreen({ onExportReady } = {}) {
           //   Total mês (M+N acima, fid 25%): R$851,50×1.25 + R$2081,25×1.25 = R$3.665,94
           let value = 0;
           try {
-            const bd = await calculateShiftValueWithBreakdown(shift, dateStr, 0);
+            const bd = await calculateShiftValueWithBreakdown(shift, dateStr, totalMonthlyHours, breakdownConfig);
             // totalMinutes = plannedMinutes + extraMinutes (fracExtra rule already applied)
             value = computeShiftValue(bd, totalMinutes);
           } catch (_) {}
@@ -301,19 +358,19 @@ export default function ReportsScreen({ onExportReady } = {}) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows.length]);
 
-  // Load last 3 months of summaries for bar chart
+  // Load last 3 months of summaries for bar chart + the viewed month for header
   useEffect(() => {
     if (!user?.id) return;
     setChartLoading(true);
     const load = async () => {
       const months = [];
+      let viewedSummary = null;
       for (let i = 2; i >= 0; i--) {
         const d = new Date(viewDate.getFullYear(), viewDate.getMonth() - i, 1);
         const mk = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
         const summary = await LocalCache.getSummary(user.id, mk);
-        const val = summary
-          ? (summary.totalGrossValue || 0) + (summary.totalLoyaltyValue || 0) + (summary.totalBonusValue || 0)
-          : 0;
+        if (i === 0) viewedSummary = summary;
+        const val = getMonthTotalValue(summary) ?? 0;
         months.push({
           month: d.toLocaleDateString('pt-BR', { month: 'short' }).replace('.', '').toUpperCase(),
           value: val,
@@ -321,11 +378,12 @@ export default function ReportsScreen({ onExportReady } = {}) {
         });
       }
       setChartData(months);
+      setViewMonthSummary(viewedSummary);
       setChartLoading(false);
     };
     load();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, viewDate.getMonth(), viewDate.getFullYear()]);
+  }, [user?.id, viewDate.getMonth(), viewDate.getFullYear(), daysWithShifts]);
 
   const extraMinutesTotal = rows.reduce((a, r) => a + (r.extraMinutes > 0 ? r.extraMinutes : 0), 0);
   const extraValue = rows.reduce((a, r) => {
@@ -347,8 +405,30 @@ export default function ReportsScreen({ onExportReady } = {}) {
     N: C.warning,
   };
 
+  const renderTabs = () => (
+    <View style={s.tabsBar}>
+      <Pressable style={[s.tab, tab === 'resumo' && s.tabActive]} onPress={() => setTab('resumo')}>
+        <Text style={[s.tabText, tab === 'resumo' && s.tabTextActive]}>Resumo</Text>
+      </Pressable>
+      <Pressable style={[s.tab, tab === 'graficos' && s.tabActive]} onPress={() => setTab('graficos')}>
+        <Text style={[s.tabText, tab === 'graficos' && s.tabTextActive]}>Gráficos</Text>
+      </Pressable>
+    </View>
+  );
+
+  if (tab === 'graficos') {
+    return (
+      <View style={{ flex: 1 }}>
+        {renderTabs()}
+        <ChartsView />
+      </View>
+    );
+  }
+
   return (
-    <ScrollView style={s.container} contentContainerStyle={{ paddingBottom: insets.bottom + 32 }} showsVerticalScrollIndicator={false}>
+    <View style={{ flex: 1 }}>
+      {renderTabs()}
+    <ScrollView style={s.container} contentContainerStyle={{ paddingBottom: Spacing.lg }} showsVerticalScrollIndicator={false}>
 
       {/* Hero */}
       <View style={s.heroSection}>
@@ -356,12 +436,21 @@ export default function ReportsScreen({ onExportReady } = {}) {
           <View>
             <Text style={s.heroYearLabel}>{MONTH_NAMES[viewDate.getMonth()].toUpperCase()} · {viewDate.getFullYear()}</Text>
             <View style={s.heroValueRow}>
-              <Text style={s.heroValue}>
-                {isLoading ? '—' : formatMoney(totals.value).split(',')[0]}
-              </Text>
-              {!isLoading && (
-                <Text style={s.heroValueCents}>,{formatMoney(totals.value).split(',')[1]}</Text>
-              )}
+              {(() => {
+                // Canonical source: same as bar chart, Home hero, Calendar hero.
+                const headerVal = getMonthTotalValue(viewMonthSummary);
+                const display = headerVal != null ? formatMoney(headerVal) : '—';
+                return (
+                  <>
+                    <Text style={s.heroValue}>
+                      {isLoading || headerVal == null ? '—' : display.split(',')[0]}
+                    </Text>
+                    {!isLoading && headerVal != null && (
+                      <Text style={s.heroValueCents}>,{display.split(',')[1]}</Text>
+                    )}
+                  </>
+                );
+              })()}
             </View>
           </View>
           <View style={s.heroNavBtns}>
@@ -510,6 +599,7 @@ export default function ReportsScreen({ onExportReady } = {}) {
 
       <View style={{ height: 20 }} />
     </ScrollView>
+    </View>
   );
 }
 
@@ -518,6 +608,31 @@ const makeStyles = (C) => StyleSheet.create({
     flex: 1,
     backgroundColor: C.background.secondary,
   },
+
+  // Segmented pill — padrão TrocasAbertasScreen / GroupsScreen
+  tabsBar: {
+    flexDirection: 'row',
+    marginHorizontal: Spacing.screen,
+    marginTop: Spacing.md,
+    marginBottom: Spacing.sm,
+    padding: 4,
+    borderRadius: 999,
+    backgroundColor: C.background.elevated,
+    borderWidth: 0.5,
+    borderColor: C.border.light,
+    gap: 4,
+  },
+  tab: {
+    flex: 1,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 9,
+    borderRadius: 999,
+  },
+  tabActive: { backgroundColor: C.background.card, ...Shadows.small },
+  tabText: { fontSize: 14, fontFamily: Typography.fontFamily.semiBold, color: C.text.tertiary },
+  tabTextActive: { color: C.text.primary },
 
   // Hero
   heroSection: {

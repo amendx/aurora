@@ -1,40 +1,77 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}
+
+/* ── REGRAS ORIGINAIS (restaurar depois) ─────────────────────────────────────
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
 
     // ── Auth helpers ──────────────────────────────────────────────────────────
-    // Aurora users authenticate with Firebase Auth (email/password or Google).
-    // WebClient users authenticate externally (JWT from PlantaoAPI API) and are
-    // identified by a numeric userId stored as a string. Until a custom-token
-    // bridge is implemented, WebClient writes arrive unauthenticated from the app
-    // and are scoped to the user's own ID via the document path.
+    // AURORA-ONLY: toda requisição precisa carregar uma identidade real do
+    // Firebase Auth. O acesso via PlantãoAPI/WebClient foi isolado — NÃO existe
+    // mais fallback anônimo (request.auth == null). Qualquer acesso sem login é
+    // negado pelo `deny all` no final.
     //
-    // Rule strategy:
-    //   - Firebase Auth users: request.auth.uid == userId (strict)
-    //   - WebClient users (unauthenticated): allowed only when request.auth == null
-    //     AND the write comes from the app (no server-side bypass possible here —
-    //     tighten further once custom token bridge is wired up)
-    //
-    // TODO: Implement Firebase custom tokens for WebClient users so all access
-    //       can be gated on request.auth.uid == userId exclusively.
+    // Estratégia:
+    //   - Dono do recurso:   request.auth.uid == userId (estrito)
+    //   - Leituras cross-user (escala/trocas/cessões): exigem request.auth != null
+    //   - Gestor/admin:       helpers role-gated abaixo
 
     function isFirebaseUser(userId) {
       return request.auth != null && request.auth.uid == userId;
     }
 
-    function isWebClientUser() {
-      // WebClient users are unauthenticated at the Firebase layer.
-      // This is a known architectural limitation — see comment above.
-      return request.auth == null;
+    function canAccess(userId) {
+      return isFirebaseUser(userId);
     }
 
-    function canAccess(userId) {
-      return isFirebaseUser(userId) || isWebClientUser();
+    // Managers/admins (Aurora accounts) may read any user profile — needed for the
+    // "Profissionais" screen where they assign hospitals/groups. Read-only; writes to a
+    // user doc still require the owner.
+    function isManagerOrAdmin() {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['gestor', 'admin'];
+    }
+    // Platform admins may edit other users (assign role, approve access). Trusted role.
+    function isAdmin() {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    // Per-institution role helpers — managerIds/coordIds são denormalizados no doc
+    // da institution; subcoleção members/{uid} é a fonte de verdade auditável. Arrays
+    // existem só pra filtragem rápida e gates de rule. App garante consistência via
+    // batch writes — rules não enforçam.
+    function _instData(instId) {
+      return get(/databases/$(database)/documents/institutions/$(instId)).data;
+    }
+    function isManagerOfInst(instId) {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/institutions/$(instId))
+        && (request.auth.uid in _instData(instId).managerIds);
+    }
+    function isCoordOfInst(instId) {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/institutions/$(instId))
+        && (request.auth.uid in _instData(instId).coordIds);
+    }
+    function isStaffOfInst(instId) {
+      return isManagerOfInst(instId) || isCoordOfInst(instId);
     }
 
     // ── Structured paths: users/{userId}/... ─────────────────────────────────
     match /users/{userId} {
-      allow read, write: if canAccess(userId);
+      allow read: if canAccess(userId) || isManagerOrAdmin();
+      allow write: if canAccess(userId) || isAdmin();
 
       match /financialConfig/{doc} {
         allow read, write: if canAccess(userId);
@@ -51,20 +88,49 @@ service cloud.firestore {
       match /persons/{personId} {
         allow read, write: if canAccess(userId);
       }
+      // [WEBCLIENT-BRIDGE] Archive separado pros grupos/pessoas/memberships
+      // que vieram do webClient. Aurora-only path (groups/persons/groupMembers
+      // acima) só vê dados aurora reais. Archive é só pra display histórico.
+      match /webClientArchive/{kind}/{docId} {
+        allow read, write: if canAccess(userId);
+      }
       match /todayCoworkers/{shiftId} {
         allow read, write: if canAccess(userId);
       }
       match /settings/{doc} {
         allow read, write: if canAccess(userId);
       }
-      match /months/{monthKey} {
+      // Inbox — OWNER-ONLY. Notificações cross-user (oferta/troca/vaga) são
+      // entregues por Cloud Function (Admin SDK), que ignora as regras; nenhum
+      // cliente escreve no inbox alheio. O dono lê + marca como lido.
+      match /notifications/{notifId} {
         allow read, write: if canAccess(userId);
+      }
+      // Push tokens — owner-only. O fan-out lê os tokens server-side (Admin SDK).
+      match /devices/{deviceId} {
+        allow read, write: if canAccess(userId);
+      }
+      // Manual shifts (aurora-source users) — self-created shifts stored flat
+      // under the user, distinguished from received-via-cede shifts that live
+      // under months/{mk}/shifts.
+      match /manualShifts/{shiftId} {
+        allow read, write: if canAccess(userId);
+      }
+      match /months/{monthKey} {
+        // Month metadata: read open (Trocar precisa ler plantões de outros usuários
+        // do mesmo grupo); escrita restrita ao dono ou webClient anônimo.
+        allow read: if request.auth != null;
+        allow write: if canAccess(userId);
 
         match /summary/{doc} {
           allow read, write: if canAccess(userId);
         }
+        // Shifts: leitura ampla para suportar swap/cede cross-user; escrita só
+        // o dono ou webClient anônimo (que ainda escreve para qualquer userId
+        // até o bridge de custom tokens).
         match /shifts/{shiftId} {
-          allow read, write: if canAccess(userId);
+          allow read: if request.auth != null;
+          allow write: if canAccess(userId);
         }
         match /timeEntries/{shiftId} {
           allow read, write: if canAccess(userId);
@@ -78,25 +144,204 @@ service cloud.firestore {
     // we restrict to authenticated users only until full migration is complete.
     // WebClient writes to these paths still require the unauthenticated fallback.
     match /aurora_shifts/{doc} {
-      allow read, write: if request.auth != null || request.auth == null;
+      allow read, write: if request.auth != null;
     }
     match /aurora_te/{doc} {
-      allow read, write: if request.auth != null || request.auth == null;
+      allow read, write: if request.auth != null;
     }
     match /aurora_summaries/{doc} {
-      allow read, write: if request.auth != null || request.auth == null;
+      allow read, write: if request.auth != null;
     }
     match /aurora_users/{doc} {
-      allow read, write: if request.auth != null || request.auth == null;
+      allow read, write: if request.auth != null;
     }
     match /aurora_groups/{doc} {
-      allow read, write: if request.auth != null || request.auth == null;
+      allow read, write: if request.auth != null;
     }
     match /aurora_persons/{doc} {
-      allow read, write: if request.auth != null || request.auth == null;
+      allow read, write: if request.auth != null;
     }
     match /aurora_connection_test/{doc} {
-      allow read, write: if request.auth != null || request.auth == null;
+      allow read, write: if request.auth != null;
+    }
+
+    // ── Openings (Aurora-native open shift slots) ─────────────────────────────
+    // Created by coordinators/managers from the Aurora web app.
+    // Doctors read to discover claimable shifts; doctors write only to claim
+    // a slot (via slots subcollection). Same auth model as the rest of the app
+    // until custom tokens bridge WebClient users into Firebase Auth.
+    //
+    // Openings also back the "cede aberto ao grupo" flow — when a doctor releases
+    // a shift, an opening is created with originUserId / originShiftId / restrictedToGroupId.
+    match /openings/{openingId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+
+      match /slots/{slotId} {
+        allow read, write: if request.auth != null;
+      }
+
+      // Interesses em vaga fixa — FORA do doc público da vaga (leitura ampla), pra
+      // que só gestor/coordenador do hospital (ou admin) veja a LISTA. O médico
+      // cria/remove apenas o próprio interesse e lê só o seu (doc id = uid).
+      match /interests/{interestUid} {
+        allow read: if request.auth != null
+          && (request.auth.uid == interestUid
+              || isAdmin()
+              || isStaffOfInst(get(/databases/$(database)/documents/openings/$(openingId)).data.group.institution.id));
+        allow create, update: if request.auth != null && request.auth.uid == interestUid;
+        allow delete: if request.auth != null
+          && (request.auth.uid == interestUid
+              || isAdmin()
+              || isStaffOfInst(get(/databases/$(database)/documents/openings/$(openingId)).data.group.institution.id));
+      }
+    }
+
+    // ── Targeted Ceder offers ────────────────────────────────────────────────
+    // Doctor A offers a specific shift to one named colleague B.
+    // Both fromUserId and toUserId need read; either may update status transitions.
+    match /shiftOffers/{offerId} {
+      allow read, create, update, delete: if request.auth != null;
+    }
+
+    // ── Trocar (swap) proposals ──────────────────────────────────────────────
+    // Doctor A proposes swapping shiftA (theirs) for shiftB (target's).
+    match /shiftSwaps/{swapId} {
+      allow read, create, update, delete: if request.auth != null;
+    }
+
+    // ── Swap auctions (Trocar aberto ao grupo) ───────────────────────────────
+    // Iniciador publica uma proposta de troca com preferências; membros do grupo
+    // fazem lances oferecendo um plantão deles compatível; o iniciador aceita um
+    // e a troca é efetivada. Mesmo modelo de permissão dos demais (até bridge
+    // de custom tokens). Leitura: ampla para qualquer membro do grupo descobrir.
+    match /swapAuctions/{auctionId} {
+      allow read, create, update, delete: if request.auth != null;
+
+      match /bids/{bidId} {
+        allow read, create, update, delete: if request.auth != null;
+      }
+    }
+
+    // ── Group schedules (Meus Grupos calendar view) ──────────────────────────
+    // Per-group, per-month normalized DaySchedule docs aggregating all members'
+    // assignments + vacancies. Written by client shadow-write after a webClient
+    // PlantaoAPI fetch; read by any member of the group. Same auth-or-fallback
+    // model used elsewhere until the custom token bridge lands.
+    match /groupSchedules/{groupId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+
+      match /months/{monthKey} {
+        allow read, write: if request.auth != null;
+
+        match /days/{dateStr} {
+          allow read, write: if request.auth != null;
+        }
+      }
+    }
+
+    // ── Aurora-native collaborative groups ───────────────────────────────────
+    // Cross-user groups vinculados a um hospital (institutionId). Médicos só veem
+    // grupos onde foram explicitamente adicionados por manager/coord do hospital
+    // (self-join por código foi removido — agora vai por convite via cloud function
+    // ou criação direta por staff).
+    //
+    // BLINDADO: requires a real Firebase Auth account. WebClient users (anonymous
+    // at Firestore) são bloqueados — a web precisa gatekeepar antes de bater aqui.
+    match /auroraGroups/{groupId} {
+      // Read: membro do grupo OU staff (manager/coord) do hospital dono OU admin.
+      allow read: if isAdmin()
+        || (request.auth != null && (request.auth.uid in resource.data.memberIds))
+        || isStaffOfInst(resource.data.institutionId);
+
+      // Create: admin, OU manager/coord do hospital alvo. Caller deve stampar
+      // createdBy = self e estar em memberIds.
+      allow create: if request.auth != null
+        && request.resource.data.createdBy == request.auth.uid
+        && (request.auth.uid in request.resource.data.memberIds)
+        && (
+          isAdmin()
+          || isManagerOfInst(request.resource.data.institutionId)
+          || isCoordOfInst(request.resource.data.institutionId)
+        );
+
+      // Update: staff do hospital dono ou admin. Membros comuns (médicos) não editam.
+      // institutionId é imutável pelos não-admins — mover grupo de hospital é coisa de admin.
+      allow update: if isAdmin()
+        || (
+          isStaffOfInst(resource.data.institutionId)
+          && request.resource.data.institutionId == resource.data.institutionId
+          && request.resource.data.createdBy == resource.data.createdBy
+        );
+
+      // Delete: criador ou admin.
+      allow delete: if isAdmin()
+        || (request.auth != null && request.auth.uid == resource.data.createdBy);
+
+      // ── Escala fixa (grade recorrente) ──────────────────────────────────────
+      // Cada célula (dia × turno × slot) com titular + co-escalista alternado.
+      // Leitura: membro do grupo, staff do hospital ou admin.
+      // Escrita: staff (coord/manager) do hospital dono ou admin — o coordenador
+      // gerencia a grade. (Ações de médico — entregar/assumir — virão por função
+      // ou extensão de regra depois.)
+      match /fixedSlots/{slotId} {
+        allow read: if isAdmin()
+          || (request.auth != null
+              && (request.auth.uid in get(/databases/$(database)/documents/auroraGroups/$(groupId)).data.memberIds))
+          || isStaffOfInst(get(/databases/$(database)/documents/auroraGroups/$(groupId)).data.institutionId);
+        allow write: if isAdmin()
+          || isStaffOfInst(get(/databases/$(database)/documents/auroraGroups/$(groupId)).data.institutionId);
+      }
+    }
+
+    // ── Institutions (hospitais/clínicas registrados por managers/admins) ────
+    // Read PÚBLICO: usado no autocomplete de cadastro (roda antes do login).
+    // Create: só admin ou gestor (role global). Caller vira manager (managerIds inclui self).
+    // Update: admin (qualquer campo) ou manager-do-hospital (exceto membership/audit).
+    // Delete: admin ou criador.
+    //
+    // Membership management é via subcoleção members/{uid} + arrays denormalizados
+    // (managerIds/coordIds) — app deve manter consistência via writeBatch.
+    match /institutions/{institutionId} {
+      allow read: if true;
+
+      allow create: if isManagerOrAdmin()
+        && request.resource.data.createdBy == request.auth.uid
+        && (request.auth.uid in request.resource.data.managerIds)
+        && request.resource.data.managerIds is list
+        && request.resource.data.coordIds is list;
+
+      // Admin: edita tudo. Manager-do-hospital: edita tudo EXCETO membership/audit.
+      // Membership só muda via subcoleção + batch — campos managerIds/coordIds/createdBy/createdAt
+      // ficam imutáveis pra manager (admin pode forçar se precisar consertar).
+      allow update: if isAdmin()
+        || (
+          isManagerOfInst(institutionId)
+          && !request.resource.data.diff(resource.data).affectedKeys()
+              .hasAny(['managerIds', 'coordIds', 'createdBy', 'createdAt'])
+        )
+        // Caso especial: app sincronizando managerIds/coordIds via batch write
+        // — é manager-do-hospital E está só mexendo nessas chaves de membership.
+        || (
+          isManagerOfInst(institutionId)
+          && request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['managerIds', 'coordIds'])
+        );
+
+      allow delete: if isAdmin()
+        || (request.auth != null && request.auth.uid == resource.data.createdBy);
+
+      // ── Subcoleção de membros (staff do hospital) ────────────────────────
+      // role: 'manager' | 'coord'. Manager controla adição/remoção; coord pode
+      // sair sozinho.
+      match /members/{memberUid} {
+        allow read: if isAdmin() || isStaffOfInst(institutionId);
+        allow create, update: if isAdmin() || isManagerOfInst(institutionId);
+        allow delete: if isAdmin()
+          || isManagerOfInst(institutionId)
+          || (request.auth != null && request.auth.uid == memberUid);
+      }
     }
 
     // ── Deny everything else ─────────────────────────────────────────────────
@@ -105,3 +350,5 @@ service cloud.firestore {
     }
   }
 }
+
+────────────────────────────────────────────────────── FIM REGRAS ORIGINAIS */

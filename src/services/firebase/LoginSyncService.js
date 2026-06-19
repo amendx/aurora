@@ -26,7 +26,7 @@
  *   receive new/changed shifts from PlantaoAPI between sessions.
  */
 
-import { doc, getDoc } from 'firebase/firestore';
+import { doc, getDoc } from './fdb';
 import { db } from './config';
 import LocalCache from '../LocalCache';
 import FirebaseAdapter from './FirebaseAdapter';
@@ -124,5 +124,88 @@ export const syncCurrentMonthToFirebase = async (userId) => {
   } catch (err) {
     // Never propagate — this is a best-effort background operation
     Logger.warn(`[LoginSync] syncCurrentMonthToFirebase error for ${userId}: ${err?.message}`);
+  }
+};
+
+/**
+ * Pull past months from Firestore into LocalCache so Charts/Reports don't
+ * re-fetch immutable history on a fresh device or after logout.
+ *
+ * Strategy:
+ *   - For each of the last N past month keys (current month excluded)
+ *   - WebClient users: write into the shifts bucket (matches API-shape cache)
+ *   - Aurora users: write into manualShifts + regularShifts buckets (matches
+ *     the aurora branch in ShiftsContext.loadMonthlyShifts)
+ *   - Always hydrate the month summary — Charts only checks the summary doc
+ *     to decide whether to skip prefetch.
+ *
+ * Fire-and-forget. Runs concurrently across months for speed.
+ *
+ * @param {number}  userId
+ * @param {string}  source  'aurora' | undefined (webClient)
+ * @param {number}  count   How many past months to hydrate (default 12)
+ */
+export const hydratePastMonthsFromFirebase = async (userId, source, count = 12) => {
+  if (!userId || !db) return;
+  const isAurora = source === 'aurora';
+  const now = new Date();
+  const pastKeys = [];
+  for (let i = 1; i <= count; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    pastKeys.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+  }
+
+  let hydrated = 0;
+  await Promise.all(pastKeys.map(async (mk) => {
+    try {
+      if (isAurora) {
+        // Aurora: check the buckets ShiftsContext aurora branch reads from.
+        const [manual, regular, summary] = await Promise.all([
+          LocalCache.getManualShifts(userId, mk),
+          LocalCache.getRegularShifts(userId, mk),
+          LocalCache.getSummary(userId, mk),
+        ]);
+        if ((manual?.length || regular?.length) && summary) return;
+
+        const remote = await FirebaseAdapter.fetchAuroraMonth(userId, mk);
+        const monthManual = (remote.manualShifts || []).filter(s => s?.monthKey === mk);
+        const monthRegular = remote.regularShifts || [];
+        if (monthManual.length === 0 && monthRegular.length === 0) return;
+
+        if (remote.manualAuthoritative)  await LocalCache.setManualShifts(userId, mk, monthManual);
+        if (remote.regularAuthoritative) await LocalCache.saveRegularShifts(userId, mk, monthRegular);
+
+        // Pull the cached summary doc if present — saves one recompute on Charts.
+        const { doc: _doc, getDoc } = await import('./fdb');
+        try {
+          const sumSnap = await getDoc(_doc(db, 'users', String(userId), 'months', mk, 'summary', 'current'));
+          if (sumSnap.exists()) await LocalCache.saveSummary(userId, mk, sumSnap.data());
+        } catch (_) {}
+
+        hydrated++;
+        return;
+      }
+
+      // WebClient: shifts bucket matches API cache shape.
+      const local = await LocalCache.getShifts(userId, mk);
+      if (local?.daysWithShifts?.length) return;
+
+      const remote = await FirebaseAdapter.fetchWebClientMonth(userId, mk);
+      if (!remote.hasData) return;
+
+      await LocalCache.saveShifts(
+        userId, mk, remote.daysWithShifts, remote.syncedAt || new Date().toISOString(), null
+      );
+      if (remote.summary) {
+        await LocalCache.saveSummary(userId, mk, remote.summary);
+      }
+      hydrated++;
+    } catch (err) {
+      Logger.warn(`[LoginSync] hydratePastMonths ${mk}: ${err?.message}`);
+    }
+  }));
+
+  if (hydrated > 0) {
+    Logger.info(`[LoginSync] Past-month hydration: ${hydrated}/${pastKeys.length} months pulled from Firestore (${isAurora ? 'aurora' : 'webClient'})`);
   }
 };

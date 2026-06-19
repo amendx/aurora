@@ -1,16 +1,26 @@
 import 'react-native-gesture-handler';
+import './src/utils/Logger'; // silences stray console.* — must load first
 import React, { useContext } from 'react';
-import { View } from 'react-native';
+import { View, AppState } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 // import * as Font from 'expo-font'; // uncomment when adding custom fonts
 import { AuthProvider } from './src/context/AuthContext';
 import { ShiftsProvider } from './src/contexts/ShiftsContext';
 import { GroupsProvider } from './src/contexts/GroupsContext';
+import { OpeningsProvider } from './src/contexts/OpeningsContext';
+import { OffersProvider } from './src/contexts/OffersContext';
+import { SwapAuctionsProvider } from './src/contexts/SwapAuctionsContext';
 import { ThemeProvider } from './src/contexts/ThemeContext';
+import { PrivacyProvider } from './src/contexts/PrivacyContext';
 import AuthScreen from './src/screens/AuthScreen';
 import MainScreen from './src/screens/MainScreen';
 import { AuthContext } from './src/context/AuthContext';
 import OnboardingScreen from './src/screens/OnboardingScreen';
+import AuthBootstrapScreen from './src/screens/AuthBootstrapScreen';
+import DebugApiCounter from './src/components/DebugApiCounter';
+import NotificationService from './src/services/NotificationService';
+import MovementExpiry from './src/services/MovementExpiry';
+import { useEffect } from 'react';
 
 // To enable Nexa fonts:
 // 1. Download Nexa-Regular.ttf, Nexa-Bold.ttf, Nexa-Heavy.ttf from Fontfabric
@@ -33,7 +43,29 @@ function useCachedFonts() {
 
 
 function RootNavigator() {
-  const { isAuthenticated, user, completeOnboarding } = useContext(AuthContext);
+  const { isAuthenticated, user, loading, completeOnboarding } = useContext(AuthContext);
+
+  // Register for push notifications once we have an authenticated user.
+  useEffect(() => {
+    if (isAuthenticated && user?.id) {
+      NotificationService.registerForPushAsync(user.id);
+    }
+  }, [isAuthenticated, user?.id]);
+
+  // Auto-expiry centralizado de movimentações:
+  //  - Roda 1× ao montar com user logado.
+  //  - Roda toda vez que o app volta do background (AppState 'active').
+  //  Substitui as 3 fontes dispersas que faziam lazy-expire.
+  useEffect(() => {
+    if (!isAuthenticated || !user?.id) return;
+    MovementExpiry.sweepExpired(user.id, { force: true });
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') MovementExpiry.sweepExpired(user.id);
+    });
+    return () => sub.remove();
+  }, [isAuthenticated, user?.id]);
+
+  if (loading) return <AuthBootstrapScreen />;
 
   if (isAuthenticated && user?.showOnboarding) {
     return <OnboardingScreen onDone={completeOnboarding} />;
@@ -50,13 +82,22 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <ThemeProvider>
+      <PrivacyProvider>
       <AuthProvider>
         <ShiftsProvider>
           <GroupsProvider>
-            <RootNavigator />
+            <OpeningsProvider>
+              <OffersProvider>
+                <SwapAuctionsProvider>
+                  <RootNavigator />
+                  <DebugApiCounter />
+                </SwapAuctionsProvider>
+              </OffersProvider>
+            </OpeningsProvider>
           </GroupsProvider>
         </ShiftsProvider>
       </AuthProvider>
+      </PrivacyProvider>
       </ThemeProvider>
     </SafeAreaProvider>
   );

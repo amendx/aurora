@@ -28,16 +28,22 @@ import { Ionicons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors, Typography, Spacing, Shadows, BorderRadius } from '../constants/DesignSystem';
+import { useOffers } from '../contexts/OffersContext';
+import { useOpenings } from '../contexts/OpeningsContext';
+import { useShifts } from '../contexts/ShiftsContext';
+import { usePrivacy } from '../contexts/PrivacyContext';
 import { calculateShiftValueWithBreakdown, calculateShiftValue, getFullShiftConfig, computeShiftValue } from '../utils/ShiftValueCalculator';
 import { formatMoney, formatMoneyCompact, formatHourlyRate } from '../utils/MoneyFormatter';
 import HoursEditModal from './HoursEditModal';
 import TimeUtils from '../utils/TimeUtils';
 import { useGroups } from '../contexts/GroupsContext';
 import { AuthContext } from '../context/AuthContext';
+import { isViewOnly } from '../utils/userSource';
+import { isWithinDevolutionWindow, devolutionMsLeft } from '../utils/shiftTransferLog';
 import { getGroupVisibility } from '../utils/GroupVisibilityConfig';
 import { getGroupColors } from '../utils/GroupColorConfig';
 import TodayCoworkersService from '../services/TodayCoworkersService';
-import { useShifts } from '../contexts/ShiftsContext';
+import LocalCache from '../services/LocalCache';
 
 // ── CoworkerAvatar ─────────────────────────────────────────────────────────────
 // Small circular avatar with photo or initials fallback.
@@ -128,19 +134,127 @@ const { height: SCREEN_HEIGHT, width: SCREEN_WIDTH } = Dimensions.get('window');
 const BOTTOM_SHEET_MAX_HEIGHT = SCREEN_HEIGHT * 0.82;
 const BOTTOM_SHEET_MIN_HEIGHT = 0;
 
+const _labelName = (l) => ({ M: 'Manhã', T: 'Tarde', N: 'Noite', D: 'Noite' }[l?.charAt?.(0)] || l || 'Plantão');
+const _fmtShift = (sh) => {
+  if (!sh) return '';
+  const iso = sh.startISO || sh.date;
+  const date = iso ? new Date(iso).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: 'short' }) : '';
+  return `${_labelName(sh.label)}${date ? ' · ' + date : ''}`;
+};
+
+// Procura o escalista original (primeiro 'create' do transferLog). Devolve
+// { id, name } ou null. Histórico completo é só pro aurora-web (coord/manager).
+const findOriginalEscalista = (log) => {
+  if (!Array.isArray(log)) return null;
+  const created = log.find(e => e?.type === 'create');
+  if (created?.toUserId) return { id: String(created.toUserId), name: created.toUserName || null };
+  return null;
+};
+
 const ShiftBottomSheet = ({
   isVisible,
   onClose,
-  shifts,
+  shifts: rawShifts,
   selectedDate,
   initialShiftIndex = 0,
   calculateShiftValue,
   onHoursChanged,
   onNavigateToGroup,
+  onCede,
+  onTrocar,
+  // Os 3 abaixo são opcionais — se não passados, o sheet usa fallback interno
+  // que pega de OffersContext/OpeningsContext direto (centraliza a lógica).
+  onCancelCede,
+  onCancelSwap,
+  onCancelOffer,
 }) => {
   const C = useColors();
   const s = makeStyles(C);
   const insets = useSafeAreaInsets();
+
+  // ── Centralização: o sheet conhece estado pendente + cancela direto ──
+  // Anota cada shift com _pendingSwap/_pendingOffer baseado em OffersContext,
+  // e provê fallback de cancelamento (com Alert.alert) caso o caller não
+  // passe os props onCancel*. Assim Home e DayView só passam shifts crus.
+  const { swapsSent, swapsReceived, offersSent, cancelSwap, cancelOffer, devolverShift } = useOffers();
+  const { cancelCedeOpening } = useOpenings();
+  const { restoreShiftLocally } = useShifts();
+
+  const shifts = React.useMemo(() => {
+    if (!Array.isArray(rawShifts)) return rawShifts;
+    return rawShifts.map(sh => {
+      if (!sh?.id) return sh;
+      const id = String(sh.id);
+      // já anotado externamente (ex.: DayView _pendingCede virtual shift)? mantém.
+      if (sh._pendingCede || sh._pendingSwap || sh._pendingOffer) return sh;
+      const sentSwap = (swapsSent || []).find(sw => sw?.status === 'pending' && String(sw.shiftA?.id) === id);
+      if (sentSwap) return { ...sh, _pendingSwap: sentSwap, _pendingSwapRole: 'initiator' };
+      const recvSwap = (swapsReceived || []).find(sw => sw?.status === 'pending' && String(sw.shiftB?.id) === id);
+      if (recvSwap) return { ...sh, _pendingSwap: recvSwap, _pendingSwapRole: 'target' };
+      const sentOffer = (offersSent || []).find(o => o?.status === 'pending' && String(o.shiftSnapshot?.id) === id);
+      if (sentOffer) return { ...sh, _pendingOffer: sentOffer };
+      return sh;
+    });
+  }, [rawShifts, swapsSent, swapsReceived, offersSent]);
+
+  // Fallback handlers internos — usados quando o caller não passa props.
+  const _handleCancelCedeInternal = (opening) => {
+    Alert.alert(
+      'Cancelar cessão ao grupo?',
+      `${_fmtShift(opening?.originShiftSnapshot || opening)}${opening.group?.name ? ' · ' + opening.group.name : ''}\n\nO plantão volta para você.`,
+      [
+        { text: 'Voltar', style: 'cancel' },
+        { text: 'Cancelar cessão', style: 'destructive', onPress: async () => {
+          const r = await cancelCedeOpening(opening.id);
+          if (r?.success && r.restoredShift) restoreShiftLocally?.(r.restoredShift);
+        } },
+      ],
+    );
+  };
+  const _handleCancelSwapInternal = (swap) => {
+    Alert.alert(
+      'Cancelar troca?',
+      `${_fmtShift(swap?.shiftA)}\n  ⇄\n${_fmtShift(swap?.shiftB)}\n\n${swap?.targetUserName || 'O colega'} não poderá mais aceitar.`,
+      [
+        { text: 'Voltar', style: 'cancel' },
+        { text: 'Cancelar troca', style: 'destructive', onPress: () => cancelSwap(swap) },
+      ],
+    );
+  };
+  const _handleCancelOfferInternal = (offer) => {
+    Alert.alert(
+      'Cancelar cessão?',
+      `${_fmtShift(offer?.shiftSnapshot)}${offer?.shiftSnapshot?.group?.name ? ' · ' + offer.shiftSnapshot.group.name : ''}\n\nO plantão volta para você.`,
+      [
+        { text: 'Voltar', style: 'cancel' },
+        { text: 'Cancelar cessão', style: 'destructive', onPress: () => cancelOffer(offer) },
+      ],
+    );
+  };
+  const _handleDevolverInternal = (sh) => {
+    const originName = sh?.originUserName || 'o escalista';
+    Alert.alert(
+      'Devolver plantão?',
+      `${_fmtShift(sh)}\n\nO plantão volta para ${originName}. Essa ação não pode ser desfeita e só está disponível por 2h após o recebimento.`,
+      [
+        { text: 'Voltar', style: 'cancel' },
+        { text: 'Devolver', style: 'destructive', onPress: async () => {
+          const r = await devolverShift?.(sh);
+          if (r?.success) { onClose?.(); }
+          else if (r?.reason === 'window_expired') {
+            Alert.alert('Janela expirada', 'O prazo de 2h para devolução já passou.');
+          } else {
+            Alert.alert('Não foi possível devolver', 'Tente novamente em instantes.');
+          }
+        } },
+      ],
+    );
+  };
+
+  // Resolve qual handler usar — prop externo (override) ou interno.
+  const handleCancelCede  = onCancelCede  || _handleCancelCedeInternal;
+  const handleCancelSwap  = onCancelSwap  || _handleCancelSwapInternal;
+  const handleCancelOffer = onCancelOffer || _handleCancelOfferInternal;
 
   const translateY = useRef(new Animated.Value(BOTTOM_SHEET_MAX_HEIGHT)).current;
   const backdropOpacity = useRef(new Animated.Value(0)).current;
@@ -151,6 +265,7 @@ const ShiftBottomSheet = ({
 
   // ── "Quem está também" state ────────────────────────────────────────────────
   const { user } = useContext(AuthContext);
+  const { valuesHidden } = usePrivacy();
   const { deleteManualShift, hoursReport } = useShifts();
   const { coworkersById, groupsById } = useGroups();
   const [deleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
@@ -183,13 +298,26 @@ const ShiftBottomSheet = ({
         }
 
         const dateKey = date.toISOString().split('T')[0];
-        const savedHours = await SecureStore.getItemAsync(`real_hours_${dateKey}`);
+        const uid = String(user?.id || '');
+        // Chave escopada por uid. Sem isso, horas reais vazavam entre sessões
+        // (ex.: caco salvava, raquel logava → migration herdava caco como dela).
+        // Fallback à chave legada (sem uid) só pra entradas anteriores ao fix.
+        const savedHours = (uid && await SecureStore.getItemAsync(`real_hours_${uid}_${dateKey}`))
+          || await SecureStore.getItemAsync(`real_hours_${dateKey}`);
 
-        if (savedHours) {
-          setRealHours(JSON.parse(savedHours));
-        } else {
-          setRealHours({});
+        const merged = savedHours ? JSON.parse(savedHours) : {};
+        // LocalCache time entries são a fonte sincronizada (Firebase); SecureStore
+        // é device-local. Sem isto, horas registradas em outro aparelho não aparecem.
+        if (uid) {
+          const entries = (await LocalCache.getTimeEntries(uid, dateKey.slice(0, 7)).catch(() => ({}))) || {};
+          shifts.forEach((sh, idx) => {
+            const e = entries[sh.id];
+            if (e?.actualStart && e?.actualEnd) {
+              merged[idx] = { ...(merged[idx] || {}), startTime: e.actualStart, endTime: e.actualEnd };
+            }
+          });
         }
+        setRealHours(merged);
       } catch (error) {
         console.warn('Erro ao carregar horas reais:', error);
       }
@@ -220,7 +348,12 @@ const ShiftBottomSheet = ({
       }
 
       const dateKey = date.toISOString().split('T')[0];
-      await SecureStore.setItemAsync(`real_hours_${dateKey}`, JSON.stringify(newRealHours));
+      const uid = String(user?.id || '');
+      // Escopo por uid evita o vazamento cross-session. persistTimeEntries no
+      // ShiftsContext (via onHoursChanged) grava em LocalCache também escopado.
+      if (uid) {
+        await SecureStore.setItemAsync(`real_hours_${uid}_${dateKey}`, JSON.stringify(newRealHours));
+      }
       setRealHours(newRealHours);
 
       if (onHoursChanged) {
@@ -826,7 +959,7 @@ const ShiftBottomSheet = ({
           </View>
           <View style={s.cardHeaderRight}>
             <Text style={s.valorLabel}>{hasRegisteredHours ? 'Valor efetivo' : 'Valor previsto'}</Text>
-            <Text style={[s.valorAmount, hasRegisteredHours && { fontSize: 24 }]}>R$ {getDisplayValue()}</Text>
+            <Text style={[s.valorAmount, hasRegisteredHours && { fontSize: 24 }]}>R$ {valuesHidden ? '••••' : getDisplayValue()}</Text>
           
           </View>
         </View>
@@ -844,6 +977,173 @@ const ShiftBottomSheet = ({
             ) : null}
           </View>
         </View>
+
+        {/* Status pendente — quando há cessão/troca/oferta pendente, mostra
+            em destaque amarelo aqui no detalhe, espelhando o card colorido. */}
+        {(() => {
+          if (shift?._pendingCede) {
+            return (
+              <>
+                <View style={s.hairlineRow} />
+                <View style={[s.infoRow, { backgroundColor: C.warning + '14' }]}>
+                  <Ionicons name="hourglass-outline" size={15} color={C.warning} />
+                  <Text style={[s.infoRowLabel, { color: C.warning }]}>Status</Text>
+                  <Text style={[s.infoRowValue, { color: C.warning, fontFamily: Typography.fontFamily.bold }]} numberOfLines={2}>
+                    Cedido ao grupo · aguardando colega assumir
+                  </Text>
+                </View>
+              </>
+            );
+          }
+          if (shift?._pendingSwap) {
+            const isInit = shift._pendingSwapRole === 'initiator';
+            const A = shift._pendingSwap.shiftA || {};
+            const B = shift._pendingSwap.shiftB || {};
+            const myShift = isInit ? A : B;
+            const theirShift = isInit ? B : A;
+            const counterpartyName = isInit
+              ? (shift._pendingSwap.targetUserName || 'colega')
+              : (shift._pendingSwap.initiatorUserName || 'colega');
+            const lbl = (sh) => {
+              const labelChar = sh?.label?.charAt(0) || 'M';
+              const labelName = ({ M: 'Manhã', T: 'Tarde', N: 'Noite', D: 'Noite' }[labelChar] || labelChar);
+              const iso = sh?.startISO || sh?.date;
+              const date = iso ? new Date(iso).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: 'short' }) : '';
+              return `${labelName}${date ? ' · ' + date : ''}`;
+            };
+            return (
+              <>
+                <View style={s.hairlineRow} />
+                <View style={[s.infoRow, { backgroundColor: C.warning + '14', alignItems: 'flex-start' }]}>
+                  <Ionicons name="swap-horizontal" size={15} color={C.warning} style={{ marginTop: 2 }} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={[s.infoRowLabel, { color: C.warning }]}>
+                      {isInit ? 'Troca pendente com' : 'Pediram troca'}
+                    </Text>
+                    <Text style={[s.infoRowValue, { color: C.warning, fontFamily: Typography.fontFamily.bold, textAlign: 'left' }]} numberOfLines={2}>
+                      {counterpartyName}
+                    </Text>
+                    <Text style={{ fontSize: 11.5, color: C.text.secondary, marginTop: 4 }} numberOfLines={1}>
+                      Você dá: {lbl(myShift)}
+                    </Text>
+                    <Text style={{ fontSize: 11.5, color: C.text.secondary }} numberOfLines={1}>
+                      Recebe: {lbl(theirShift)}
+                    </Text>
+                  </View>
+                </View>
+              </>
+            );
+          }
+          if (shift?._pendingOffer) {
+            return (
+              <>
+                <View style={s.hairlineRow} />
+                <View style={[s.infoRow, { backgroundColor: C.warning + '14' }]}>
+                  <Ionicons name="paper-plane-outline" size={15} color={C.warning} />
+                  <Text style={[s.infoRowLabel, { color: C.warning }]}>Status</Text>
+                  <Text style={[s.infoRowValue, { color: C.warning, fontFamily: Typography.fontFamily.bold }]} numberOfLines={2}>
+                    Oferecido a {shift._pendingOffer.toUserName || 'colega'} · aguardando resposta
+                  </Text>
+                </View>
+              </>
+            );
+          }
+          return null;
+        })()}
+
+        {/* Origem do plantão — mostra info contextual só quando o plantão NÃO é
+            uma escala fixa. Mapeamento:
+              - source 'received'        → Recebido de <Nome>
+              - source 'aurora_opening'  → Origem: Vaga aberta (capturada)
+              - isManual === true        → Origem: Plantão manual
+              - source 'aurora' default  → (nada — é escala fixa)
+              - source 'webClient'/default→ (nada — vem do plantaoapi normalmente) */}
+        {(() => {
+          if (shift?.source === 'received' && (shift?.originUserName || shift?.originUserId)) {
+            return (
+              <>
+                <View style={s.hairlineRow} />
+                <View style={s.infoRow}>
+                  <Ionicons name="enter-outline" size={15} color={C.text.secondary} />
+                  <Text style={s.infoRowLabel}>Recebido de</Text>
+                  <Text style={s.infoRowValue} numberOfLines={1}>
+                    {shift.originUserName
+                      || coworkersById?.[shift.originUserId]?.name
+                      || `Doutor#${String(shift.originUserId).slice(0, 6)}`}
+                  </Text>
+                </View>
+                {shift?.isFixedSchedule_origin && (
+                  <View style={s.infoRow}>
+                    <Ionicons name="repeat-outline" size={15} color={C.text.secondary} />
+                    <Text style={s.infoRowLabel}>Origem</Text>
+                    <Text style={s.infoRowValue} numberOfLines={1}>Escala fixa</Text>
+                  </View>
+                )}
+              </>
+            );
+          }
+          if (shift?.isFixedSchedule) {
+            return (
+              <>
+                <View style={s.hairlineRow} />
+                <View style={s.infoRow}>
+                  <Ionicons name="repeat-outline" size={15} color={C.text.secondary} />
+                  <Text style={s.infoRowLabel}>Tipo</Text>
+                  <Text style={s.infoRowValue} numberOfLines={1}>Escala fixa</Text>
+                </View>
+              </>
+            );
+          }
+          if (shift?.source === 'aurora_opening') {
+            return (
+              <>
+                <View style={s.hairlineRow} />
+                <View style={s.infoRow}>
+                  <Ionicons name="megaphone-outline" size={15} color={C.text.secondary} />
+                  <Text style={s.infoRowLabel}>Origem</Text>
+                  <Text style={s.infoRowValue} numberOfLines={1}>Vaga aberta</Text>
+                </View>
+              </>
+            );
+          }
+          if (shift?.isManual) {
+            return (
+              <>
+                <View style={s.hairlineRow} />
+                <View style={s.infoRow}>
+                  <Ionicons name="create-outline" size={15} color={C.text.secondary} />
+                  <Text style={s.infoRowLabel}>Origem</Text>
+                  <Text style={s.infoRowValue} numberOfLines={1}>Plantão manual</Text>
+                </View>
+              </>
+            );
+          }
+          return null;
+        })()}
+
+        {/* Escalista original — só pra aurora-shifts onde o viewer NÃO é o criador
+            original. Histórico completo (timeline de cedes/devoluções) é só pro
+            aurora-web (coord/manager). Mobile mostra só o ponto fixo. */}
+        {(() => {
+          if (!shift?.group?.isAuroraGroup) return null;
+          const orig = findOriginalEscalista(shift?.transferLog);
+          if (!orig) return null;
+          if (String(orig.id) === String(user?.id)) return null;
+          const name = orig.name
+            || coworkersById?.[orig.id]?.name
+            || `Doutor#${orig.id.slice(0, 6)}`;
+          return (
+            <>
+              <View style={s.hairlineRow} />
+              <View style={s.infoRow}>
+                <Ionicons name="ribbon-outline" size={15} color={C.text.secondary} />
+                <Text style={s.infoRowLabel}>Escalista original</Text>
+                <Text style={s.infoRowValue} numberOfLines={1}>{name}</Text>
+              </View>
+            </>
+          );
+        })()}
+
          {/* Horas registradas — A2 design */}
         {hasRegisteredHours ? (
           <>
@@ -954,18 +1254,18 @@ const ShiftBottomSheet = ({
                   <Text style={s.breakdownLabel}>
                     {formatHourlyRate(breakdown.hourlyValue)} × {shift.splitHours.hoursThisMonth}h{breakdown.weekend && breakdown.isNaturalWeekend ? ' (FDS)' : ''}{breakdown.isFridayNight ? ' (Sexta N)' : ''}
                   </Text>
-                  <Text style={s.breakdownValue}>+ R$ {formatMoneyCompact((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth)}</Text>
+                  <Text style={s.breakdownValue}>+ R$ {valuesHidden ? '••••' : formatMoneyCompact((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth)}</Text>
                 </View>
                 {breakdown.loyaltyPercentage > 0 ? (
                   <View style={s.breakdownRow}>
                     <Text style={[s.breakdownLabel, { color: C.text.tertiary }]}>Fidelização +{breakdown.loyaltyPercentage}%</Text>
-                    <Text style={s.breakdownValue}>+ R$ {formatMoneyCompact(((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth * breakdown.loyaltyPercentage) / 100)}</Text>
+                    <Text style={s.breakdownValue}>+ R$ {valuesHidden ? '••••' : formatMoneyCompact(((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth * breakdown.loyaltyPercentage) / 100)}</Text>
                   </View>
                 ) : null}
                 {breakdown.generalBonusPercentage > 0 ? (
                   <View style={s.breakdownRow}>
                     <Text style={[s.breakdownLabel, { color: C.primary }]}>Bônus +{breakdown.generalBonusPercentage}%</Text>
-                    <Text style={[s.breakdownValue, { color: C.primary }]}>+ R$ {formatMoneyCompact(((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth * breakdown.generalBonusPercentage) / 100)}</Text>
+                    <Text style={[s.breakdownValue, { color: C.primary }]}>+ R$ {valuesHidden ? '••••' : formatMoneyCompact(((breakdown.hourlyValue || 0) * shift.splitHours.hoursThisMonth * breakdown.generalBonusPercentage) / 100)}</Text>
                   </View>
                 ) : null}
               </>
@@ -975,18 +1275,18 @@ const ShiftBottomSheet = ({
                   <Text style={s.breakdownLabel}>
                     {formatHourlyRate(breakdown.hourlyValue)} × {breakdown.hours || 0}h{breakdown.weekend && breakdown.isNaturalWeekend ? ' (FDS)' : ''}{breakdown.isFridayNight ? ' (Sexta N)' : ''}
                   </Text>
-                  <Text style={s.breakdownValue}>+ R$ {formatMoneyCompact(breakdown.baseValue) || '0,00'}</Text>
+                  <Text style={s.breakdownValue}>+ R$ {valuesHidden ? '••••' : (formatMoneyCompact(breakdown.baseValue) || '0,00')}</Text>
                 </View>
                 {breakdown.loyaltyBonus > 0 ? (
                   <View style={s.breakdownRow}>
                     <Text style={[s.breakdownLabel, { color: C.text.tertiary }]}>Fidelização +{breakdown.loyaltyPercentage}%</Text>
-                    <Text style={s.breakdownValue}>+ R$ {formatMoneyCompact(breakdown.loyaltyBonus)}</Text>
+                    <Text style={s.breakdownValue}>+ R$ {valuesHidden ? '••••' : formatMoneyCompact(breakdown.loyaltyBonus)}</Text>
                   </View>
                 ) : null}
                 {breakdown.generalBonus > 0 ? (
                   <View style={s.breakdownRow}>
                     <Text style={[s.breakdownLabel, { color: C.primary }]}>Bônus +{breakdown.generalBonusPercentage}%</Text>
-                    <Text style={[s.breakdownValue, { color: C.primary }]}>+ R$ {formatMoneyCompact(breakdown.generalBonus)}</Text>
+                    <Text style={[s.breakdownValue, { color: C.primary }]}>+ R$ {valuesHidden ? '••••' : formatMoneyCompact(breakdown.generalBonus)}</Text>
                   </View>
                 ) : null}
               </>
@@ -997,14 +1297,14 @@ const ShiftBottomSheet = ({
                   Horas extras · {TimeUtils.minutesToDisplay(Math.abs(hoursSummary.differenceMinutes))}
                 </Text>
                 <Text style={[s.breakdownValue, { color: hoursSummary.differenceMinutes > 0 ? C.money : C.error }]}>
-                  {hoursSummary.differenceMinutes > 0 ? '+ ' : '- '}R$ {formatMoneyCompact(Math.abs((hoursSummary.differenceMinutes / 60) * (breakdown.hourlyValue || 0) * (1 + (breakdown.loyaltyPercentage || 0) / 100 + (breakdown.generalBonusPercentage || 0) / 100)))}
+                  {hoursSummary.differenceMinutes > 0 ? '+ ' : '- '}R$ {valuesHidden ? '••••' : formatMoneyCompact(Math.abs((hoursSummary.differenceMinutes / 60) * (breakdown.hourlyValue || 0) * (1 + (breakdown.loyaltyPercentage || 0) / 100 + (breakdown.generalBonusPercentage || 0) / 100)))}
                 </Text>
               </View>
             ) : null}
             <View style={s.hairlineRow} />
             <View style={s.breakdownRow}>
               <Text style={s.breakdownTotalLabel}>{hasRegisteredHours ? 'Recebido' : 'Total'}</Text>
-              <Text style={s.breakdownTotalValue}>R$ {getDisplayValue()}</Text>
+              <Text style={s.breakdownTotalValue}>R$ {valuesHidden ? '••••' : getDisplayValue()}</Text>
             </View>
           </View>
         ) : null}
@@ -1119,25 +1419,118 @@ const ShiftBottomSheet = ({
         {/* CTA — fixed at bottom, always visible */}
         {shifts && shifts.length > 0 ? (
           <View style={{ marginBottom: 14 + insets.bottom }}>
-            <View style={s.ctaRow}>
-              {getHoursSummary(shifts[currentShiftIdx], currentShiftIdx) === null ? (
-                <TouchableOpacity style={[s.ctaButton, { flex: 1 }]} onPress={() => openHoursEditor(currentShiftIdx)}>
-                  <Ionicons name="add" size={18} color="#fff" />
-                  <Text style={s.ctaText}>Registrar horas</Text>
-                </TouchableOpacity>
-              ) : (
-                <>
-                  <TouchableOpacity style={[s.ctaButtonSecondary, { flex: 1 }]} onPress={() => confirmClearHours(currentShiftIdx)}>
-                    <Ionicons name="trash-outline" size={16} color={C.error} />
-                    <Text style={[s.ctaText, { color: C.error }]}>Apagar</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={[s.ctaButton, { flex: 2 }]} onPress={() => openHoursEditor(currentShiftIdx)}>
-                    <Ionicons name="create-outline" size={18} color="#fff" />
-                    <Text style={s.ctaText}>Editar horas</Text>
-                  </TouchableOpacity>
-                </>
-              )}
-            </View>
+            {(() => {
+              const sh = shifts[currentShiftIdx];
+              // Estados pendentes substituem o par Ceder/Trocar por um único
+              // botão de Cancelar (amarelo/destrutivo). Cobre: cessão ao grupo,
+              // troca pendente que eu iniciei, e cessão direcionada que eu enviei.
+              if (sh?._pendingCede) {
+                return (
+                  <View style={s.transferActionsRow}>
+                    <TouchableOpacity
+                      style={[s.transferActionBtn, { borderColor: C.warning + '55', backgroundColor: C.warning + '14', flex: 1 }]}
+                      onPress={() => { onClose?.(); handleCancelCede(sh._pendingCede); }}
+                    >
+                      <Ionicons name="close-circle-outline" size={15} color={C.warning} />
+                      <Text style={[s.transferActionText, { color: C.warning }]}>Cancelar cessão</Text>
+                    </TouchableOpacity>
+                  </View>
+                );
+              }
+              if (sh?._pendingSwap && sh?._pendingSwapRole === 'initiator') {
+                return (
+                  <View style={s.transferActionsRow}>
+                    <TouchableOpacity
+                      style={[s.transferActionBtn, { borderColor: C.warning + '55', backgroundColor: C.warning + '14', flex: 1 }]}
+                      onPress={() => { onClose?.(); handleCancelSwap(sh._pendingSwap); }}
+                    >
+                      <Ionicons name="close-circle-outline" size={15} color={C.warning} />
+                      <Text style={[s.transferActionText, { color: C.warning }]}>Cancelar troca</Text>
+                    </TouchableOpacity>
+                  </View>
+                );
+              }
+              if (sh?._pendingOffer) {
+                return (
+                  <View style={s.transferActionsRow}>
+                    <TouchableOpacity
+                      style={[s.transferActionBtn, { borderColor: C.warning + '55', backgroundColor: C.warning + '14', flex: 1 }]}
+                      onPress={() => { onClose?.(); handleCancelOffer(sh._pendingOffer); }}
+                    >
+                      <Ionicons name="close-circle-outline" size={15} color={C.warning} />
+                      <Text style={[s.transferActionText, { color: C.warning }]}>Cancelar cessão</Text>
+                    </TouchableOpacity>
+                  </View>
+                );
+              }
+              const startTs = sh?.startISO ? new Date(sh.startISO).getTime() : 0;
+              // Plantões manuais (criados pelo próprio médico em AddManualShiftModal)
+              // são tracking pessoal — não pertencem a uma escala/grupo formal,
+              // então não podem ser cedidos/trocados. Ver Glossário em models/index.js.
+              const isMovable = !sh?.isManual
+                && ['aurora', 'aurora_opening', 'received'].includes(sh?.source);
+              // Conta só-visualização (PlantãoAPI) não pode ceder/trocar.
+              const canCedeOrSwap = !isViewOnly(user) && !!onCede && !!onTrocar && isMovable && startTs > Date.now();
+              // Devolver: shift recebido de aurora-group dentro da janela 2h.
+              // Ver src/utils/shiftTransferLog.js + memory project-shift-transferlog.
+              const canDevolve = sh?.source === 'received'
+                && sh?.group?.isAuroraGroup === true
+                && !!sh?.originUserId
+                && isWithinDevolutionWindow(sh?.cededAt);
+              if (!canCedeOrSwap && !canDevolve) return null;
+              const msLeft = canDevolve ? devolutionMsLeft(sh?.cededAt) : 0;
+              const minsLeft = Math.ceil(msLeft / 60000);
+              return (
+                <View style={s.transferActionsRow}>
+                  {canCedeOrSwap && (
+                    <>
+                      <TouchableOpacity style={s.transferActionBtn} onPress={() => onCede(sh)}>
+                        <Ionicons name="exit-outline" size={15} color={C.primary} />
+                        <Text style={[s.transferActionText, { color: C.primary }]}>Ceder</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={s.transferActionBtn} onPress={() => onTrocar(sh)}>
+                        <Ionicons name="swap-horizontal" size={15} color={C.primary} />
+                        <Text style={[s.transferActionText, { color: C.primary }]}>Trocar</Text>
+                      </TouchableOpacity>
+                    </>
+                  )}
+                  {canDevolve && (
+                    <TouchableOpacity style={s.transferActionBtn} onPress={() => _handleDevolverInternal(sh)}>
+                      <Ionicons name="arrow-undo-outline" size={15} color={C.warning} />
+                      <Text style={[s.transferActionText, { color: C.warning }]}>
+                        Devolver{minsLeft > 0 ? ` · ${minsLeft}min` : ''}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              );
+            })()}
+            {(() => {
+              const sh = shifts[currentShiftIdx];
+              const isPending = !!(sh?._pendingCede || sh?._pendingSwap || sh?._pendingOffer);
+              if (isPending) return null;
+              return (
+                <View style={s.ctaRow}>
+                  {getHoursSummary(sh, currentShiftIdx) === null ? (
+                    <TouchableOpacity style={[s.ctaButton, { flex: 1 }]} onPress={() => openHoursEditor(currentShiftIdx)}>
+                      <Ionicons name="add" size={18} color="#fff" />
+                      <Text style={s.ctaText}>Registrar horas</Text>
+                    </TouchableOpacity>
+                  ) : (
+                    <>
+                      <TouchableOpacity style={[s.ctaButtonSecondary, { flex: 1 }]} onPress={() => confirmClearHours(currentShiftIdx)}>
+                        <Ionicons name="trash-outline" size={16} color={C.error} />
+                        <Text style={[s.ctaText, { color: C.error }]}>Apagar</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={[s.ctaButton, { flex: 2 }]} onPress={() => openHoursEditor(currentShiftIdx)}>
+                        <Ionicons name="create-outline" size={18} color="#fff" />
+                        <Text style={s.ctaText}>Editar horas</Text>
+                      </TouchableOpacity>
+                    </>
+                  )}
+                </View>
+              );
+            })()}
             {shifts[currentShiftIdx]?.isManual ? (
               <TouchableOpacity style={s.deleteShiftBtn} onPress={() => setDeleteConfirmVisible(true)}>
                 <Ionicons name="trash-outline" size={14} color={C.error} />
@@ -1192,12 +1585,14 @@ const ShiftBottomSheet = ({
                 const groupVacancies = vacanciesByGroup.filter(
                   v => !group.groupId || String(v.groupId) === String(group.groupId)
                 );
+                const memberCount = group.coworkers.length;
+                const vacancyCount = groupVacancies.reduce((acc, v) => acc + (v.available || 0), 0);
                 return (
-                  <View key={group.groupId || gi}>
+                  <View key={group.groupId || gi} style={s.teamGroupBlock}>
                     {showGroupHeaders ? (
                       <TouchableOpacity
-                        style={s.modalGroupHeader}
-                        activeOpacity={onNavigateToGroup && group.groupId ? 0.6 : 1}
+                        style={s.teamGroupHeader}
+                        activeOpacity={onNavigateToGroup && group.groupId ? 0.7 : 1}
                         onPress={() => {
                           if (onNavigateToGroup && group.groupId) {
                             setCoworkersModal(null);
@@ -1205,63 +1600,47 @@ const ShiftBottomSheet = ({
                           }
                         }}
                       >
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                          {group.groupColor ? (
-                            <View style={[s.groupColorDot, { backgroundColor: group.groupColor }]} />
-                          ) : null}
-                          <Text style={s.modalGroupName} numberOfLines={1}>
-                            {group.groupName || 'Grupo'}
-                          </Text>
-                          {onNavigateToGroup && group.groupId ? (
-                            <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
-                          ) : null}
+                        <Text style={s.teamGroupName} numberOfLines={1}>
+                          {group.groupName || 'Grupo'}
+                        </Text>
+                        <View style={s.teamGroupCount}>
+                          <Text style={s.teamGroupCountText}>{memberCount}</Text>
                         </View>
-                        {group.institutionName ? (
-                          <Text style={s.modalGroupInstitution} numberOfLines={1}>
-                            {group.institutionName}
-                          </Text>
-                        ) : null}
                       </TouchableOpacity>
                     ) : null}
-                    {group.coworkers.map(person => (
-                      <View key={person.id} style={s.modalPersonRow}>
-                        <CoworkerAvatar person={person} />
-                        <View style={s.modalPersonInfo}>
-                          <Text style={s.modalPersonName} numberOfLines={1}>
-                            {person.full_name || person.name}
-                          </Text>
-                          {person.description ? (
-                            <Text style={s.modalPersonDesc} numberOfLines={1}>
-                              {person.description}
-                            </Text>
-                          ) : null}
-                          {person.council ? (
-                            <Text style={s.modalPersonCouncil} numberOfLines={1}>
-                              {person.council}
-                            </Text>
-                          ) : null}
-                        </View>
-                      </View>
-                    ))}
-                    {groupVacancies.flatMap((v, vi) =>
-                      Array.from({ length: v.available ?? 0 }).map((_, si) => {
-                        const av = makeAvatarStyles(C);
-                        return (
-                          <View key={`vacancy-${v.groupId || vi}-${si}`} style={s.modalPersonRow}>
-                            <View style={av.item}>
-                              <View style={[av.fallback, { backgroundColor: C.warning + '18', borderWidth: 1.5, borderColor: C.warning + '60', borderStyle: 'dashed' }]}>
-                                <Ionicons name="star-outline" size={16} color={C.warning} />
-                              </View>
-                              <Text style={[av.name, { color: C.warning }]} numberOfLines={1}>Vago</Text>
+                    {group.coworkers.map((person, pi) => {
+                      const fullName = person.full_name || person.name || '';
+                      const initials = _initials(person.name);
+                      const meta = [person.description, person.council].filter(Boolean).join(' · ');
+                      return (
+                        <View key={person.id || pi} style={s.teamRow}>
+                          {person.photo ? (
+                            <Image source={{ uri: person.photo }} style={s.teamAvatar} />
+                          ) : (
+                            <View style={[s.teamAvatar, s.teamAvatarFallback]}>
+                              <Text style={s.teamAvatarInitials}>{initials}</Text>
                             </View>
-                            <View style={s.modalPersonInfo}>
-                              <Text style={[s.modalPersonName, { color: C.warning }]} numberOfLines={1}>
-                                Vaga Aberta
-                              </Text>
-                            </View>
+                          )}
+                          <View style={s.teamRowInfo}>
+                            <Text style={s.teamRowName} numberOfLines={1}>{fullName}</Text>
+                            {meta ? (
+                              <Text style={s.teamRowMeta} numberOfLines={1}>{meta}</Text>
+                            ) : null}
                           </View>
-                        );
-                      })
+                        </View>
+                      );
+                    })}
+                    {groupVacancies.flatMap((v, vi) =>
+                      Array.from({ length: v.available ?? 0 }).map((_, si) => (
+                        <View key={`vacancy-${v.groupId || vi}-${si}`} style={s.teamRow}>
+                          <View style={[s.teamAvatar, s.teamAvatarVacancy]}>
+                            <Ionicons name="star-outline" size={16} color={C.warning} />
+                          </View>
+                          <View style={s.teamRowInfo}>
+                            <Text style={[s.teamRowName, { color: C.warning }]} numberOfLines={1}>Vaga aberta</Text>
+                          </View>
+                        </View>
+                      ))
                     )}
                   </View>
                 );
@@ -1608,8 +1987,7 @@ const makeStyles = (C) => ({
     width: 28,
     height: 28,
     borderRadius: 14,
-    borderWidth: 1.5,
-    borderColor: C.background.primary,
+    overflow: 'hidden',
   },
   miniAvatarImg: {
     width: 28,
@@ -1687,6 +2065,29 @@ const makeStyles = (C) => ({
     gap: 10,
     marginHorizontal: 18,
     marginTop: 4,
+  },
+
+  transferActionsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginHorizontal: 18,
+    marginBottom: 10,
+  },
+  transferActionBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: C.accentSoft,
+    borderWidth: 0.5,
+    borderColor: C.primary + '30',
+  },
+  transferActionText: {
+    fontSize: 13,
+    fontWeight: '700',
   },
 
   ctaButton: {
@@ -2176,31 +2577,89 @@ const makeStyles = (C) => ({
     paddingHorizontal: Spacing.lg,
     paddingTop: Spacing.sm,
   },
-  modalPersonRow: {
+  // ── Team modal (reference: B _ Lista clean _ dark) ─────────────────────────
+  teamGroupBlock: {
+    marginBottom: Spacing.lg,
+  },
+  teamGroupHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: Spacing.sm,
+    justifyContent: 'space-between',
+    paddingTop: Spacing.md,
+    paddingBottom: Spacing.sm,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: C.border.light,
+    marginBottom: Spacing.sm,
   },
-  modalPersonInfo: {
+  teamGroupName: {
     flex: 1,
-    marginLeft: Spacing.sm,
-  },
-  modalPersonName: {
-    fontSize: Typography.fontSize.subhead,
-    fontWeight: Typography.fontWeight.medium,
-    color: C.text.primary,
-  },
-  modalPersonDesc: {
-    fontSize: Typography.fontSize.footnote,
-    color: C.text.secondary,
-    marginTop: 1,
-  },
-  modalPersonCouncil: {
-    fontSize: Typography.fontSize.caption1,
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
     color: C.text.tertiary,
-    marginTop: 1,
+  },
+  teamGroupCount: {
+    minWidth: 22,
+    height: 20,
+    paddingHorizontal: 7,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: C.background.secondary,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: C.border.light,
+  },
+  teamGroupCountText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: C.text.secondary,
+  },
+  teamRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    gap: 12,
+  },
+  teamAvatar: {
+    width: 40,
+    height: 40,
+    borderRadius: 10,
+    backgroundColor: C.background.secondary,
+  },
+  teamAvatarFallback: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: C.primaryLight + '22',
+  },
+  teamAvatarVacancy: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: C.warning + '18',
+    borderWidth: 1,
+    borderColor: C.warning + '55',
+    borderStyle: 'dashed',
+  },
+  teamAvatarInitials: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: C.primary,
+    letterSpacing: -0.2,
+  },
+  teamRowInfo: {
+    flex: 1,
+    minWidth: 0,
+  },
+  teamRowName: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: C.text.primary,
+    letterSpacing: -0.1,
+  },
+  teamRowMeta: {
+    fontSize: 11.5,
+    color: C.text.tertiary,
+    marginTop: 2,
   },
 
   // Vacancy badge

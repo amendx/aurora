@@ -30,6 +30,7 @@ import {
   Dimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AuthContext } from '../context/AuthContext';
 import AppHeader from '../components/AppHeader';
@@ -40,14 +41,40 @@ import ProfileScreen from './ProfileScreen';
 import ConfigScreen from './ConfigScreen';
 import GroupsScreen from './GroupsScreen';
 import ReportsScreen from './ReportsScreen';
+import EstimativaScreen from './EstimativaScreen';
+import MinhasEscalasFixasScreen from './MinhasEscalasFixasScreen';
 import GroupVisibilityScreen from './GroupVisibilityScreen';
 import DayViewScreen from './DayViewScreen';
 import HospitalsScreen from './HospitalsScreen';
 import HospitalDetailScreen from './HospitalDetailScreen';
-import ChartsScreen from './ChartsScreen';
+import OpeningsScreen from './OpeningsScreen';
+import NetworkVacanciesScreen from './NetworkVacanciesScreen';
+import AvisosScreen from './AvisosScreen';
+import NotificationsSettingsScreen from './NotificationsSettingsScreen';
+import HistoricoScreen from './HistoricoScreen';
+import GroupDayTeamScreen from './GroupDayTeamScreen';
+import TrocasAbertasScreen from './TrocasAbertasScreen';
+import ActivityLogScreen from './ActivityLogScreen';
+// Aura (IA do Aurora): conselho de escala + gestão de disponibilidade.
+import AuraScreen from './AuraScreen';
+import AuraAvailabilityScreen from './AuraAvailabilityScreen';
 import TabBar from '../components/TabBar';
 import { useColors, Spacing } from '../constants/DesignSystem';
 import Logger from '../utils/Logger';
+import { emitScrollToTop } from '../utils/scrollToTopBus';
+import { routeForNotification } from '../utils/notificationRoute';
+
+// expo-notifications carregado lazy (igual ao NotificationService) pra o arquivo
+// importar mesmo sem o pacote instalado.
+let _expoNotifs;
+function expoNotifs() {
+  if (_expoNotifs !== undefined) return _expoNotifs;
+  try { _expoNotifs = require('expo-notifications'); } catch { _expoNotifs = null; }
+  return _expoNotifs;
+}
+// getLastNotificationResponseAsync devolve a última resposta mesmo em aberturas
+// normais; consome só 1× por processo pra não re-navegar a cada login.
+let _consumedLaunchResponse = false;
 
 // ─── Animation constants ───────────────────────────────────────────────────────
 const { width: W } = Dimensions.get('window');
@@ -64,7 +91,7 @@ const EASING_OUT        = Easing.bezier(0, 0, 0.2, 1);   // ease-out (tab fade)
 
 // Screens that include their own full-screen header + handle their own safe area.
 // These are rendered in the overlay WITHOUT an injected AppHeader.
-const SELF_CONTAINED = new Set(['dayView']);
+const SELF_CONTAINED = new Set(['dayView', 'avisos', 'notifsettings']);
 
 // Map handleNavigation() screen-name → internal state key
 const SCREEN_MAP = {
@@ -73,11 +100,23 @@ const SCREEN_MAP = {
   GroupsScreen:          'groups',
   HoursReport:           'reports',
   Reports:               'reports',
+  Estimativa:            'estimativa',
+  MinhasEscalasFixas:    'minhasEscalasFixas',
   GroupVisibilityScreen: 'groupVisibility',
   DayView:               'dayView',
-  ChartsScreen:          'charts',
+  // ChartsScreen virou aba dentro de Reports — navega via 'Reports' com params.initialTab='graficos'.
   HospitalsScreen:       'hospitals',
   HospitalDetailScreen:  'hospitalDetail',
+  OpeningsScreen:        'openings',
+  NetworkVacanciesScreen: 'networkVacancies',
+  AvisosScreen:          'avisos',
+  NotificationsSettingsScreen: 'notifsettings',
+  Historico:             'historico',
+  GroupDayTeam:          'groupDayTeam',
+  TrocasAbertas:         'trocasAbertas',
+  ActivityLog:           'activityLog',
+  AuraScreen:            'aura',              // Aura (IA do Aurora)
+  AuraAvailabilityScreen: 'auraAvailability', // Aura (IA do Aurora)
 };
 
 export default function MainScreen() {
@@ -93,6 +132,17 @@ export default function MainScreen() {
 
   const { user } = useContext(AuthContext);
   const C        = useColors();
+  const insets   = useSafeAreaInsets();
+
+  // Espaço único reservado pro TabBar absoluto.
+  //   - tabBarReserve: pra base layer (tabs visíveis, TabBar mostra)
+  //   - overlayReserve: pra sub-screens (overlayLayer tem zIndex 5 e cobre o
+  //     TabBar — só precisa do safe-area inferior, sem altura do TabBar)
+  // Telas filhas NÃO devem adicionar paddingBottom próprio em
+  // ScrollView/contentContainerStyle.
+  const TAB_BAR_HEIGHT = 56;
+  const tabBarReserve  = TAB_BAR_HEIGHT + insets.bottom + Spacing.md;
+  const overlayReserve = insets.bottom + Spacing.md;
 
   // ── Animated values ──────────────────────────────────────────────────────────
 
@@ -108,6 +158,13 @@ export default function MainScreen() {
 
   const isAnimating        = useRef(false);
   const disableSwipeBack   = useRef(false);
+
+  // Back-stack of overlays *below* the current one. Pushing a sub-screen while
+  // already in an overlay stacks the current frame here so Back pops to it
+  // instead of dismissing straight to the tab. Kept in a ref (not rendered —
+  // only the top frame lives in overlayScreen state) to avoid stale closures
+  // in the swipe-back PanResponder and extra renders.
+  const overlayStackRef    = useRef([]);
 
   // Keep disableSwipeBack in sync with currentScreen
   useEffect(() => {
@@ -129,6 +186,17 @@ export default function MainScreen() {
           // commit — finish pop from current position
           isAnimating.current = true;
           const finish = () => {
+            // Stacked overlay → snap the previous frame back into view rather
+            // than revealing the tab underneath.
+            if (overlayStackRef.current.length > 0) {
+              const prev = overlayStackRef.current[overlayStackRef.current.length - 1];
+              overlayStackRef.current = overlayStackRef.current.slice(0, -1);
+              setCurrentScreen(prev.name); setScreenParams(prev.params); setOverlayScreen(prev);
+              setGroupsRefreshFn(null); setReportsExportFn(null);
+              slideX.setValue(0); baseParallaxX.setValue(-W * 0.1); overlayOpacity.setValue(1);
+              isAnimating.current = false;
+              return;
+            }
             setOverlayScreen(null); setCurrentScreen(null);
             setScreenParams(null); setGroupsRefreshFn(null);
             setReportsExportFn(null); isAnimating.current = false;
@@ -159,6 +227,8 @@ export default function MainScreen() {
   const pushSubScreen = (screenName, params = null) => {
     // If already in an overlay, do a quick replace crossfade instead of slide
     if (overlayScreen !== null) {
+      // Remember the current overlay so Back returns here, not to the tab.
+      overlayStackRef.current = [...overlayStackRef.current, { name: currentScreen, params: screenParams }];
       overlayOpacity.setValue(0);
       setCurrentScreen(screenName);
       setScreenParams(params);
@@ -229,9 +299,33 @@ export default function MainScreen() {
   // ── Pop: go back from sub-screen ──────────────────────────────────────────────
   const handleBackNavigation = () => {
     if (isAnimating.current) return;
+
+    // Stacked overlay → pop one level (crossfade) instead of dismissing to tab.
+    // Mirrors pushSubScreen's replace transition.
+    if (overlayStackRef.current.length > 0) {
+      const prev = overlayStackRef.current[overlayStackRef.current.length - 1];
+      overlayStackRef.current = overlayStackRef.current.slice(0, -1);
+      Logger.nav(`pop ← ${currentScreen} → ${prev.name}`);
+      overlayOpacity.setValue(0);
+      setCurrentScreen(prev.name);
+      setScreenParams(prev.params);
+      setOverlayScreen(prev);
+      setGroupsRefreshFn(null);
+      setReportsExportFn(null);
+      Animated.timing(overlayOpacity, {
+        toValue: 1,
+        duration: DURATION_REPLACE,
+        easing: EASING_OUT,
+        useNativeDriver: true,
+      }).start();
+      return;
+    }
+
     isAnimating.current = true;
+    Logger.nav(`pop ← ${currentScreen || 'overlay'}`);
 
     const finish = () => {
+      overlayStackRef.current = [];
       setOverlayScreen(null);
       setCurrentScreen(null);
       setScreenParams(null);
@@ -283,24 +377,26 @@ export default function MainScreen() {
 
   // ── Tab switch ────────────────────────────────────────────────────────────────
   const handleTabPress = (tabId) => {
-    // If coming from a sub-screen, pop first then switch tab
     if (overlayScreen !== null) {
+      // Tapping a tab dismisses all stacked overlays, not just one level.
+      overlayStackRef.current = [];
       handleBackNavigation();
-      // Tab switch happens after pop completes — defer via state
-      // (pop finish sets currentScreen to null; tab is already correct after this)
       setCurrentTab(tabId);
+      Logger.nav(`tab → ${tabId}`);
       return;
     }
-    if (currentTab === tabId) return;
-
-    // Instant switch — tabs stay mounted, display:none toggles layout participation.
-    // No crossfade needed; native tab bars never crossfade (iOS, Android, WhatsApp, etc.)
+    if (currentTab === tabId) {
+      // Re-tap na aba já ativa → volta ao topo do conteúdo.
+      emitScrollToTop(tabId);
+      return;
+    }
     setCurrentTab(tabId);
+    Logger.nav(`tab → ${tabId}`);
   };
 
   // ── Navigation handler (called by child screens) ───────────────────────────────
   const handleNavigation = (screenName, params = null) => {
-    Logger.debug(`📱 Navegação para: ${screenName}`);
+    Logger.nav(`push → ${screenName}`);
     if (screenName === 'calendar') {
       handleTabPress('calendar');
       return;
@@ -313,6 +409,15 @@ export default function MainScreen() {
 
   const TAB_BACK_LABELS = { home: 'Início', calendar: 'Calendário', settings: 'Configurações' };
 
+  // Back label when Back returns to a stacked overlay (not a tab).
+  const OVERLAY_BACK_LABELS = {
+    openings: 'Vagas', networkVacancies: 'Vagas', groups: 'Grupos',
+    trocasAbertas: 'Movimentações', historico: 'Histórico', reports: 'Relatórios',
+    hospitals: 'Hospitais', charts: 'Gráficos', dayView: 'Dia',
+    groupDayTeam: 'Equipe', profile: 'Perfil', config: 'Valores',
+    aura: 'Aura', // Aura (IA do Aurora)
+  };
+
   const getTabHeaderData = () => {
     switch (currentTab) {
       case 'home':     return { title: 'Início' };
@@ -323,7 +428,10 @@ export default function MainScreen() {
   };
 
   const getOverlayHeaderData = () => {
-    const backLabel = TAB_BACK_LABELS[currentTab] || 'Voltar';
+    const stackTop = overlayStackRef.current[overlayStackRef.current.length - 1];
+    const backLabel = stackTop
+      ? (OVERLAY_BACK_LABELS[stackTop.name] || 'Voltar')
+      : (TAB_BACK_LABELS[currentTab] || 'Voltar');
     switch (currentScreen) {
       case 'dayView':
         return { title: 'Dia', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
@@ -341,14 +449,42 @@ export default function MainScreen() {
           rightComponent: groupsRefreshFn ? <Ionicons name="refresh" size={22} color={C.primary} /> : null,
           onRightPress: groupsRefreshFn ?? undefined,
         };
+      case 'estimativa':
+        return { title: 'Estimativa', subtitle: 'Simule a fidelização do mês', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
+      case 'minhasEscalasFixas':
+        return { title: 'Minhas escalas fixas', subtitle: 'Entregar ou transferir', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
       case 'groupVisibility':
         return { title: 'Visibilidade de grupos', subtitle: 'Escolha quem aparece no seu plantão', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
       case 'profile':
         return { title: 'Perfil', subtitle: 'Sua conta e configurações', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
       case 'config':
         return { title: 'Valores do Plantão', subtitle: 'Configure valores e parâmetros', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
-      case 'charts':
-        return { title: 'Gráficos', subtitle: 'Estimativas mensais', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
+      case 'hospitals':
+        return { title: 'Meus hospitais', subtitle: 'Instituições e fidelização', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
+      case 'hospitalDetail': {
+        const inst = screenParams?.institution;
+        return {
+          title: inst?.popular_name || inst?.name || 'Hospital',
+          showBackButton: true, onBackPress: handleBackNavigation, backLabel,
+        };
+      }
+      case 'openings':
+        return { title: 'Vagas disponíveis', subtitle: 'Plantões em aberto', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
+      case 'networkVacancies':
+        return { title: 'Vagas da rede', subtitle: 'Próximos 7 dias', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
+      case 'historico':
+        return { title: 'Histórico', subtitle: 'Cessões e trocas', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
+      case 'groupDayTeam':
+        return { title: 'Equipe do plantão', subtitle: 'Quem está hoje', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
+      case 'trocasAbertas':
+        return { title: 'Movimentações', subtitle: 'Trocas e cessões em andamento', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
+      case 'activityLog':
+        return { title: 'Minhas ações', subtitle: 'Log da sessão atual', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
+      // Aura (IA do Aurora)
+      case 'aura':
+        return { title: 'Aura', subtitle: 'Conselho de escala', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
+      case 'auraAvailability':
+        return { title: 'Disponibilidade', subtitle: 'Bloqueios, folgas e regras', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
       default:
         return { title: '', showBackButton: true, onBackPress: handleBackNavigation, backLabel };
     }
@@ -360,6 +496,29 @@ export default function MainScreen() {
   const _navRef = useRef(handleNavigation);
   _navRef.current = handleNavigation;
   const stableNav = useRef({ navigate: (...a) => _navRef.current(...a) }).current;
+
+  // ── Deep-link de push: tocar numa notificação cai no aviso em questão ─────────
+  // Cobre dois caminhos: app aberto pelo toque com app morto/background
+  // (getLastNotificationResponseAsync) e toque com app já em execução
+  // (addNotificationResponseReceivedListener). O destino vem de routeForNotification.
+  useEffect(() => {
+    const Notifications = expoNotifs();
+    if (!Notifications) return;
+    let mounted = true;
+    const go = (response) => {
+      const data = response?.notification?.request?.content?.data;
+      const route = routeForNotification(data);
+      if (route) stableNav.navigate(route.screen, route.params || null);
+    };
+    if (!_consumedLaunchResponse) {
+      _consumedLaunchResponse = true;
+      Notifications.getLastNotificationResponseAsync?.()
+        .then((r) => { if (mounted && r) go(r); })
+        .catch(() => {});
+    }
+    const sub = Notifications.addNotificationResponseReceivedListener?.(go);
+    return () => { mounted = false; sub?.remove?.(); };
+  }, [stableNav]);
 
   // Tab screen elements created once — React reconciles the same instances forever.
   const TAB_SCREENS = useMemo(() => [
@@ -381,22 +540,30 @@ export default function MainScreen() {
           />
         );
       case 'reports':
-        return <ReportsScreen onExportReady={(fn) => setReportsExportFn(() => fn)} />;
+        return (
+          <ReportsScreen
+            onExportReady={(fn) => setReportsExportFn(() => fn)}
+            initialTab={screen.params?.initialTab || 'resumo'}
+          />
+        );
       case 'dayView':
         return (
           <DayViewScreen
             navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }}
             initialDate={screen.params?.date}
+            initialFocusShiftId={screen.params?.focusShiftId}
           />
         );
+      case 'estimativa':
+        return <EstimativaScreen navigation={{ goBack: handleBackNavigation }} />;
+      case 'minhasEscalasFixas':
+        return <MinhasEscalasFixasScreen navigation={{ goBack: handleBackNavigation }} />;
       case 'groupVisibility':
         return <GroupVisibilityScreen navigation={{ goBack: handleBackNavigation }} />;
       case 'profile':
         return <ProfileScreen navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }} />;
       case 'config':
         return <ConfigScreen navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }} />;
-      case 'charts':
-        return <ChartsScreen />;
       case 'hospitals':
         return <HospitalsScreen navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }} />;
       case 'hospitalDetail':
@@ -406,6 +573,33 @@ export default function MainScreen() {
             institution={screen.params?.institution}
           />
         );
+      case 'openings':
+        return <OpeningsScreen navigation={{ goBack: handleBackNavigation }} />;
+      case 'networkVacancies':
+        return <NetworkVacanciesScreen navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }} />;
+      case 'avisos':
+        return <AvisosScreen navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }} />;
+      case 'notifsettings':
+        return <NotificationsSettingsScreen navigation={{ goBack: handleBackNavigation }} />;
+      case 'historico':
+        return <HistoricoScreen navigation={{ goBack: handleBackNavigation }} />;
+      case 'groupDayTeam':
+        return (
+          <GroupDayTeamScreen
+            navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }}
+            date={screen.params?.date}
+            groupIds={screen.params?.groupIds}
+          />
+        );
+      case 'trocasAbertas':
+        return <TrocasAbertasScreen navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }} />;
+      case 'activityLog':
+        return <ActivityLogScreen />;
+      // Aura (IA do Aurora)
+      case 'aura':
+        return <AuraScreen navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }} />;
+      case 'auraAvailability':
+        return <AuraAvailabilityScreen navigation={{ goBack: handleBackNavigation, navigate: handleNavigation }} />;
       default:
         return null;
     }
@@ -430,7 +624,7 @@ export default function MainScreen() {
         {TAB_SCREENS.map(({ id, el }) => (
           <View
             key={id}
-            style={[styles.content, id !== currentTab && styles.tabHidden]}
+            style={[styles.content, { paddingBottom: tabBarReserve }, id !== currentTab && styles.tabHidden]}
           >
             {el}
           </View>
@@ -457,7 +651,7 @@ export default function MainScreen() {
           )}
 
           {/* Screen content */}
-          <View style={[styles.content, isSelfContained && styles.fullContent]}>
+          <View style={[styles.content, { paddingBottom: overlayReserve }, isSelfContained && styles.fullContent]}>
             {renderOverlayContent(overlayScreen)}
           </View>
         </Animated.View>
@@ -496,7 +690,7 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
-    paddingBottom: 68 + Spacing.md * 2,
+    // paddingBottom é injetado inline via tabBarReserve (insets-aware).
   },
   tabHidden: {
     display: 'none',

@@ -12,19 +12,55 @@ import {
   Easing,
   Dimensions,
   PanResponder,
+  Alert,
 } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import * as SecureStore from 'expo-secure-store';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useShifts } from '../contexts/ShiftsContext';
+import { useOpenings } from '../contexts/OpeningsContext';
+import { useOffers } from '../contexts/OffersContext';
+import { usePrivacy } from '../contexts/PrivacyContext';
+import { useGroups } from '../contexts/GroupsContext';
 import { useColors, Typography, Spacing, BorderRadius, Shadows } from '../constants/DesignSystem';
-import { getFullShiftConfig, calculateShiftValueSync, roundCurrency, getShiftPeriod, shouldUseWeekendValue } from '../utils/ShiftValueCalculator';
+import { getFullShiftConfig, calculateShiftValueSync, roundCurrency, getShiftPeriod, getShiftHours, shouldUseWeekendValue } from '../utils/ShiftValueCalculator';
+import { resolveShiftConfig, resolveLoyaltyPct } from '../utils/HospitalConfigResolver';
+import { applyLuisFrancaPreset } from '../utils/LuisFrancaPreset';
+import { applyPublishedHospitalConfigs, collectInstIds } from '../utils/PublishedHospitalConfig';
 import ShiftBottomSheet from '../components/ShiftBottomSheet';
+import CederFlowSheet from './CederFlowSheet';
+import TrocarFlowSheet from './TrocarFlowSheet';
+import TrocaDetailSheet from './TrocaDetailSheet';
+import CessaoDetailSheet from './CessaoDetailSheet';
 import AddManualShiftModal from '../components/AddManualShiftModal';
+import HoursEditModal from '../components/HoursEditModal';
 import { AuthContext } from '../context/AuthContext';
+import { isViewOnly } from '../utils/userSource';
 import { getGroupColors } from '../utils/GroupColorConfig';
+import { movementVisual } from '../utils/MovementColors';
 import TodayCoworkersService from '../services/TodayCoworkersService';
+import LocalCache from '../services/LocalCache';
+import { deriveShiftStatus, SHIFT_STATUS_META, statusTone, SHIFT_STATUS } from '../utils/shiftStatus';
+import TimeUtils from '../utils/TimeUtils';
+
+// Horas do plantão p/ exibição: usa durationMinutes quando existe (manuais/
+// openings), senão cai pra duração padrão do turno (M/T=6h, N/D=12h). Plantões
+// vindos do webClient não trazem durationMinutes — sem fallback davam "0h".
+const shiftHoursOf = (sh) => {
+  if (sh?.splitHours?.minutesThisMonth != null) return Math.round((sh.splitHours.minutesThisMonth / 60) * 10) / 10;
+  if (sh?.splitHours?.hoursThisMonth != null) return sh.splitHours.hoursThisMonth;
+  if (sh?.durationMinutes) return Math.round(sh.durationMinutes / 60 * 10) / 10;
+  const timeStr = sh?.time || '';
+  let parts = timeStr.split(' – ');
+  if (parts.length !== 2) parts = timeStr.split(' - ');
+  if (parts.length === 2) {
+    const norm = t => t.replace(/\s*\([^)]*\)/, '').replace('h', ':').trim();
+    const minutes = TimeUtils.calculateDurationMinutes(norm(parts[0]), norm(parts[1]));
+    if (minutes != null && minutes > 0) return Math.round((minutes / 60) * 10) / 10;
+  }
+  return getShiftHours(sh?.label);
+};
 
 const WEEKDAYS_PT = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
 const MONTHS_FULL_PT = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
@@ -70,11 +106,19 @@ const buildWeekDays = (centerDate) => {
 
 // ── DayViewScreen ──────────────────────────────────────────────────────────────
 
-const DayViewScreen = ({ navigation, initialDate }) => {
+const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
   const C = useColors();
   const insets = useSafeAreaInsets();
-  const { daysWithShifts, hoursReport } = useShifts();
+  const { daysWithShifts, hoursReport, persistTimeEntries, refreshMonthSummary } = useShifts();
+  const { myCededOpenings, refresh: refreshOpenings, cancelCedeOpening } = useOpenings();
+  const { swapsSent, swapsReceived, offersSent, cancelSwap, cancelOffer } = useOffers();
+  const { valuesHidden } = usePrivacy();
+  const { coworkersById } = useGroups();
+  const { deleteManualShift, restoreShiftLocally } = useShifts();
   const { user } = useContext(AuthContext);
+  const viewOnly = isViewOnly(user);
+
+  useEffect(() => { refreshOpenings?.(true); }, [refreshOpenings]);
 
   const today = useMemo(() => new Date(), []);
   const [selectedDate, setSelectedDate] = useState(initialDate || today);
@@ -87,9 +131,32 @@ const DayViewScreen = ({ navigation, initialDate }) => {
   const [bsShifts, setBsShifts] = useState([]);
   const [bsDate, setBsDate] = useState(null);
   const [bsInitialIdx, setBsInitialIdx] = useState(0);
+  const [cedeShift, setCedeShift] = useState(null);
+  const [trocarShift, setTrocarShift] = useState(null);
 
   const [shiftPickerVisible, setShiftPickerVisible] = useState(false);
   const [addModalVisible, setAddModalVisible] = useState(false);
+  const [hoursEditor, setHoursEditor] = useState(null);
+
+  // Foco + lista (mockup Aurora · Dia + Detalhe · variação C).
+  // Só o plantão em foco exibe ações; os demais ficam como linhas compactas.
+  // null = nenhum em foco (todos colapsados). Pode ser controlado externamente
+  // pelo caller (ex: HomeScreen.navigate('DayView', { focusShiftId })).
+  const [focusedShiftId, setFocusedShiftId] = useState(initialFocusShiftId || null);
+  // Confirmação que SEMPRE nomeia o plantão exato (turno · dia · hospital).
+  const [confirmIntent, setConfirmIntent] = useState(null); // { action, shift }
+  // Detalhe da troca/cessão aberto ao tocar no status banner.
+  const [detailSwap, setDetailSwap] = useState(null); // { swap, mode }
+  const [detailCessao, setDetailCessao] = useState(null); // opening
+  // Toast pós-ação.
+  const [doneAction, setDoneAction] = useState(null);
+  const doneTimerRef = useRef(null);
+  const fireDone = (action) => {
+    setDoneAction(action);
+    if (doneTimerRef.current) clearTimeout(doneTimerRef.current);
+    doneTimerRef.current = setTimeout(() => setDoneAction(null), 2200);
+  };
+  useEffect(() => () => { if (doneTimerRef.current) clearTimeout(doneTimerRef.current); }, []);
 
   const swipePan = useRef(PanResponder.create({
     onMoveShouldSetPanResponder: (_, g) =>
@@ -118,7 +185,76 @@ const DayViewScreen = ({ navigation, initialDate }) => {
   }, [daysWithShifts]);
 
   const selectedDateStr = toDateStr(selectedDate);
-  const dayShifts = shiftsMap[selectedDateStr] || [];
+  const baseDayShifts = shiftsMap[selectedDateStr] || [];
+
+  // Cede ao grupo remove o plantão do calendário. Reinjetamos como "virtual shift"
+  // marcado com _pendingCede pra renderizar amarelo + permitir cancelar inline.
+  // Adicionalmente anotamos pendências de troca (swap) e cessão direcionada (offer)
+  // nos plantões que continuam visíveis — mesmo padrão visual.
+  const dayShifts = useMemo(() => {
+    const cededToday = (myCededOpenings || []).filter(o => {
+      const k = o.dateKey || (o.startISO || '').slice(0, 10);
+      return k === selectedDateStr && o.status === 'active';
+    });
+    const ceded = cededToday.map(o => {
+      const snap = o.originShiftSnapshot || {};
+      return {
+        ...snap,
+        _pendingCede: o,
+        id: snap.id || `pending_${o.id}`,
+        label: snap.label || o.label,
+        date: snap.date || o.dateKey,
+        startISO: snap.startISO || o.startISO,
+        endISO: snap.endISO || o.endISO,
+        time: snap.time,
+        group: snap.group || o.group,
+        monthKey: snap.monthKey || o.monthKey,
+      };
+    });
+
+    // Index swaps and direct offers by the user's own shift id (shiftA for swaps initiated by me).
+    const sentSwapByShiftId = {};
+    (swapsSent || []).forEach(sw => {
+      if (sw?.status !== 'pending' || !sw.shiftA?.id) return;
+      sentSwapByShiftId[String(sw.shiftA.id)] = sw;
+    });
+    const sentOfferByShiftId = {};
+    (offersSent || []).forEach(o => {
+      if (o?.status !== 'pending' || !o.shiftSnapshot?.id) return;
+      sentOfferByShiftId[String(o.shiftSnapshot.id)] = o;
+    });
+    const recvSwapByShiftId = {};
+    (swapsReceived || []).forEach(sw => {
+      if (sw?.status !== 'pending' || !sw.shiftB?.id) return;
+      recvSwapByShiftId[String(sw.shiftB.id)] = sw;
+    });
+
+    const annotated = baseDayShifts.map(sh => {
+      const id = sh?.id != null ? String(sh.id) : '';
+      const pendingSwap = sentSwapByShiftId[id] || recvSwapByShiftId[id] || null;
+      const pendingOffer = sentOfferByShiftId[id] || null;
+      if (!pendingSwap && !pendingOffer) return sh;
+      return {
+        ...sh,
+        _pendingSwap: pendingSwap || undefined,
+        _pendingSwapRole: pendingSwap
+          ? (sentSwapByShiftId[id] ? 'initiator' : 'target')
+          : undefined,
+        _pendingOffer: pendingOffer || undefined,
+      };
+    });
+
+    // Dedup por id — evita renderizar o mesmo plantão duas vezes (e o warning
+    // "two children with the same key"). Pode ocorrer se um ghost de cessão
+    // coincidir com o shift base, ou se daysWithShifts trouxer duplicata.
+    const seen = new Set();
+    return [...annotated, ...ceded].filter((sh, i) => {
+      const k = sh?.id != null ? String(sh.id) : `idx_${i}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  }, [baseDayShifts, myCededOpenings, selectedDateStr, swapsSent, swapsReceived, offersSent]);
 
   useEffect(() => {
     if (!fabAnimatedOnce.current) {
@@ -134,6 +270,27 @@ const DayViewScreen = ({ navigation, initialDate }) => {
     daySelectorRef.current?.scrollTo({ x: Math.max(0, itemCenter - W / 2), animated: true });
   }, [selectedDateStr]);
 
+  // Auto-foco do shift pedido via prop (Home → DayView com shift específico).
+  // Roda 1x quando dayShifts ficar pronto pra esse id.
+  const initialFocusAppliedRef = useRef(false);
+  useEffect(() => {
+    if (initialFocusAppliedRef.current) return;
+    if (!initialFocusShiftId || !dayShifts.length) return;
+    if (dayShifts.some(sh => String(sh.id) === String(initialFocusShiftId))) {
+      setFocusedShiftId(initialFocusShiftId);
+      initialFocusAppliedRef.current = true;
+    }
+  }, [dayShifts, initialFocusShiftId]);
+
+  // Reseta foco quando o shift atual sai do dia (mudou de data, etc.).
+  // NÃO faz auto-foco do primeiro — todos podem ficar colapsados.
+  useEffect(() => {
+    if (!focusedShiftId) return;
+    const stillValid = dayShifts.some(sh => String(sh.id) === String(focusedShiftId));
+    if (!stillValid) setFocusedShiftId(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dayShifts]);
+
   useEffect(() => {
     if (shiftPickerVisible) {
       pickerSlideY.setValue(500);
@@ -145,15 +302,43 @@ const DayViewScreen = ({ navigation, initialDate }) => {
 
   useEffect(() => {
     const userId = user?.id;
-    getFullShiftConfig().then(cfg => { setSavedValues(cfg.hourValues); setFullConfig(cfg); }).catch(() => {});
+    getFullShiftConfig().then(async cfg => {
+      const published = await applyPublishedHospitalConfigs(cfg, collectInstIds(daysWithShifts));
+      // timeEntries do mês exibido → faixa de fidelização por horas reais.
+      const mk = (daysWithShifts?.[0]?.date || selectedDateStr || '').slice(0, 7);
+      const te = (userId && mk) ? ((await LocalCache.getTimeEntries(userId, mk).catch(() => ({}))) || {}) : {};
+      const eff = applyLuisFrancaPreset(published, daysWithShifts, viewOnly, te);
+      setSavedValues(eff.hourValues);
+      setFullConfig(eff);
+    }).catch(() => {});
     if (userId) getGroupColors(userId).then(colors => setGroupColors(colors || {}));
-  }, [user?.id]);
+  }, [user?.id, viewOnly, daysWithShifts]);
 
   useEffect(() => {
-    SecureStore.getItemAsync(`real_hours_${selectedDateStr}`)
-      .then(raw => setDayRealHours(raw ? JSON.parse(raw) : {}))
-      .catch(() => setDayRealHours({}));
-  }, [selectedDateStr]);
+    const uid = String(user?.id || '');
+    // Chave escopada por uid (legada sem uid como fallback).
+    (async () => {
+      try {
+        const raw = (uid && await SecureStore.getItemAsync(`real_hours_${uid}_${selectedDateStr}`))
+          || await SecureStore.getItemAsync(`real_hours_${selectedDateStr}`);
+        const merged = raw ? JSON.parse(raw) : {};
+        // LocalCache time entries são a fonte sincronizada (Firebase) — SecureStore
+        // é device-local. Sem isto, horas extras registradas em outro aparelho não
+        // aparecem aqui. Mapeia por shiftId → índice em dayShifts.
+        if (uid) {
+          const monthKey = selectedDateStr.slice(0, 7);
+          const entries = (await LocalCache.getTimeEntries(uid, monthKey).catch(() => ({}))) || {};
+          dayShifts.forEach((sh, idx) => {
+            const e = entries[sh.id];
+            if (e?.actualStart && e?.actualEnd) {
+              merged[idx] = { ...(merged[idx] || {}), startTime: e.actualStart, endTime: e.actualEnd };
+            }
+          });
+        }
+        setDayRealHours(merged);
+      } catch { setDayRealHours({}); }
+    })();
+  }, [selectedDateStr, user?.id, dayShifts]);
 
   const resolveGroupColor = (shift) => {
     const raw = groupColors[String(shift.group?.id)] || shift.group?.color;
@@ -167,13 +352,44 @@ const DayViewScreen = ({ navigation, initialDate }) => {
   };
 
   const openShiftDetail = (shift) => {
-    const dayData = (daysWithShifts || []).find(d => d.date === shift.date);
-    const allShifts = dayData?.shifts || [shift];
-    const idx = allShifts.findIndex(s => s.id === shift.id);
+    // Use the annotated dayShifts (with _pendingSwap / _pendingCede / _pendingOffer)
+    // instead of the raw daysWithShifts, so the bottom sheet sees the pending state.
+    const allShifts = dayShifts.length > 0 ? dayShifts : [shift];
+    const idx = allShifts.findIndex(s => String(s.id) === String(shift.id));
     setBsShifts(allShifts);
     setBsDate(new Date(shift.date + 'T00:00:00'));
     setBsInitialIdx(idx >= 0 ? idx : 0);
     setBsVisible(true);
+  };
+
+  const openHoursEditor = (shift) => {
+    const idx = dayShifts.findIndex(s => String(s.id) === String(shift.id));
+    setHoursEditor({ shift, index: idx >= 0 ? idx : 0 });
+  };
+
+  const saveShiftHours = async (hours) => {
+    if (!hoursEditor?.shift) return;
+    const index = hoursEditor.index;
+    const newRealHours = {
+      ...dayRealHours,
+      [index]: {
+        ...hours,
+        shiftId: hoursEditor.shift.id || `${hoursEditor.shift.label}_${index}`,
+        shiftType: hoursEditor.shift.label || 'M',
+        shiftTime: hoursEditor.shift.time || 'Horário não informado',
+        groupName: hoursEditor.shift.group?.name || 'Sem grupo',
+        institutionName: hoursEditor.shift.group?.institution?.name || 'Sem instituição',
+        registeredAt: new Date().toISOString(),
+      },
+    };
+    const uid = String(user?.id || '');
+    if (uid) {
+      await SecureStore.setItemAsync(`real_hours_${uid}_${selectedDateStr}`, JSON.stringify(newRealHours));
+    }
+    setDayRealHours(newRealHours);
+    await persistTimeEntries(selectedDateStr, newRealHours, dayShifts);
+    const [y, m] = selectedDateStr.split('-');
+    await refreshMonthSummary(Number(m), Number(y)).catch(() => {});
   };
 
   const handleFAB = () => {
@@ -186,125 +402,483 @@ const DayViewScreen = ({ navigation, initialDate }) => {
     return `${wd}, ${selectedDate.getDate()} de ${MONTHS_FULL_PT[selectedDate.getMonth()]}`;
   };
 
-  const renderShiftCard = (shift, index) => {
-    const d = new Date(shift.date + 'T00:00:00');
+  // Decompõe o valor de um plantão em base + fidelização + bônus + horas extras.
+  // Reaproveitado pelo FocusCard (exibe a composição) e por computeShiftValue.
+  const computeValueParts = (shift, index) => {
+    const instId = shift?.group?.institution?.id ?? shift?.group?.institutionId ?? null;
+    const eff = resolveShiftConfig(fullConfig || {}, instId);
+    const rates = eff.hourValues || savedValues;
+    const baseValue = calculateShiftValueSync(shift, shift.date, rates);
+
+    const loyaltyHours = (() => {
+      if (instId == null || String(instId).length === 0) return hoursReport?.realHours || 0;
+      return (daysWithShifts || []).reduce((total, day) => {
+        return total + (day.shifts || []).reduce((sum, sh) => {
+          const iid = sh?.group?.institution?.id ?? sh?.group?.institutionId ?? null;
+          if (String(iid) !== String(instId)) return sum;
+          return sum + shiftHoursOf(sh);
+        }, 0);
+      }, 0);
+    })();
+    const loyaltyPct = resolveLoyaltyPct(eff, loyaltyHours);
+    let bonusPct = 0;
+    if (eff.bonusEnabled && eff.bonus) {
+      const month = new Date(shift.date + 'T00:00:00').getMonth() + 1;
+      const sm = parseInt(eff.bonus.startMonth, 10);
+      const em = parseInt(eff.bonus.endMonth, 10);
+      if (month >= sm && month <= em) bonusPct = parseFloat(eff.bonus.percentage) || 0;
+    }
+    const mult = 1 + loyaltyPct / 100 + bonusPct / 100;
+    const loyaltyValue = roundCurrency(baseValue * loyaltyPct / 100);
+    const bonusValue = roundCurrency(baseValue * bonusPct / 100);
+
+    // extra hours from registered real hours — mesma taxa/hora do hospital
+    const realEntry = dayRealHours[index];
+    let extraValue = 0;
+    if (realEntry?.startTime && realEntry?.endTime) {
+      const toMin = t => { const [h, m] = t.replace('h', ':').split(':').map(Number); return h * 60 + (m || 0); };
+      const scheduledMin = (() => {
+        const parts = (shift.time || '').split(/\s*[–-]\s*/);
+        if (parts.length < 2) return 0;
+        const s = toMin(parts[0].replace(/\s*\([^)]*\)/, '').trim());
+        let e = toMin(parts[1].replace(/\s*\([^)]*\)/, '').trim());
+        if (e < s) e += 1440;
+        return e - s;
+      })();
+      const realStart = toMin(realEntry.startTime);
+      let realEnd = toMin(realEntry.endTime);
+      if (realEnd < realStart) realEnd += 1440;
+      const extraMin = (realEnd - realStart) - scheduledMin;
+      if (extraMin > 0 && rates) {
+        const period = getShiftPeriod(shift.label);
+        const useWe = shouldUseWeekendValue(shift.date, shift.label, eff.fridayNightAsWeekend);
+        const hourly = parseFloat((useWe ? rates.weekend : rates.weekday)?.[period]) || 0;
+        extraValue = roundCurrency((extraMin / 60) * hourly * mult);
+      }
+    }
+
+    const total = roundCurrency(baseValue * mult) + extraValue;
+    return { baseValue: roundCurrency(baseValue), loyaltyPct, loyaltyValue, bonusPct, bonusValue, extraValue, total };
+  };
+
+  // Cálculo de valor reaproveitado pelo FocusCard e pelo CompactRow.
+  const computeShiftValue = (shift, index) => computeValueParts(shift, index).total;
+
+  // Colegas do plantão — paridade com ShiftBottomSheet._getCoworkersForShift.
+  const _getCoworkersForShift = (shift) => {
+    if (shift?.id && TodayCoworkersService.hasEntry(shift.id)) {
+      return TodayCoworkersService.getCoworkers(shift.id);
+    }
+    const selfId = user?.id ? String(user.id) : null;
+    const raw = [
+      ...(shift?.originalData?.coworkers || []),
+      ...(shift?.originalData?.vacancy?.coworkers || []),
+    ];
+    const seen = new Set();
+    const persons = [];
+    for (const p of raw) {
+      if (!p?.id) continue;
+      const pid = String(p.id);
+      if (seen.has(pid)) continue;
+      if (selfId && pid === selfId) continue;
+      seen.add(pid);
+      persons.push(coworkersById?.[pid] || coworkersById?.[p.id] || p);
+    }
+    return persons;
+  };
+
+  // Handler central: roteia ações do FocusCard pro fluxo certo.
+  // Pra ações de risco (ceder/trocar/excluir + cancelar pendentes), abre
+  // ConfirmSheet que nomeia o plantão antes. "Registrar horas" dispara direto.
+  const handleShiftAction = (shift, action) => {
+    if (action === 'registrar_horas' || action === 'confirmar_presenca') {
+      openHoursEditor(shift);
+      return;
+    }
+    // Ações de risco: ceder/trocar/excluir + cancelar pendentes — passam pela
+    // ConfirmActionSheet que sempre nomeia o plantão exato (turno · dia · hospital).
+    setConfirmIntent({ action, shift });
+  };
+
+  const executeConfirmedAction = async () => {
+    if (!confirmIntent) return;
+    const { action, shift } = confirmIntent;
+    setConfirmIntent(null);
+    try {
+      if (action === 'ceder') {
+        setCedeShift(shift);
+        return;
+      }
+      if (action === 'trocar') {
+        setTrocarShift(shift);
+        return;
+      }
+      if (action === 'excluir') {
+        if (shift.isManual) await deleteManualShift?.(shift.id, shift.monthKey);
+        fireDone('excluir');
+        return;
+      }
+      if (action === 'cancelar_troca') {
+        const swap = shift._pendingSwap;
+        if (swap) await cancelSwap?.(swap);
+        fireDone('cancelar_troca');
+        return;
+      }
+      if (action === 'cancelar_oferta') {
+        const offer = shift._pendingOffer;
+        if (offer) await cancelOffer?.(offer);
+        fireDone('cancelar_oferta');
+        return;
+      }
+      if (action === 'cancelar_cessao') {
+        const opening = shift._pendingCede;
+        if (opening) {
+          const r = await cancelCedeOpening?.(opening.id);
+          if (r?.success && r.restoredShift) restoreShiftLocally?.(r.restoredShift);
+        }
+        fireDone('cancelar_cessao');
+        return;
+      }
+    } catch (_) {
+      // ação falha silenciosa — toast genérico é OK
+    }
+  };
+
+  // Descrição dinâmica do status — usa nomes/contagens do pending state em vez
+  // do texto estático. Retorna também handler de tap pra abrir o detalhe certo.
+  const describeStatus = (shift, status) => {
+    const swap = shift?._pendingSwap;
+    const offer = shift?._pendingOffer;
+    const opening = shift?._pendingCede;
+    if (status === SHIFT_STATUS.EM_TROCA && swap) {
+      const target = swap.targetUserName || 'colega';
+      return { text: `Você e ${target} estão trocando`, onPress: () => setDetailSwap({ swap, mode: 'sent' }) };
+    }
+    if (status === SHIFT_STATUS.OFERTADO && offer) {
+      const to = offer.toUserName || 'colega';
+      return { text: `Oferecido a ${to} — aguardando resposta`, onPress: null };
+    }
+    if (status === SHIFT_STATUS.TROCA_RECEBIDA && swap) {
+      const initiator = swap.initiatorUserName || 'Um colega';
+      return { text: `${initiator} quer trocar com você`, onPress: () => setDetailSwap({ swap, mode: 'received' }) };
+    }
+    if (status === SHIFT_STATUS.CEDIDO && opening) {
+      return { text: 'Cedido ao grupo · aguardando colega', onPress: () => setDetailCessao(opening) };
+    }
+    if (status === SHIFT_STATUS.COBRINDO) {
+      const origin = shift?.originUserName || coworkersById?.[shift?.originUserId]?.name || 'colega';
+      return { text: `Recebido de ${origin}`, onPress: null };
+    }
+    return { text: SHIFT_STATUS_META[status]?.desc || '', onPress: null };
+  };
+
+  // ── Status banner (top do FocusCard) ─────────────────────────────────────
+  const renderStatusBanner = (shift, status) => {
+    const meta = SHIFT_STATUS_META[status];
+    if (!meta) return null;
+    const t = statusTone(meta.tone, C);
+    const iconName = ({
+      check: 'checkmark-circle', clock: 'time-outline',
+      swap: 'swap-horizontal', cede: 'megaphone-outline', login: 'enter-outline', x: 'close-circle',
+    })[meta.icon] || 'ellipse';
+    const { text: descText, onPress } = describeStatus(shift, status);
+    const baseStyle = [s.statusBanner, { backgroundColor: t.bg }];
+    const inner = (
+      <>
+        <View style={[s.statusBannerIcon, { backgroundColor: t.fg + '22' }]}>
+          <Ionicons name={iconName} size={13} color={t.fg} />
+        </View>
+        <Text style={[s.statusBannerLabel, { color: t.fg, fontFamily: Typography.fontFamily.bold }]} numberOfLines={1}>
+          {meta.label.toUpperCase()}
+        </Text>
+        <Text style={[s.statusBannerDesc, { color: t.fg }]} numberOfLines={1}>· {descText}</Text>
+        {onPress && <Ionicons name="chevron-forward" size={14} color={t.fg} style={{ opacity: 0.7 }} />}
+      </>
+    );
+    if (onPress) {
+      return (
+        <Pressable onPress={onPress} style={({ pressed }) => [baseStyle, pressed && { opacity: 0.85 }]}>
+          {inner}
+        </Pressable>
+      );
+    }
+    return <View style={baseStyle}>{inner}</View>;
+  };
+
+  // ── Status chip (linha compacta) ─────────────────────────────────────────
+  const renderStatusChip = (status) => {
+    const meta = SHIFT_STATUS_META[status];
+    if (!meta) return null;
+    const t = statusTone(meta.tone, C);
+    return (
+      <View style={[s.statusChip, { backgroundColor: t.bg }]}>
+        <Text style={[s.statusChipText, { color: t.fg, fontFamily: Typography.fontFamily.bold }]} numberOfLines={1}>
+          {meta.label.toUpperCase()}
+        </Text>
+      </View>
+    );
+  };
+
+  // ── Linha compacta (plantão fora de foco) ────────────────────────────────
+  const renderCompactRow = ({ shift, value, status, index = 0 }) => {
     const groupColor = resolveGroupColor(shift);
-    const timeStr = parseShiftTime(shift.time);
     const typeKey = shiftTypeKey(shift);
     const badgeColor = SHIFT_TYPE_COLOR[typeKey] || C.primary;
-    const baseValue = calculateShiftValueSync(shift, shift.date, savedValues);
-    const value = (() => {
-      let mult = 1;
-      const monthlyHours = hoursReport?.realHours || 0;
-      if (fullConfig?.loyaltyEnabled && fullConfig.loyaltyOptions?.length) {
-        const tier = fullConfig.loyaltyOptions
-          .filter(o => o.minHours <= monthlyHours)
-          .sort((a, b) => b.minHours - a.minHours)[0];
-        if (tier) mult += tier.percentage / 100;
-      }
-      if (fullConfig?.bonusEnabled && fullConfig.bonus) {
-        const month = new Date(shift.date + 'T00:00:00').getMonth() + 1;
-        if (month >= fullConfig.bonus.startMonth && month <= fullConfig.bonus.endMonth) {
-          mult += (parseFloat(fullConfig.bonus.percentage) || 0) / 100;
-        }
-      }
-      // extra hours from registered real hours
-      const realEntry = dayRealHours[index];
-      let extraValue = 0;
-      if (realEntry?.startTime && realEntry?.endTime) {
-        const toMin = t => { const [h, m] = t.replace('h', ':').split(':').map(Number); return h * 60 + (m || 0); };
-        const scheduledMin = (() => {
-          const parts = (shift.time || '').split(/\s*[–-]\s*/);
-          if (parts.length < 2) return 0;
-          const s = toMin(parts[0].replace(/\s*\([^)]*\)/, '').trim());
-          let e = toMin(parts[1].replace(/\s*\([^)]*\)/, '').trim());
-          if (e < s) e += 1440;
-          return e - s;
-        })();
-        const realStart = toMin(realEntry.startTime);
-        let realEnd = toMin(realEntry.endTime);
-        if (realEnd < realStart) realEnd += 1440;
-        const extraMin = (realEnd - realStart) - scheduledMin;
-        if (extraMin > 0 && savedValues) {
-          const period = getShiftPeriod(shift.label);
-          const useWe = shouldUseWeekendValue(shift.date, shift.label, fullConfig?.fridayNightAsWeekend);
-          const hourly = parseFloat((useWe ? savedValues.weekend : savedValues.weekday)?.[period]) || 0;
-          extraValue = roundCurrency((extraMin / 60) * hourly * mult);
-        }
-      }
-      return roundCurrency(baseValue * mult) + extraValue;
-    })();
-
-    let coworkers = TodayCoworkersService.getCoworkers(shift.id);
-    if (coworkers.length === 0 && shift?.originalData?.coworkers?.length > 0) {
-      coworkers = shift.originalData.coworkers;
-    }
-    const vacancies = TodayCoworkersService.getVacanciesByGroup(shift.id);
-    const totalVacancies = vacancies.reduce((acc, v) => acc + (v.available ?? 0), 0);
-
+    const timeStr = parseShiftTime(shift.time) || `${shift.startTime || ''}${shift.endTime ? '–' + shift.endTime : ''}`;
+    const labelTxt = LABEL_MAP[shift.label] || LABEL_MAP[typeKey] || shift.label || 'Plantão';
     return (
       <Pressable
-        key={index}
-        style={({ pressed }) => [s.shiftCard, { backgroundColor: C.background.card, borderColor: C.border.light }, pressed && { opacity: 0.85 }]}
-        onPress={() => openShiftDetail(shift)}
+        key={`c-${shift.id ?? 'x'}-${index}`}
+        onPress={() => setFocusedShiftId(shift.id)}
+        style={({ pressed }) => [s.compactRow, { backgroundColor: C.background.card, borderColor: C.border.light }, pressed && { opacity: 0.85 }]}
       >
-        <View style={[s.shiftAccentBar, { backgroundColor: groupColor }]} />
-        <View style={s.shiftDateCol}>
-          <Text style={[s.shiftDay, { color: C.text.primary }]}>{d.getDate()}</Text>
-          <Text style={[s.shiftWday, { color: C.text.tertiary }]}>
-            {d.toLocaleDateString('pt-BR', { weekday: 'short' }).replace('.', '')}
+        <View style={[s.leftBar, { backgroundColor: groupColor }]} />
+        <View style={[s.shiftTypeBadge, { backgroundColor: badgeColor + '1f', marginLeft: 6 }]}>
+          <Text style={[s.shiftTypeBadgeText, { color: badgeColor }]}>{labelTxt}</Text>
+        </View>
+        <View style={{ flex: 1, marginLeft: 8 }}>
+          <Text style={[s.compactRowTitle, { color: C.text.primary }]} numberOfLines={1}>
+            {labelTxt} · {timeStr}
           </Text>
+          {status && <View style={{ marginTop: 4 }}>{renderStatusChip(status)}</View>}
         </View>
-        <View style={s.shiftInfoCol}>
-          <View style={s.shiftTopRow}>
-            <View style={[s.shiftTypeBadge, { backgroundColor: badgeColor + '1f' }]}>
-              <Text style={[s.shiftTypeBadgeText, { color: badgeColor }]}>
-                {LABEL_MAP[shift.label] || LABEL_MAP[typeKey] || shift.label || 'Plantão'}
-              </Text>
-            </View>
-            {timeStr ? <Text style={[s.shiftTime, { color: C.text.secondary }]}>{timeStr}</Text> : null}
-          </View>
-          {shift.group?.institution?.name
-            ? <Text style={[s.shiftInstitution, { color: C.text.primary }]} numberOfLines={1}>{shift.group.institution.name}</Text>
-            : null}
-          <View style={s.shiftMeta}>
-            {shift.group?.name ? (
-              <>
-                <View style={[s.shiftGroupDot, { backgroundColor: groupColor }]} />
-                <Text style={[s.shiftGroupName, { color: C.text.tertiary }]} numberOfLines={1}>{shift.group.name}</Text>
-              </>
-            ) : null}
-            {coworkers.length > 0 && (
-              <View style={s.coworkerStack}>
-                {coworkers.slice(0, 3).map((p, i) => (
-                  <View key={p.id || i} style={[s.coworkerAvatar, { marginLeft: i === 0 ? 6 : -5, borderColor: C.background.card }]}>
-                    {p.photo
-                      ? <Image source={{ uri: p.photo }} style={s.coworkerAvatarImg} />
-                      : <View style={[s.coworkerAvatarFallback, { backgroundColor: C.accentSoft }]}>
-                          <Text style={[s.coworkerAvatarInitial, { color: C.primary }]}>{(p.name || '?').charAt(0).toUpperCase()}</Text>
-                        </View>
-                    }
-                  </View>
-                ))}
-                {coworkers.length > 3 && (
-                  <View style={[s.coworkerAvatar, s.coworkerAvatarOverflow, { marginLeft: -5, backgroundColor: C.border.light, borderColor: C.background.card }]}>
-                    <Text style={[s.coworkerAvatarOverflowText, { color: C.text.secondary }]}>+{coworkers.length - 3}</Text>
-                  </View>
-                )}
-                {totalVacancies > 0 && Array.from({ length: Math.min(totalVacancies, 2) }).map((_, i) => (
-                  <View key={'v' + i} style={[s.coworkerAvatar, s.coworkerAvatarVacancy, { marginLeft: -5, borderColor: C.background.card, backgroundColor: C.warning + '18' }]}>
-                    <Text style={[s.coworkerAvatarInitial, { color: C.warning }]}>+</Text>
-                  </View>
-                ))}
-              </View>
-            )}
-          </View>
-        </View>
-        <View style={s.shiftValueCol}>
-          {value > 0 ? <Text style={[s.shiftValue, { color: C.money }]}>{fmtBRLk(value)}</Text> : null}
-          <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
+        <View style={{ alignItems: 'flex-end' }}>
+          {value > 0 ? <Text style={[s.compactRowValue, { color: C.money }]}>{valuesHidden ? 'R$ ••••' : fmtBRLk(value)}</Text> : null}
+          <Ionicons name="chevron-down" size={14} color={C.text.tertiary} style={{ marginTop: 2 }} />
         </View>
       </Pressable>
+    );
+  };
+
+  // ── Action row do FocusCard (ações dependem do status) ───────────────────
+  const renderActionsRow = (shift, status) => {
+    if (status === SHIFT_STATUS.EM_TROCA) {
+      const info = statusTone('info', C);
+      return (
+        <Pressable
+          onPress={() => handleShiftAction(shift, 'cancelar_troca')}
+          style={({ pressed }) => [s.actionBtnSecondary, { borderColor: info.line }, pressed && { opacity: 0.8 }]}
+        >
+          <Ionicons name="swap-horizontal" size={15} color={info.fg} />
+          <Text style={[s.actionBtnSecondaryText, { color: info.fg }]}>Cancelar troca</Text>
+        </Pressable>
+      );
+    }
+    if (status === SHIFT_STATUS.OFERTADO) {
+      return (
+        <Pressable
+          onPress={() => handleShiftAction(shift, 'cancelar_oferta')}
+          style={({ pressed }) => [s.actionBtnSecondary, { borderColor: C.error + '55' }, pressed && { opacity: 0.8 }]}
+        >
+          <Text style={[s.actionBtnSecondaryText, { color: C.error }]}>Cancelar cessão</Text>
+        </Pressable>
+      );
+    }
+    if (status === SHIFT_STATUS.TROCA_RECEBIDA) {
+      // Quem decide é o destinatário — abrindo bottom sheet existente p/ aceitar/recusar
+      return (
+        <Pressable onPress={() => openShiftDetail(shift)} style={({ pressed }) => [s.actionBtnPrimary, { backgroundColor: C.primary }, pressed && { opacity: 0.85 }]}>
+          <Ionicons name="open-outline" size={16} color="#fff" />
+          <Text style={s.actionBtnPrimaryText}>Ver proposta</Text>
+        </Pressable>
+      );
+    }
+    if (status === SHIFT_STATUS.CEDIDO) {
+      // Cessão ao grupo é "primeiro a pegar leva" — sem leilão/interessados.
+      // Única ação: cancelar enquanto ninguém assumiu.
+      return (
+        <Pressable
+          onPress={() => handleShiftAction(shift, 'cancelar_cessao')}
+          style={({ pressed }) => [s.actionBtnSecondary, { borderColor: C.error + '55' }, pressed && { opacity: 0.8 }]}
+        >
+          <Text style={[s.actionBtnSecondaryText, { color: C.error }]}>Cancelar cessão</Text>
+        </Pressable>
+      );
+    }
+    // confirmado / cobrindo / a_confirmar — primário "Registrar horas" + menu 3-pontos
+    const primaryConfirm = status === SHIFT_STATUS.A_CONFIRMAR;
+    return (
+      <FocusActionPrimary
+        shift={shift}
+        primaryConfirm={primaryConfirm}
+        viewOnly={viewOnly}
+        onPrimary={() => handleShiftAction(shift, primaryConfirm ? 'confirmar_presenca' : 'registrar_horas')}
+        onMenuAction={(act) => handleShiftAction(shift, act)}
+        C={C}
+        s={s}
+      />
+    );
+  };
+
+  // ── Focus card (plantão expandido com detalhes + ações) ─────────────────
+  const renderFocusCard = ({ shift, index, value, status }) => {
+    const groupColor = resolveGroupColor(shift);
+    const typeKey = shiftTypeKey(shift);
+    const badgeColor = SHIFT_TYPE_COLOR[typeKey] || C.primary;
+    const labelTxt = LABEL_MAP[shift.label] || LABEL_MAP[typeKey] || shift.label || 'Plantão';
+    const timeStr = parseShiftTime(shift.time) || `${shift.startTime || ''}${shift.endTime ? '–' + shift.endTime : ''}`;
+    const hours = shiftHoursOf(shift);
+    // Composição do valor: base (hora × horas) + fidelização + bônus + extras.
+    const parts = computeValueParts(shift, index);
+    const rate = hours > 0 && parts.baseValue > 0 ? roundCurrency(parts.baseValue / hours) : null;
+    const hospitalName = shift.group?.institution?.name || shift.group?.institutionName || shift.hospitalName || '';
+    const groupName = shift.group?.name || '';
+    const originName = shift.originUserName
+      || coworkersById?.[shift.originUserId]?.name
+      || (shift.originUserId ? `Doutor#${String(shift.originUserId).slice(0, 6)}` : null);
+    // Colegas no mesmo plantão — mesma resolução do ShiftBottomSheet:
+    // TodayCoworkersService quando há entrada, senão snapshot da API
+    // (coworkers + vacancy.coworkers), deduplicado, sem o próprio usuário e
+    // enriquecido via coworkersById.
+    const coworkers = _getCoworkersForShift(shift);
+
+    return (
+      <View
+        key={`f-${shift.id ?? 'x'}-${index}`}
+        style={[s.focusCard, { backgroundColor: C.background.card, borderColor: C.primary + '40' }]}
+      >
+        <View style={[s.leftBar, { backgroundColor: groupColor, zIndex: 2 }]} />
+        {renderStatusBanner(shift, status)}
+        <View style={s.focusCardBody}>
+          {/* Topo: tag tempo · hospital · grupo / valor previsto */}
+          <View style={{ flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <View style={[s.shiftTypeBadge, { backgroundColor: badgeColor + '1f' }]}>
+                  <Text style={[s.shiftTypeBadgeText, { color: badgeColor }]}>{labelTxt}</Text>
+                </View>
+                <Text style={[s.focusTimeText, { color: C.text.secondary }]}>{timeStr}</Text>
+              </View>
+              {!!hospitalName && (
+                <Text style={[s.focusHospital, { color: C.text.primary, fontFamily: Typography.fontFamily.display }]} numberOfLines={2}>
+                  {hospitalName}
+                </Text>
+              )}
+              {!!groupName && (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 7 }}>
+                  <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: groupColor }} />
+                  <Text style={[s.focusGroupName, { color: groupColor }]} numberOfLines={1}>{groupName}</Text>
+                </View>
+              )}
+            </View>
+            <View style={{ alignItems: 'flex-end', flexShrink: 0 }}>
+              {value > 0 ? (
+                <>
+                  <Text style={[s.focusValueLabel, { color: C.text.tertiary }]}>VALOR PREVISTO</Text>
+                  <Text style={[s.focusValueText, { color: C.money, fontFamily: Typography.fontFamily.display }]} numberOfLines={1}>
+                    {valuesHidden ? 'R$ ••••' : fmtBRLk(value)}
+                  </Text>
+                </>
+              ) : null}
+              {/* Collapse — só faz sentido com 2+ plantões (com 1 ele é sempre
+                  focado e não recolhe). */}
+              {dayShifts.length > 1 && (
+                <Pressable
+                  onPress={() => setFocusedShiftId(null)}
+                  hitSlop={8}
+                  style={({ pressed }) => [s.collapseBtn, { borderColor: C.border.light }, pressed && { opacity: 0.75 }]}
+                >
+                  <Ionicons name="chevron-up" size={15} color={C.text.tertiary} />
+                </Pressable>
+              )}
+            </View>
+          </View>
+
+          <View style={[s.hairline, { backgroundColor: C.border.light }]} />
+
+          {/* Linha "Horário" */}
+          <View style={s.focusInfoRow}>
+            <Ionicons name="time-outline" size={16} color={C.text.secondary} />
+            <Text style={[s.focusInfoLabel, { color: C.text.secondary }]}>Horário</Text>
+            <Text style={[s.focusInfoValue, { color: C.text.primary }]} numberOfLines={1}>
+              {timeStr} {hours > 0 ? <Text style={{ color: C.text.tertiary }}>({typeKey}) {hours}h</Text> : null}
+            </Text>
+          </View>
+
+          {/* "Recebido de" se aplicável */}
+          {originName && (
+            <View style={s.focusInfoRow}>
+              <Ionicons name="enter-outline" size={16} color={C.text.secondary} />
+              <Text style={[s.focusInfoLabel, { color: C.text.secondary }]}>Recebido de</Text>
+              <Text style={[s.focusInfoValue, { color: C.text.primary }]} numberOfLines={1}>{originName}</Text>
+            </View>
+          )}
+
+          {/* Colegas no plantão — toca p/ abrir a equipe do dia/grupo */}
+          {coworkers.length > 0 && (
+            <Pressable
+              style={({ pressed }) => [s.focusInfoRow, pressed && { opacity: 0.6 }]}
+              disabled={!shift.group?.id || !navigation?.navigate}
+              onPress={() => navigation?.navigate?.('GroupDayTeam', {
+                date: new Date(shift.date + 'T00:00:00'),
+                groupIds: [String(shift.group.id)],
+              })}
+            >
+              <Ionicons name="people-outline" size={16} color={C.text.secondary} />
+              <Text style={[s.focusInfoLabel, { color: C.text.secondary }]}>Equipe</Text>
+              <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 6 }}>
+                <View style={s.coworkerStack}>
+                  {coworkers.slice(0, 4).map((p, i) => (
+                    <View key={p.id || i} style={[s.coworkerAvatar, { marginLeft: i === 0 ? 0 : -5, borderColor: C.background.card }]}>
+                      {p.photo
+                        ? <Image source={{ uri: p.photo }} style={s.coworkerAvatarImg} />
+                        : <View style={[s.coworkerAvatarFallback, { backgroundColor: C.accentSoft }]}>
+                            <Text style={[s.coworkerAvatarInitial, { color: C.primary }]}>{(p.name || '?').charAt(0).toUpperCase()}</Text>
+                          </View>}
+                    </View>
+                  ))}
+                  {coworkers.length > 4 && (
+                    <View style={[s.coworkerAvatar, s.coworkerAvatarOverflow, { marginLeft: -5, backgroundColor: C.background.secondary, borderColor: C.background.card }]}>
+                      <Text style={[s.coworkerAvatarOverflowText, { color: C.text.secondary }]}>+{coworkers.length - 4}</Text>
+                    </View>
+                  )}
+                </View>
+                {!!shift.group?.id && navigation?.navigate && (
+                  <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
+                )}
+              </View>
+            </Pressable>
+          )}
+
+          {/* Composição do valor */}
+          {value > 0 && rate && hours > 0 && (
+            <View style={[s.compositionCard, { backgroundColor: C.background.secondary, borderColor: C.border.light }]}>
+              <Text style={[s.compositionLabel, { color: C.text.tertiary }]}>COMPOSIÇÃO DO VALOR</Text>
+              <View style={s.compositionRow}>
+                <Text style={[s.compositionLine, { color: C.text.secondary }]}>{valuesHidden ? '••••' : fmtBRLk(rate)}/h × {hours}h</Text>
+                <Text style={[s.compositionLine, { color: C.text.primary }]}>{valuesHidden ? 'R$ ••••' : fmtBRLk(parts.baseValue)}</Text>
+              </View>
+              {parts.loyaltyPct > 0 && (
+                <View style={[s.compositionRow, { marginTop: 6 }]}>
+                  <Text style={[s.compositionLine, { color: C.text.secondary }]}>Fidelização +{parts.loyaltyPct}%</Text>
+                  <Text style={[s.compositionLine, { color: C.money }]}>+ {valuesHidden ? 'R$ ••••' : fmtBRLk(parts.loyaltyValue)}</Text>
+                </View>
+              )}
+              {parts.bonusPct > 0 && (
+                <View style={[s.compositionRow, { marginTop: 6 }]}>
+                  <Text style={[s.compositionLine, { color: C.text.secondary }]}>Bônus +{parts.bonusPct}%</Text>
+                  <Text style={[s.compositionLine, { color: C.money }]}>+ {valuesHidden ? 'R$ ••••' : fmtBRLk(parts.bonusValue)}</Text>
+                </View>
+              )}
+              {parts.extraValue > 0 && (
+                <View style={[s.compositionRow, { marginTop: 6 }]}>
+                  <Text style={[s.compositionLine, { color: C.text.secondary }]}>Horas extras</Text>
+                  <Text style={[s.compositionLine, { color: C.money }]}>+ {valuesHidden ? 'R$ ••••' : fmtBRLk(parts.extraValue)}</Text>
+                </View>
+              )}
+              <View style={[s.hairline, { backgroundColor: C.border.light, marginVertical: 9 }]} />
+              <View style={s.compositionRow}>
+                <Text style={[s.compositionTotal, { color: C.text.primary }]}>Total</Text>
+                <Text style={[s.compositionTotalValue, { color: C.money }]}>{valuesHidden ? 'R$ ••••' : fmtBRLk(value)}</Text>
+              </View>
+            </View>
+          )}
+
+          <View style={[s.hairline, { backgroundColor: C.border.light, marginVertical: 13 }]} />
+
+          {renderActionsRow(shift, status)}
+        </View>
+      </View>
     );
   };
 
@@ -360,10 +934,10 @@ const DayViewScreen = ({ navigation, initialDate }) => {
         </ScrollView>
       </View>
 
-      {/* Shift list */}
+      {/* Shift list — padrão Foco + Lista (mockup Aurora · Dia + Detalhe · C) */}
       <ScrollView
         style={s.listArea}
-        contentContainerStyle={{ padding: Spacing.md, paddingBottom: insets.bottom + 80 }}
+        contentContainerStyle={{ padding: Spacing.md, paddingBottom: 80 }}
         showsVerticalScrollIndicator={false}
         decelerationRate="fast"
         overScrollMode="never"
@@ -375,9 +949,52 @@ const DayViewScreen = ({ navigation, initialDate }) => {
             <Text style={[s.emptyTitle, { color: C.text.primary, fontFamily: Typography.fontFamily.semiBold }]}>Nenhum plantão</Text>
             <Text style={[s.emptySubtitle, { color: C.text.secondary }]}>Sem turnos para este dia</Text>
           </View>
-        ) : (
-          dayShifts.map((shift, index) => renderShiftCard(shift, index))
-        )}
+        ) : (() => {
+          // Computa valor + status uma vez por shift; FocusCard usa tudo, CompactRow só value + status.
+          const enriched = dayShifts.map((sh, idx) => ({
+            shift: sh,
+            index: idx,
+            value: computeShiftValue(sh, idx),
+            status: deriveShiftStatus(sh, user?.id),
+          }));
+          const total = enriched.reduce((acc, e) => acc + (e.value || 0), 0);
+          const hours = enriched.reduce((acc, e) => acc + shiftHoursOf(e.shift), 0);
+          // NÃO reordena: cada card abre/fecha NA POSIÇÃO dele. Fallback foca o
+          // primeiro. (Reordenar fazia os cards "trocarem de lugar".)
+          const focusedId = focusedShiftId || enriched[0]?.shift?.id;
+          return (
+            <>
+              {/* DaySummary — N plantões · Xh / Total previsto */}
+              <View style={[s.daySummary, { backgroundColor: C.background.card, borderColor: C.border.light }]}>
+                <View style={{ flex: 1 }}>
+                  <Text style={[s.daySummaryEyebrow, { color: C.text.tertiary }]}>SEU DIA</Text>
+                  <Text style={[s.daySummaryTitle, { color: C.text.primary }]} numberOfLines={1}>
+                    {enriched.length} plant{enriched.length > 1 ? 'ões' : 'ão'} · {Math.round(hours)}h
+                  </Text>
+                </View>
+                <View style={{ alignItems: 'flex-end' }}>
+                  <Text style={[s.daySummaryEyebrow, { color: C.text.tertiary }]}>TOTAL PREVISTO</Text>
+                  <Text style={[s.daySummaryTotal, { color: C.money }]} numberOfLines={1}>
+                    {valuesHidden ? 'R$ ••••' : (fmtBRLk(total) || 'R$ 0,00')}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={{ height: Spacing.md }} />
+
+              {enriched.map(({ shift, index, value, status }) => (
+                String(shift.id) === String(focusedId)
+                  ? renderFocusCard({ shift, index, value, status })
+                  : renderCompactRow({ shift, value, status, index })
+              ))}
+
+              <View style={s.footerHint}>
+                <Ionicons name="shield-outline" size={11} color={C.text.tertiary} />
+                <Text style={[s.footerHintText, { color: C.text.tertiary }]}>Só o plantão aberto tem ações</Text>
+              </View>
+            </>
+          );
+        })()}
       </ScrollView>
 
       {/* FAB — always visible, adds a manual shift */}
@@ -425,16 +1042,234 @@ const DayViewScreen = ({ navigation, initialDate }) => {
         shifts={bsShifts}
         selectedDate={bsDate}
         initialShiftIndex={bsInitialIdx}
+        onCede={(sh) => { setBsVisible(false); setCedeShift(sh); }}
+        onTrocar={(sh) => { setBsVisible(false); setTrocarShift(sh); }}
+        onHoursChanged={async (dateKey, newHours) => {
+          const dayData = (daysWithShifts || []).find(d => d.date === dateKey);
+          if (dayData?.shifts && newHours) {
+            await persistTimeEntries(dateKey, newHours, dayData.shifts);
+            const [y, m] = dateKey.split('-');
+            refreshMonthSummary(Number(m), Number(y)).catch(() => {});
+          }
+        }}
       />
+      {cedeShift && <CederFlowSheet key={`cede-${cedeShift.id}`} visible shift={cedeShift} onClose={() => setCedeShift(null)} />}
+      {trocarShift && <TrocarFlowSheet key={`trocar-${trocarShift.id}`} visible shift={trocarShift} onClose={() => setTrocarShift(null)} />}
 
       <AddManualShiftModal
         visible={addModalVisible}
         onClose={() => setAddModalVisible(false)}
         date={selectedDateStr}
       />
+
+      <HoursEditModal
+        visible={!!hoursEditor}
+        onClose={() => setHoursEditor(null)}
+        onSave={saveShiftHours}
+        shift={hoursEditor?.shift}
+        currentHours={hoursEditor ? (dayRealHours?.[hoursEditor.index] || {}) : {}}
+      />
+
+      <ConfirmActionSheet
+        intent={confirmIntent}
+        C={C}
+        onCancel={() => setConfirmIntent(null)}
+        onConfirm={executeConfirmedAction}
+      />
+      <DoneActionToast action={doneAction} C={C} insetsBottom={insets.bottom} />
+
+      {detailSwap && (
+        <TrocaDetailSheet
+          visible
+          swap={detailSwap.swap}
+          mode={detailSwap.mode}
+          onClose={() => setDetailSwap(null)}
+        />
+      )}
+      {detailCessao && (
+        <CessaoDetailSheet
+          visible
+          opening={detailCessao}
+          onClose={() => setDetailCessao(null)}
+        />
+      )}
     </View>
   );
 };
+
+// ────────────────────────────────────────────────────────────────────────────
+// Componentes auxiliares — escopo do módulo, sem closures sobre estado.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Primário "Registrar horas" (ou "Confirmar presença" se a_confirmar) + menu 3-pontos.
+function FocusActionPrimary({ shift, primaryConfirm, viewOnly, onPrimary, onMenuAction, C, s }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const isManual = shift?.isManual === true;
+  // Conta só-visualização (Soffia/webClient) não cede/troca — só sobra excluir
+  // (manual). Sem itens → esconde o 3-pontos.
+  const menuItems = [
+    ...(viewOnly ? [] : [
+      { id: 'trocar',  label: 'Trocar plantão', icon: 'swap-horizontal', danger: false },
+      { id: 'ceder',   label: 'Ceder', icon: 'megaphone-outline', danger: false },
+    ]),
+    ...(isManual ? [{ id: 'excluir', label: 'Excluir', icon: 'trash-outline', danger: true }] : []),
+  ];
+  return (
+    <View style={{ position: 'relative' }}>
+      <View style={{ flexDirection: 'row', gap: 9 }}>
+        <Pressable
+          onPress={onPrimary}
+          style={({ pressed }) => [s.actionBtnPrimary, { flex: 1, backgroundColor: primaryConfirm ? C.warning : C.primary }, pressed && { opacity: 0.85 }]}
+        >
+          <Ionicons name={primaryConfirm ? 'checkmark' : 'add'} size={16} color="#fff" />
+          <Text style={s.actionBtnPrimaryText}>
+            {primaryConfirm ? 'Confirmar presença' : 'Registrar horas'}
+          </Text>
+        </Pressable>
+        {menuItems.length > 0 && (
+          <Pressable
+            onPress={() => setMenuOpen(v => !v)}
+            style={({ pressed }) => [s.actionBtnDots, { backgroundColor: menuOpen ? C.background.secondary : C.background.card, borderColor: C.border.light }, pressed && { opacity: 0.85 }]}
+            hitSlop={6}
+          >
+            <Ionicons name="ellipsis-horizontal" size={18} color={C.text.secondary} />
+          </Pressable>
+        )}
+      </View>
+      {menuOpen && menuItems.length > 0 && (
+        <>
+          <Pressable onPress={() => setMenuOpen(false)} style={StyleSheet.absoluteFillObject} />
+          <View style={[s.actionMenu, { backgroundColor: C.background.elevated, borderColor: C.border.medium }]}>
+            <Text style={[s.actionMenuTitle, { color: C.text.tertiary, borderBottomColor: C.border.light }]}>
+              Ações neste plantão
+            </Text>
+            {menuItems.map((a, i) => (
+              <Pressable
+                key={a.id}
+                onPress={() => { setMenuOpen(false); onMenuAction(a.id); }}
+                style={({ pressed }) => [
+                  s.actionMenuItem,
+                  i > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border.light },
+                  pressed && { backgroundColor: C.background.secondary },
+                ]}
+              >
+                <Ionicons name={a.icon} size={17} color={a.danger ? C.error : C.text.secondary} />
+                <Text style={[s.actionMenuItemText, { color: a.danger ? C.error : C.text.primary }]}>{a.label}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </>
+      )}
+    </View>
+  );
+}
+
+// Confirmação que NOMEIA o plantão exato.
+function ConfirmActionSheet({ intent, C, onCancel, onConfirm }) {
+  if (!intent) return null;
+  const { action, shift } = intent;
+  const meta = {
+    ceder:           { label: 'Ceder plantão',   desc: 'O plantão será oferecido ao grupo.',                color: C.primary, btn: 'Ceder' },
+    trocar:          { label: 'Trocar plantão',  desc: 'Você vai propor a troca a um colega.',              color: C.primary, btn: 'Trocar' },
+    excluir:         { label: 'Excluir plantão', desc: 'Remove o plantão da sua escala. Não pode desfazer.', color: C.error,  btn: 'Excluir' },
+    cancelar_troca:  { label: 'Cancelar troca',  desc: 'A proposta é desfeita e o plantão volta a ser seu.', color: C.error,  btn: 'Cancelar troca' },
+    cancelar_oferta: { label: 'Cancelar cessão', desc: 'A oferta direcionada é desfeita.',                  color: C.error,  btn: 'Cancelar cessão' },
+    cancelar_cessao: { label: 'Cancelar cessão', desc: 'O plantão sai do grupo e volta a ser seu.',         color: C.error,  btn: 'Cancelar cessão' },
+  }[action];
+  if (!meta) return null;
+  const typeKey = (shift?.label || '').charAt(0).toUpperCase();
+  const badgeColor = SHIFT_TYPE_COLOR[typeKey] || C.primary;
+  const labelTxt = LABEL_MAP[shift?.label] || LABEL_MAP[typeKey] || shift?.label || 'Plantão';
+  const dtStr = (() => {
+    if (!shift?.date) return '';
+    const d = new Date(shift.date + 'T00:00:00');
+    const wd = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'][d.getDay()];
+    return `${wd}, ${d.getDate()}/${String(d.getMonth() + 1).padStart(2, '0')}`;
+  })();
+  const timeStr = parseShiftTime(shift?.time) || `${shift?.startTime || ''}${shift?.endTime ? '–' + shift.endTime : ''}`;
+  const hospital = shift?.group?.institution?.name || shift?.group?.name || '';
+  return (
+    <Modal visible transparent animationType="fade" onRequestClose={onCancel}>
+      <Pressable onPress={onCancel} style={{ flex: 1, backgroundColor: 'rgba(15,20,26,0.45)', justifyContent: 'flex-end' }}>
+        <Pressable onPress={(e) => e.stopPropagation()} style={{
+          backgroundColor: C.background.card, borderTopLeftRadius: 20, borderTopRightRadius: 20,
+          padding: 20, paddingBottom: 30,
+        }}>
+          <View style={{ width: 36, height: 4, borderRadius: 2, backgroundColor: C.border.light, alignSelf: 'center', marginBottom: 14 }} />
+          <Text style={{ fontSize: 18, fontFamily: Typography.fontFamily.bold, color: C.text.primary, letterSpacing: -0.3 }}>
+            {meta.label}?
+          </Text>
+          <View style={{
+            flexDirection: 'row', alignItems: 'center', gap: 9, marginTop: 12,
+            padding: 11, borderRadius: 12, backgroundColor: C.background.secondary, borderWidth: StyleSheet.hairlineWidth, borderColor: C.border.light,
+          }}>
+            <View style={{ paddingHorizontal: 7, paddingVertical: 2, borderRadius: 5, backgroundColor: badgeColor + '1f' }}>
+              <Text style={{ fontSize: 9.5, fontFamily: Typography.fontFamily.bold, color: badgeColor, letterSpacing: 0.4, textTransform: 'uppercase' }}>
+                {labelTxt}
+              </Text>
+            </View>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text style={{ fontSize: 13.5, fontFamily: Typography.fontFamily.semiBold, color: C.text.primary }} numberOfLines={1}>
+                {labelTxt} · {dtStr}
+              </Text>
+              <Text style={{ fontSize: 11, color: C.text.tertiary, marginTop: 1 }} numberOfLines={1}>
+                {hospital}{timeStr ? ' · ' + timeStr : ''}
+              </Text>
+            </View>
+          </View>
+          <Text style={{ fontSize: 12.5, color: C.text.secondary, marginVertical: 14 }}>{meta.desc}</Text>
+          <View style={{ flexDirection: 'row', gap: 10 }}>
+            <Pressable
+              onPress={onCancel}
+              style={({ pressed }) => [{
+                flex: 1, padding: 13, borderRadius: 999,
+                borderWidth: StyleSheet.hairlineWidth, borderColor: C.border.light,
+                backgroundColor: C.background.card, alignItems: 'center',
+              }, pressed && { opacity: 0.85 }]}
+            >
+              <Text style={{ fontSize: 14, fontFamily: Typography.fontFamily.semiBold, color: C.text.secondary }}>Cancelar</Text>
+            </Pressable>
+            <Pressable
+              onPress={onConfirm}
+              style={({ pressed }) => [{
+                flex: 1.3, padding: 13, borderRadius: 999,
+                backgroundColor: meta.color, alignItems: 'center',
+              }, pressed && { opacity: 0.9 }]}
+            >
+              <Text style={{ fontSize: 14, fontFamily: Typography.fontFamily.bold, color: '#fff' }}>{meta.btn}</Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+// Toast pós-ação (2.2s).
+function DoneActionToast({ action, C, insetsBottom = 0 }) {
+  if (!action) return null;
+  const label = ({
+    ceder:           'Plantão cedido ao grupo',
+    trocar:          'Proposta de troca enviada',
+    excluir:         'Plantão removido',
+    cancelar_troca:  'Troca cancelada',
+    cancelar_oferta: 'Cessão cancelada',
+    cancelar_cessao: 'Cessão cancelada',
+    confirmar_presenca: 'Presença confirmada',
+  })[action] || 'Feito';
+  return (
+    <View pointerEvents="none" style={{
+      position: 'absolute', left: 16, right: 16, bottom: 22 + insetsBottom,
+      flexDirection: 'row', alignItems: 'center', gap: 9,
+      padding: 12, paddingHorizontal: 14, borderRadius: 12,
+      backgroundColor: C.text.primary,
+      shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 16, shadowOffset: { width: 0, height: 6 }, elevation: 6,
+    }}>
+      <Ionicons name="checkmark" size={15} color="#fff" />
+      <Text style={{ fontSize: 13, color: '#fff', fontFamily: Typography.fontFamily.semiBold }}>{label}</Text>
+    </View>
+  );
+}
 
 const s = StyleSheet.create({
   root: { flex: 1 },
@@ -506,6 +1341,27 @@ const s = StyleSheet.create({
   shiftValue: { fontSize: 13, fontWeight: '700', fontFamily: Typography.fontFamily.semiBold },
   // ─────────────────────────────────────────────────────────────────────────────
 
+  cedeBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 14,
+    borderWidth: 0.5,
+    marginBottom: 10,
+    overflow: 'hidden',
+    ...Shadows.small,
+  },
+  cedeBannerStrip: { width: 4, alignSelf: 'stretch' },
+  cedeBannerTitle: { fontSize: 14, fontFamily: Typography.fontFamily.semiBold, fontWeight: '700' },
+  cedeBannerSub: { fontSize: 11, marginTop: 2 },
+  cedeBannerBtn: {
+    borderWidth: 1,
+    borderRadius: BorderRadius.pill,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    marginRight: 12,
+  },
+  cedeBannerBtnText: { fontSize: 12, fontWeight: '700' },
+
   empty: {
     borderRadius: BorderRadius.lg,
     borderWidth: 1,
@@ -543,6 +1399,121 @@ const s = StyleSheet.create({
   pickerDot: { width: 10, height: 10, borderRadius: 5 },
   pickerItemLabel: { fontSize: Typography.fontSize.body, fontWeight: '500' },
   pickerItemSub: { fontSize: Typography.fontSize.footnote, marginTop: 1 },
+
+  // ── Foco + Lista (novo design Dia + Detalhe · variação C) ──────────────
+  daySummary: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    padding: 12, paddingHorizontal: 14, borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    ...Platform.select({
+      ios: { shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 6, shadowOffset: { width: 0, height: 1 } },
+      android: { elevation: 1 },
+    }),
+  },
+  daySummaryEyebrow: { fontSize: 9.5, fontWeight: '700', letterSpacing: 0.8 },
+  daySummaryTitle: { fontSize: 15, fontWeight: '700', marginTop: 2 },
+  daySummaryTotal: { fontSize: 19, fontWeight: '800', letterSpacing: -0.4, marginTop: 1 },
+
+  leftBar: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 4 },
+
+  focusCard: {
+    borderRadius: 18, borderWidth: 1, position: 'relative', overflow: 'hidden',
+    marginBottom: 11,
+    ...Platform.select({
+      ios: { shadowColor: '#000', shadowOpacity: 0.1, shadowRadius: 24, shadowOffset: { width: 0, height: 8 } },
+      android: { elevation: 4 },
+    }),
+  },
+  focusCardBody: { paddingHorizontal: 16, paddingVertical: 14, paddingLeft: 18 },
+  focusTimeText: { fontSize: 12.5, fontWeight: '600' },
+  focusHospital: { fontSize: 16.5, fontWeight: '800', letterSpacing: -0.3, marginTop: 9, lineHeight: 20 },
+  focusGroupName: { fontSize: 11, fontWeight: '700', letterSpacing: 0.6, textTransform: 'uppercase' },
+  focusValueLabel: { fontSize: 9, fontWeight: '700', letterSpacing: 0.8 },
+  focusValueText: { fontSize: 22, fontWeight: '800', letterSpacing: -0.4, marginTop: 3 },
+  collapseBtn: {
+    marginTop: 6,
+    width: 26, height: 22, borderRadius: 11,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  hairline: { height: StyleSheet.hairlineWidth, marginVertical: 14 },
+  focusInfoRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 5 },
+  focusInfoLabel: { flex: 1, fontSize: 13 },
+  focusInfoValue: { fontSize: 13, fontWeight: '700' },
+
+  compositionCard: {
+    marginTop: 14, padding: 13, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth,
+  },
+  compositionLabel: { fontSize: 9.5, fontWeight: '700', letterSpacing: 0.8, marginBottom: 9 },
+  compositionRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline' },
+  compositionLine: { fontSize: 12.5 },
+  compositionTotal: { fontSize: 13, fontWeight: '700' },
+  compositionTotalValue: { fontSize: 15, fontWeight: '700' },
+
+  // Status banner (cabeça do FocusCard)
+  statusBanner: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: 10, paddingHorizontal: 14, paddingLeft: 18 },
+  statusBannerIcon: { width: 22, height: 22, borderRadius: 7, alignItems: 'center', justifyContent: 'center' },
+  statusBannerLabel: { fontSize: 11, letterSpacing: 0.6, fontWeight: '800' },
+  statusBannerDesc: { flex: 1, fontSize: 11.5, fontWeight: '600' },
+
+  // Status chip (linha compacta)
+  statusChip: { alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999 },
+  statusChipText: { fontSize: 9.5, letterSpacing: 0.4, fontWeight: '800' },
+
+  // CompactRow
+  compactRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    padding: 12, paddingHorizontal: 14, borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    position: 'relative', overflow: 'hidden',
+    marginBottom: 11,
+    ...Platform.select({
+      ios: { shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 6, shadowOffset: { width: 0, height: 1 } },
+      android: { elevation: 1 },
+    }),
+  },
+  compactRowTitle: { fontSize: 13.5, fontWeight: '700' },
+  compactRowValue: { fontSize: 14, fontWeight: '800' },
+
+  // Action buttons / menu
+  actionBtnPrimary: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7,
+    paddingVertical: 13, borderRadius: 999,
+  },
+  actionBtnPrimaryText: { color: '#fff', fontSize: 14, fontWeight: '800' },
+  actionBtnSecondary: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7,
+    paddingVertical: 12, borderRadius: 999, borderWidth: StyleSheet.hairlineWidth,
+  },
+  actionBtnSecondaryText: { fontSize: 13.5, fontWeight: '700' },
+  actionBtnDots: {
+    width: 46, borderRadius: 999, borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  actionMenu: {
+    position: 'absolute', bottom: 52, right: 0, width: 220, zIndex: 9,
+    borderRadius: 14, borderWidth: 1,
+    overflow: 'hidden',
+    ...Platform.select({
+      ios: { shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 28, shadowOffset: { width: 0, height: 10 } },
+      android: { elevation: 12 },
+    }),
+  },
+  actionMenuTitle: {
+    fontSize: 9.5, fontWeight: '700', letterSpacing: 0.5,
+    padding: 9, paddingHorizontal: 13, borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  actionMenuItem: {
+    flexDirection: 'row', alignItems: 'center', gap: 11,
+    padding: 12, paddingHorizontal: 13,
+  },
+  actionMenuItemText: { fontSize: 13.5, fontWeight: '600' },
+
+  footerHint: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    marginTop: 16,
+  },
+  footerHintText: { fontSize: 10.5 },
 });
 
 export default DayViewScreen;

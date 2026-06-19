@@ -22,7 +22,11 @@
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
-      }
+      },
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -30,7 +34,26 @@
     "plugins": [
       "expo-secure-store",
       "expo-image-picker",
-      "expo-web-browser"
-    ]
+      "expo-web-browser",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#2F9266"
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "501e7f5e-cc44-44f8-beb5-d3423dd4578b"
+      }
+    },
+    "owner": "amendx",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/501e7f5e-cc44-44f8-beb5-d3423dd4578b"
+    }
   }
 }

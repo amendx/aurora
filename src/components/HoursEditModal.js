@@ -106,9 +106,11 @@ const HoursEditModal = ({ visible, onClose, onSave, shift, currentHours = {} }) 
   };
 
   const getPredicted = () => {
+    // Normalize "07h00" / "07h" → "07:00" and drop trailing "(N)"-style suffix
+    const norm = (t) => t.replace(/\s*\([^)]*\)/, '').replace(/(\d+)h(\d*)/, (_, h, m) => `${h.padStart(2, '0')}:${(m || '00').padStart(2, '0')}`).trim();
     const parts = (shift?.time || '').split(/\s[–-]\s/);
     if (parts.length === 2) {
-      return { start: parts[0].replace(/\s*\(.*\)/, '').trim(), end: parts[1].replace(/\s*\(.*\)/, '').trim() };
+      return { start: norm(parts[0]), end: norm(parts[1]) };
     }
     const defaults = { M: { start: '07:00', end: '13:00' }, T: { start: '13:00', end: '19:00' }, N: { start: '19:00', end: '07:00' } };
     return defaults[shift?.label?.charAt(0)] || defaults.M;
@@ -135,7 +137,9 @@ const HoursEditModal = ({ visible, onClose, onSave, shift, currentHours = {} }) 
   };
 
   const predicted = getPredicted();
-  const predMin = calcDuration(predicted.start, predicted.end);
+  const predMin = (typeof shift?.durationMinutes === 'number' && shift.durationMinutes > 0)
+    ? shift.durationMinutes
+    : calcDuration(predicted.start, predicted.end);
   const realMin = calcDuration(startTime, endTime);
   const diffMin = predMin != null && realMin != null ? realMin - predMin : null;
   const canSave = startTime.length === 5 && endTime.length === 5 && !startErr && !endErr;
@@ -280,12 +284,6 @@ const HoursEditModal = ({ visible, onClose, onSave, shift, currentHours = {} }) 
           </View>
         )}
 
-        {/* Notes row — shown when keyboard not up */}
-        <Pressable style={[s.notesRow, { borderColor: C.border.light }]}>
-          <Ionicons name="add" size={13} color={C.text.tertiary} />
-          <Text style={[s.notesText, { color: C.text.tertiary }]}>Adicionar observação · ocorrência</Text>
-        </Pressable>
-
         {/* CTAs */}
         <View style={s.ctaRow}>
           <Pressable
@@ -426,18 +424,6 @@ const s = StyleSheet.create({
     fontSize: 14, fontWeight: '700',
     fontFamily: Typography.fontFamily.semiBold,
   },
-
-  notesRow: {
-    flexDirection: 'row', alignItems: 'center',
-    gap: 8,
-    marginHorizontal: 18,
-    marginTop: 12,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderStyle: 'dashed',
-    borderRadius: 10,
-    paddingHorizontal: 12, paddingVertical: 10,
-  },
-  notesText: { fontSize: 12 },
 
   ctaRow: {
     flexDirection: 'row',

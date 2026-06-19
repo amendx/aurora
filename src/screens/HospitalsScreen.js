@@ -3,7 +3,7 @@ import { View, Text, Pressable, ScrollView, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useGroups } from '../contexts/GroupsContext';
-import { useColors, Typography, Spacing, BorderRadius, Shadows } from '../constants/DesignSystem';
+import { useColors, Spacing, BorderRadius, Shadows } from '../constants/DesignSystem';
 import * as SecureStore from 'expo-secure-store';
 import { useEffect, useState } from 'react';
 
@@ -46,14 +46,7 @@ export default function HospitalsScreen({ navigation }) {
 
   return (
     <View style={[s.root, { backgroundColor: C.background.secondary }]}>
-      <View style={[s.header, { paddingTop: insets.top + 12 }]}>
-        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={12} style={s.backBtn}>
-          <Ionicons name="chevron-back" size={22} color={C.primary} />
-        </Pressable>
-        <Text style={[s.title, { color: C.text.primary }]}>Meus hospitais</Text>
-      </View>
-
-      <ScrollView contentContainerStyle={{ padding: Spacing.screen, paddingBottom: insets.bottom + 32 }}>
+      <ScrollView contentContainerStyle={{ padding: Spacing.screen, paddingBottom: Spacing.lg }}>
         {institutions.length === 0 ? (
           <View style={[s.empty, { backgroundColor: C.background.elevated, borderColor: C.border.light }]}>
             <Ionicons name="business-outline" size={28} color={C.text.tertiary} style={{ marginBottom: 10 }} />
@@ -97,9 +90,6 @@ export default function HospitalsScreen({ navigation }) {
 
 const s = StyleSheet.create({
   root: { flex: 1 },
-  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: Spacing.screen, paddingBottom: 12, gap: 8 },
-  backBtn: { padding: 4 },
-  title: { fontSize: 20, fontFamily: Typography.fontFamily.display, fontWeight: '700' },
 
   list: { borderRadius: BorderRadius.md, borderWidth: 0.5, overflow: 'hidden' },
   row: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 13, gap: 12 },

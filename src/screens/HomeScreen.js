@@ -7,17 +7,27 @@ import {
   RefreshControl,
   Animated,
   Image,
+  Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AuthContext } from '../context/AuthContext';
 import { useShifts } from '../contexts/ShiftsContext';
+import { useOffers } from '../contexts/OffersContext';
+import { useOpenings } from '../contexts/OpeningsContext';
+import { usePrivacy } from '../contexts/PrivacyContext';
 import { useColors, Typography, Spacing, Shadows } from '../constants/DesignSystem';
 import ShiftBottomSheet from '../components/ShiftBottomSheet';
+import CederFlowSheet from './CederFlowSheet';
+import TrocarFlowSheet from './TrocarFlowSheet';
 import TodayCoworkersService from '../services/TodayCoworkersService';
 import { getGroupColors } from '../utils/GroupColorConfig';
+import { movementVisual, shiftPending } from '../utils/MovementColors';
+import { registerScrollToTop } from '../utils/scrollToTopBus';
 import LocalCache from '../services/LocalCache';
-import { getShiftValues, getFullShiftConfig, calculateShiftValueSync } from '../utils/ShiftValueCalculator';
+import { isAuroraOnly, isViewOnly } from '../utils/userSource';
+import { getShiftValues, getFullShiftConfig, calculateShiftValueSync, calculateShiftFinalValueSync } from '../utils/ShiftValueCalculator';
+import { getMonthTotalValue } from '../utils/MonthSummaryComputer';
 
 // ── Skeleton ──────────────────────────────────────────────────────────────────
 const SkeletonBox = ({ width = '100%', height = 20, style }) => {
@@ -69,7 +79,84 @@ const parseShiftTime = (timeStr) => {
 
 const HomeScreen = ({ navigation }) => {
   const { user } = useContext(AuthContext);
-  const { daysWithShifts, totalShifts, hoursReport, loading, loadedFor, loadMonthlyShifts, monthSummary: contextSummary } = useShifts();
+  const ctx = useShifts();
+  const { loading, loadedFor, loadMonthlyShifts, refreshShifts, monthSummary: contextSummary, getMonthCache } = ctx;
+  const { unreadCount: avisosUnread, offersReceived, swapsReceived, swapsSent, offersSent } = useOffers();
+  const { openings, myCededOpenings } = useOpenings();
+  const { valuesHidden, toggleValues } = usePrivacy();
+
+  // Mapa de plantões com estado pendente — pra colorir/etiquetar o card condensado.
+  // Cobre: troca que iniciei (shiftA.id), troca proposta a mim (shiftB.id), cessão direcionada que enviei (shiftSnapshot.id).
+  // Cessão ao grupo já remove o shift do calendário, não precisa tratar aqui.
+  const pendingByShiftId = React.useMemo(() => {
+    const map = {};
+    (swapsSent || []).forEach(sw => {
+      if (sw?.status === 'pending' && sw.shiftA?.id) map[String(sw.shiftA.id)] = { kind: 'swap', role: 'initiator', counterparty: sw.targetUserName };
+    });
+    (swapsReceived || []).forEach(sw => {
+      if (sw?.status === 'pending' && sw.shiftB?.id) map[String(sw.shiftB.id)] = { kind: 'swap', role: 'target', counterparty: sw.initiatorUserName };
+    });
+    (offersSent || []).forEach(o => {
+      if (o?.status === 'pending' && o.shiftSnapshot?.id) map[String(o.shiftSnapshot.id)] = { kind: 'offer', role: 'sender', counterparty: o.toUserName };
+    });
+    return map;
+  }, [swapsSent, swapsReceived, offersSent]);
+  const pendingActionable = offersReceived.length + swapsReceived.length;
+  const badgeCount = Math.max(avisosUnread, pendingActionable);
+
+  // Always pin Home to the CURRENT month — Reports/Charts may swap the active
+  // month in shiftsData, but Home must remain anchored to "today's" month.
+  const _now = new Date();
+  const _curMonth = _now.getMonth() + 1;
+  const _curYear  = _now.getFullYear();
+  const _curKey   = `${_curYear}-${_curMonth}`;
+  const _curCache = getMonthCache?.(_curMonth, _curYear);
+  const _activeIsCurrent = ctx.currentMonth === _curMonth && ctx.currentYear === _curYear;
+
+  const _rawDays       = _curCache?.daysWithShifts ?? (_activeIsCurrent ? ctx.daysWithShifts : []);
+  const totalShifts    = _curCache?.totalShifts    ?? (_activeIsCurrent ? ctx.totalShifts    : null);
+  const hoursReport    = _curCache?.hoursReport    ?? (_activeIsCurrent ? ctx.hoursReport    : null);
+
+  // Plantões cedidos ao grupo deste mês — re-injeta no calendário como cards
+  // amarelos (mesmo padrão do DayView). Sem isso o plantão "some" da Home
+  // depois de ceder, dando impressão de que ele se perdeu.
+  const daysWithShifts = React.useMemo(() => {
+    const activeCede = (myCededOpenings || []).filter(o => o.status === 'active');
+    if (activeCede.length === 0) return _rawDays;
+    const monthPrefix = `${_curYear}-${String(_curMonth).padStart(2, '0')}`;
+    const byDate = {};
+    (_rawDays || []).forEach(d => { byDate[d.date] = d; });
+    activeCede.forEach(o => {
+      const dateKey = o.dateKey || (o.startISO || '').slice(0, 10);
+      if (!dateKey || !dateKey.startsWith(monthPrefix)) return;
+      const snap = o.originShiftSnapshot || {};
+      const ghost = {
+        ...snap,
+        _pendingCede: o,
+        id: snap.id || `pending_${o.id}`,
+        label: snap.label || o.label,
+        date: snap.date || dateKey,
+        startISO: snap.startISO || o.startISO,
+        endISO: snap.endISO || o.endISO,
+        time: snap.time,
+        group: snap.group || o.group,
+        monthKey: snap.monthKey || o.monthKey,
+      };
+      if (byDate[dateKey]) {
+        if (!(byDate[dateKey].shifts || []).some(s => String(s.id) === String(ghost.id))) {
+          byDate[dateKey] = {
+            ...byDate[dateKey],
+            shifts: [...(byDate[dateKey].shifts || []), ghost],
+            shiftsCount: (byDate[dateKey].shiftsCount || 0) + 1,
+          };
+        }
+      } else {
+        const d = new Date(dateKey + 'T00:00:00');
+        byDate[dateKey] = { day: d.getDate(), date: dateKey, shifts: [ghost], shiftsCount: 1, originalData: null };
+      }
+    });
+    return Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
+  }, [_rawDays, myCededOpenings, _curMonth, _curYear]);
   const [refreshing, setRefreshing] = useState(false);
   const [groupColors, setGroupColors] = useState({});
   const [cachedSummary, setCachedSummary] = useState(null);
@@ -77,6 +164,7 @@ const HomeScreen = ({ navigation }) => {
   const [prevSummary, setPrevSummary] = useState(null);
   const [savedValues, setSavedValues] = useState(null);
   const [loyaltyConfig, setLoyaltyConfig] = useState(null);
+  const [timeEntriesByMonth, setTimeEntriesByMonth] = useState({});
   const C = useColors();
   const insets = useSafeAreaInsets();
   const s = makeStyles(C);
@@ -89,40 +177,65 @@ const HomeScreen = ({ navigation }) => {
     getShiftValues().then(v => setSavedValues(v)).catch(() => {});
     getFullShiftConfig().then(cfg => setLoyaltyConfig(cfg)).catch(() => {});
 
+    // RESET antes de buscar — evita vazamento entre sessões (logout aurora →
+    // login webClient mantinha summary do anterior se o novo não tinha cache).
+    setCachedSummary(null);
+    setPrevSummary(null);
     const now = new Date();
     const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    LocalCache.getSummary(userId, monthKey).then(s => s && setCachedSummary(s)).catch(() => {});
+    LocalCache.getSummary(userId, monthKey).then(s => { if (s) setCachedSummary(s); }).catch(() => {});
 
     const prevDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const prevKey = `${prevDate.getFullYear()}-${String(prevDate.getMonth() + 1).padStart(2, '0')}`;
     LocalCache.getSummary(userId, prevKey).then(s => s && setPrevSummary(s)).catch(() => {});
+
+    // Load time-entries for current + next month so upcoming-shift values can
+    // include extra hours when the user has registered real start/end times.
+    const nextDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const nextKey = `${nextDate.getFullYear()}-${String(nextDate.getMonth() + 1).padStart(2, '0')}`;
+    Promise.all([
+      LocalCache.getTimeEntries(userId, monthKey).catch(() => ({})),
+      LocalCache.getTimeEntries(userId, nextKey).catch(() => ({})),
+    ]).then(([cur, nxt]) => setTimeEntriesByMonth({ [monthKey]: cur || {}, [nextKey]: nxt || {} }));
   }, [userId]);
 
   const [bsVisible, setBsVisible] = useState(false);
   const [bsShifts, setBsShifts] = useState([]);
   const [bsDate, setBsDate] = useState(null);
+  const [cedeShift, setCedeShift] = useState(null);
+  const [trocarShift, setTrocarShift] = useState(null);
 
   const handleRefresh = async () => {
     setRefreshing(true);
     const now = new Date();
-    await loadMonthlyShifts(now.getMonth() + 1, now.getFullYear(), true);
+    // refreshShifts: aurora = Firestore-only; webClient = monthly + só dias que mudaram.
+    if (refreshShifts) {
+      await refreshShifts(now.getMonth() + 1, now.getFullYear());
+    } else {
+      await loadMonthlyShifts(now.getMonth() + 1, now.getFullYear(), true);
+    }
     setRefreshing(false);
   };
+
+  const scrollRef = useRef(null);
+  useEffect(() => registerScrollToTop('home', () => {
+    scrollRef.current?.scrollTo?.({ y: 0, animated: true });
+  }), []);
 
   const loadedForRef = useRef(loadedFor);
   useEffect(() => { loadedForRef.current = loadedFor; }, [loadedFor]);
 
   useEffect(() => {
-    const reload = (force = false) => {
+    const reload = () => {
       const now = new Date();
       const m = now.getMonth() + 1;
       const y = now.getFullYear();
       const key = `${y}-${m}`;
-      if (!force && loadedForRef.current === key && !loading) return;
+      if (loadedForRef.current === key && !loading) return;
       loadMonthlyShifts(m, y);
     };
     reload();
-    const unsubscribe = navigation?.addListener?.('focus', () => reload(true));
+    const unsubscribe = navigation?.addListener?.('focus', reload);
     return unsubscribe;
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -135,7 +248,20 @@ const HomeScreen = ({ navigation }) => {
     .filter(s => new Date(s.date + 'T00:00:00') >= today)
     .slice(0, 5);
 
+  // Clique no card de plantão na Home → DayView com esse shift em foco.
+  // Mesma experiência do calendário (status banner, ações por status, confirm
+  // sheet). Antes abria o ShiftBottomSheet — substituído.
   const openShiftBottomSheet = (shift) => {
+    if (navigation?.navigate) {
+      // initialDate de DayView espera Date — caller original (CalendarScreen)
+      // converte do string yyyy-mm-dd assim. Replicando.
+      navigation.navigate('DayView', {
+        date: new Date(shift.date + 'T00:00:00'),
+        focusShiftId: shift.id,
+      });
+      return;
+    }
+    // Fallback (caso navegação não disponível por algum motivo): bottom sheet.
     const dayData = (daysWithShifts || []).find(d => d.date === shift.date);
     setBsShifts(dayData?.shifts || [shift]);
     setBsDate(new Date(shift.date + 'T00:00:00'));
@@ -170,16 +296,33 @@ const HomeScreen = ({ navigation }) => {
             <Text style={s.headerDate}>{dateStr}</Text>
             <Text style={s.headerGreeting}>Olá, {firstName}</Text>
           </View>
-          <Pressable style={s.avatarWrap} onPress={() => navigation?.navigate?.('profile')}>
-            {user?.photo ? (
-              <Image source={{ uri: user.photo }} style={s.avatarImg} />
-            ) : (
-              <View style={[s.avatarFallback, { backgroundColor: C.accentSoft }]}>
-                <Text style={s.avatarInitial}>{firstName.charAt(0).toUpperCase()}</Text>
-              </View>
-            )}
-            <View style={s.avatarStatusDot} />
-          </Pressable>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+            <Pressable onPress={toggleValues} hitSlop={8} style={s.bellBtn}>
+              <Ionicons name={valuesHidden ? 'eye-off-outline' : 'eye-outline'} size={22} color={C.text.primary} />
+            </Pressable>
+            <Pressable
+              onPress={() => navigation?.navigate?.('AvisosScreen')}
+              hitSlop={8}
+              style={s.bellBtn}
+            >
+              <Ionicons name="notifications-outline" size={22} color={C.text.primary} />
+              {badgeCount > 0 && (
+                <View style={[s.bellBadge, { backgroundColor: C.error }]}>
+                  <Text style={s.bellBadgeText}>{badgeCount > 9 ? '9+' : badgeCount}</Text>
+                </View>
+              )}
+            </Pressable>
+            <Pressable style={s.avatarWrap} onPress={() => navigation?.navigate?.('Profile')}>
+              {user?.photo ? (
+                <Image source={{ uri: user.photo }} style={s.avatarImg} />
+              ) : (
+                <View style={[s.avatarFallback, { backgroundColor: C.accentSoft }]}>
+                  <Text style={s.avatarInitial}>{firstName.charAt(0).toUpperCase()}</Text>
+                </View>
+              )}
+              <View style={s.avatarStatusDot} />
+            </Pressable>
+          </View>
         </View>
       </View>
     );
@@ -190,13 +333,8 @@ const HomeScreen = ({ navigation }) => {
     const now = new Date();
     const monthName = now.toLocaleDateString('pt-BR', { month: 'long' });
 
-    const projected = monthSummary
-      ? (monthSummary.totalGrossValue || 0) + (monthSummary.totalLoyaltyValue || 0) + (monthSummary.totalBonusValue || 0)
-      : null;
-
-    const prevProjected = prevSummary
-      ? (prevSummary.totalGrossValue || 0) + (prevSummary.totalLoyaltyValue || 0) + (prevSummary.totalBonusValue || 0)
-      : null;
+    const projected     = getMonthTotalValue(monthSummary);
+    const prevProjected = getMonthTotalValue(prevSummary);
 
     const deltaPct = projected != null && prevProjected && prevProjected > 0
       ? Math.round(((projected - prevProjected) / prevProjected) * 100)
@@ -208,23 +346,20 @@ const HomeScreen = ({ navigation }) => {
         ? Math.round((monthSummary.totalScheduledMinutes || 0) / 60)
         : null;
 
+    const shiftsCount = totalShifts ?? monthSummary?.shiftCount ?? null;
+
     const remaining = upcomingShifts.length;
 
-    // Fidelização — show the % tier the user has already unlocked based on hours done
-    const loyaltyTiers = loyaltyConfig?.loyaltyOptions;
-    const earnedTier = loyaltyTiers?.length > 0 && totalHours != null
-      ? [...loyaltyTiers]
-          .sort((a, b) => b.minHours - a.minHours)
-          .find(o => totalHours >= o.minHours)
-      : null;
-    const loyaltyPct = earnedTier ? earnedTier.percentage : null;
+    // Per-hospital loyalty makes a single global % meaningless on the hero —
+    // slot is intentionally left for a future stat. See HospitalDetailScreen
+    // for per-hospital fidelização configuration.
 
     return (
       <View style={s.heroWrap}>
         <View style={s.heroCard}>
           <Text style={s.heroLabel}>Ganhos previstos · {monthName}</Text>
           <Text style={s.heroValue}>
-            {loading ? '—' : projected != null ? fmtBRLk(projected) : '—'}
+            {loading ? '—' : projected != null ? (valuesHidden ? 'R$ ••••' : fmtBRLk(projected)) : '—'}
           </Text>
           <View style={s.heroSubRow}>
             {deltaPct != null && (
@@ -240,7 +375,7 @@ const HomeScreen = ({ navigation }) => {
               </View>
             )}
             {prevProjected != null && (
-              <Text style={s.heroDeltaRef}>vs. mês ant. · {fmtBRLk(prevProjected)}</Text>
+              <Text style={s.heroDeltaRef}>vs. mês ant. · {valuesHidden ? '••••' : fmtBRLk(prevProjected)}</Text>
             )}
           </View>
 
@@ -248,7 +383,7 @@ const HomeScreen = ({ navigation }) => {
 
           <View style={s.heroStatsRow}>
             <View style={s.heroStat}>
-              <Text style={s.heroStatValue}>{loading ? '—' : totalShifts ?? '—'}</Text>
+              <Text style={s.heroStatValue}>{loading ? '—' : shiftsCount ?? '—'}</Text>
               <Text style={s.heroStatLabel}>plantões</Text>
             </View>
             <View style={s.heroStatDivider} />
@@ -258,19 +393,8 @@ const HomeScreen = ({ navigation }) => {
             </View>
             <View style={s.heroStatDivider} />
             <View style={s.heroStat}>
-              {loyaltyPct != null ? (
-                <>
-                  <Text style={[s.heroStatValue, { color: C.money }]}>
-                    {loading ? '—' : `${loyaltyPct}%`}
-                  </Text>
-                  <Text style={s.heroStatLabel}>fideliz.</Text>
-                </>
-              ) : (
-                <>
-                  <Text style={[s.heroStatValue, { color: C.warning }]}>{loading ? '—' : remaining}</Text>
-                  <Text style={s.heroStatLabel}>restam</Text>
-                </>
-              )}
+              <Text style={[s.heroStatValue, { color: C.warning }]}>{loading ? '—' : remaining}</Text>
+              <Text style={s.heroStatLabel}>próximos</Text>
             </View>
           </View>
         </View>
@@ -286,7 +410,17 @@ const HomeScreen = ({ navigation }) => {
     const typeKey = shiftTypeKey(shift);
     const badgeColor = SHIFT_TYPE_COLOR[typeKey] || C.primary;
 
-    const value = calculateShiftValueSync(shift, shift.date, savedValues);
+    const pending = shiftPending(shift, pendingByShiftId);
+    const mv = pending ? movementVisual(C, pending.kind, pending.role) : null;
+    const accentColor = mv ? mv.color : groupColor;
+    const pendingTag = mv ? mv.tag : null;
+
+    const shiftMonthKey = (shift.date || '').slice(0, 7);
+    const realEntry = timeEntriesByMonth?.[shiftMonthKey]?.[shift.id] || null;
+    const monthlyHours = hoursReport?.standardHours || ((monthSummary?.totalScheduledMinutes || 0) / 60) || 0;
+    const value = loyaltyConfig
+      ? calculateShiftFinalValueSync(shift, shift.date, loyaltyConfig, monthlyHours, realEntry)
+      : calculateShiftValueSync(shift, shift.date, savedValues);
 
     let coworkers = TodayCoworkersService.getCoworkers(shift.id);
     if (coworkers.length === 0 && shift?.originalData?.coworkers?.length > 0) {
@@ -298,11 +432,15 @@ const HomeScreen = ({ navigation }) => {
     return (
       <Pressable
         key={index}
-        style={({ pressed }) => [s.shiftCard, pressed && { opacity: 0.85 }]}
+        style={({ pressed }) => [
+          s.shiftCard,
+          mv && { borderColor: mv.color + '55', borderWidth: 1 },
+          pressed && { opacity: 0.85 },
+        ]}
         onPress={() => openShiftBottomSheet(shift)}
       >
-        {/* Left accent bar — group color */}
-        <View style={[s.shiftAccentBar, { backgroundColor: groupColor }]} />
+        {/* Left accent bar — group color (ou amarelo se pendente) */}
+        <View style={[s.shiftAccentBar, { backgroundColor: accentColor }]} />
 
         {/* Date column */}
         <View style={s.shiftDateCol}>
@@ -314,11 +452,18 @@ const HomeScreen = ({ navigation }) => {
 
         {/* Info column */}
         <View style={s.shiftInfoCol}>
-          {/* Type badge + time */}
+          {/* Type badge + time + tag pendente */}
           <View style={s.shiftTopRow}>
             <View style={[s.shiftTypeBadge, { backgroundColor: badgeColor + '1f' }]}>
               <Text style={[s.shiftTypeBadgeText, { color: badgeColor }]}>{shiftLabel(shift)}</Text>
             </View>
+            {pendingTag && (
+              <View style={{ paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4, backgroundColor: mv.color + '22' }}>
+                <Text style={{ fontSize: 8.5, fontFamily: Typography.fontFamily.bold, color: mv.color, letterSpacing: 0.4, textTransform: 'uppercase' }}>
+                  {pendingTag}
+                </Text>
+              </View>
+            )}
             {timeStr ? (
               <Text style={s.shiftTime}>{timeStr}</Text>
             ) : null}
@@ -366,7 +511,7 @@ const HomeScreen = ({ navigation }) => {
 
         {/* Value column */}
         <View style={s.shiftValueCol}>
-          {value > 0 && <Text style={s.shiftValue}>{fmtBRLk(value)}</Text>}
+          {value > 0 && <Text style={s.shiftValue}>{valuesHidden ? 'R$ ••••' : fmtBRLk(value)}</Text>}
           <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
         </View>
       </Pressable>
@@ -382,49 +527,53 @@ const HomeScreen = ({ navigation }) => {
   );
 
   // ── Quick Actions ─────────────────────────────────────────────────────────────
-  const renderActions = () => (
-    <ScrollView
-      horizontal
-      showsHorizontalScrollIndicator={false}
-      contentContainerStyle={s.actionsRow}
+  const renderActionTile = ({ icon, label, iconColor, iconBg, onPress, disabled, hasDot }) => (
+    <Pressable
+      key={label}
+      style={({ pressed }) => [s.actionTile, disabled && s.actionTileDisabled, pressed && !disabled && { opacity: 0.8 }]}
+      onPress={onPress}
+      disabled={disabled}
     >
-      <Pressable style={({ pressed }) => [s.actionBtn, pressed && { opacity: 0.8 }]} onPress={() => navigation?.navigate?.('ChartsScreen')}>
-        <View style={s.actionIcon}>
-          <Ionicons name="bar-chart" size={18} color={C.primary} />
-        </View>
-        <Text style={s.actionLabel}>Gráficos</Text>
-        <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
-      </Pressable>
-      <Pressable style={({ pressed }) => [s.actionBtn, pressed && { opacity: 0.8 }]} onPress={() => navigation?.navigate?.('Reports')}>
-        <View style={[s.actionIcon, { backgroundColor: C.moneySoft }]}>
-          <Ionicons name="document-text" size={18} color={C.money} />
-        </View>
-        <Text style={s.actionLabel}>Relatórios</Text>
-        <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
-      </Pressable>
-      <Pressable style={[s.actionBtn, s.actionBtnDisabled]} disabled>
-        <View style={[s.actionIcon, { backgroundColor: C.background.secondary }]}>
-          <Ionicons name="medkit" size={18} color={C.text.tertiary} />
-        </View>
-        <Text style={[s.actionLabel, s.actionLabelDisabled]}>Plantões</Text>
-        <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
-      </Pressable>
-      <Pressable style={[s.actionBtn, s.actionBtnDisabled]} disabled>
-        <View style={[s.actionIcon, { backgroundColor: C.background.secondary }]}>
-          <Ionicons name="people" size={18} color={C.text.tertiary} />
-        </View>
-        <Text style={[s.actionLabel, s.actionLabelDisabled]}>Grupos</Text>
-        <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
-      </Pressable>
-    </ScrollView>
+      <View style={[s.actionTileIcon, { backgroundColor: iconBg }]}>
+        <Ionicons name={icon} size={20} color={iconColor} />
+        {hasDot && <View style={s.actionTileDot} />}
+      </View>
+      <Text style={[s.actionTileLabel, disabled && s.actionLabelDisabled]} numberOfLines={1}>{label}</Text>
+    </Pressable>
+  );
+
+  // Bolinha de notificação na tile de Movimentações.
+  // Acende quando há algo pendente de ação do usuário:
+  //   - troca direcionada recebida (swapsReceived)
+  //   - cessão direcionada recebida (offersReceived)
+  //   - cessão minha aguardando (myCededOpenings) — feedback de "ainda lá"
+  const hasMovimentacoes = (swapsReceived?.length || 0) > 0
+    || (offersReceived?.length || 0) > 0
+    || (myCededOpenings || []).some(o => o.status === 'active' || !o.status);
+
+  // Bolinha de notificação na tile de Vagas: acende quando há vaga em aberto
+  // nos meus grupos pra assumir/demonstrar interesse.
+  const hasVagas = (openings?.length || 0) > 0;
+
+  const renderActions = () => (
+    <View style={s.actionsGrid}>
+      {renderActionTile({ icon: 'document-text',  label: 'Relatórios', iconColor: C.money,   iconBg: C.moneySoft,  onPress: () => navigation?.navigate?.('Reports') })}
+      {/* [WEBCLIENT-BRIDGE] `|| user?.auroraOnlyMode` rotea o webClient migrado pro Openings aurora.
+          Conta só-visualização (PlantãoAPI) não vê Vagas/Movimentações. */}
+      {!isViewOnly(user) && renderActionTile({ icon: 'medkit',         label: 'Vagas',      iconColor: C.money,   iconBg: C.moneySoft,  hasDot: hasVagas, onPress: () => navigation?.navigate?.(isAuroraOnly(user) ? 'OpeningsScreen' : 'NetworkVacanciesScreen') })}
+      {!isViewOnly(user) && renderActionTile({ icon: 'swap-horizontal', label: 'Movimentações', iconColor: C.primary, iconBg: C.accentSoft, hasDot: hasMovimentacoes, onPress: () => navigation?.navigate?.('TrocasAbertas') })}
+      {/* Aura (IA do Aurora): conselho de escala */}
+      {renderActionTile({ icon: 'sparkles', label: 'Aura', iconColor: C.primary, iconBg: C.accentSoft, onPress: () => navigation?.navigate?.('AuraScreen') })}
+    </View>
   );
 
   return (
     <>
       <ScrollView
+        ref={scrollRef}
         style={s.container}
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: insets.bottom + Spacing.xl }}
+        contentContainerStyle={{ paddingBottom: Spacing.lg }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
       >
         {renderHeader()}
@@ -477,7 +626,11 @@ const HomeScreen = ({ navigation }) => {
         onClose={() => setBsVisible(false)}
         shifts={bsShifts}
         selectedDate={bsDate}
+        onCede={(sh) => { setBsVisible(false); setCedeShift(sh); }}
+        onTrocar={(sh) => { setBsVisible(false); setTrocarShift(sh); }}
       />
+      {cedeShift && <CederFlowSheet key={`cede-${cedeShift.id}`} visible shift={cedeShift} onClose={() => setCedeShift(null)} />}
+      {trocarShift && <TrocarFlowSheet key={`trocar-${trocarShift.id}`} visible shift={trocarShift} onClose={() => setTrocarShift(null)} />}
     </>
   );
 };
@@ -547,6 +700,21 @@ const makeStyles = (C) => ({
     borderWidth: 2,
     borderColor: C.background.primary,
   },
+  bellBtn: {
+    width: 38, height: 38, borderRadius: 19,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: C.background.elevated,
+    position: 'relative',
+  },
+  bellBadge: {
+    position: 'absolute',
+    top: 2, right: 2,
+    minWidth: 16, height: 16,
+    paddingHorizontal: 4,
+    borderRadius: 8,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  bellBadgeText: { color: '#fff', fontSize: 9, fontWeight: '800' },
 
   // ── Hero card ────────────────────────────────────────────────────────────────
   heroWrap: {
@@ -852,40 +1020,50 @@ const makeStyles = (C) => ({
   },
 
   // ── Quick Actions ─────────────────────────────────────────────────────────────
-  actionsRow: {
+  actionsGrid: {
     flexDirection: 'row',
     gap: 10,
-    paddingRight: 4,
   },
-  actionBtn: {
-    width: 170,
+  actionTile: {
+    flex: 1,
+    aspectRatio: 1,
     backgroundColor: C.background.elevated,
     borderRadius: 14,
     paddingVertical: 14,
-    paddingHorizontal: 14,
-    flexDirection: 'row',
+    paddingHorizontal: 10,
     alignItems: 'center',
-    gap: 12,
+    justifyContent: 'center',
+    gap: 8,
     borderWidth: 0.5,
     borderColor: C.border.light,
     ...Shadows.small,
   },
-  actionBtnDisabled: {
+  actionTileDisabled: {
     opacity: 0.45,
   },
-  actionIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
+  actionTileIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: C.accentSoft,
   },
-  actionLabel: {
-    fontSize: 14,
+  actionTileDot: {
+    position: 'absolute',
+    top: -2,
+    right: -2,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: C.error,
+    borderWidth: 1.5,
+    borderColor: C.background.elevated,
+  },
+  actionTileLabel: {
+    fontSize: 12,
     fontFamily: Typography.fontFamily.semiBold,
     color: C.text.primary,
-    flex: 1,
+    textAlign: 'center',
   },
   actionLabelDisabled: {
     color: C.text.tertiary,

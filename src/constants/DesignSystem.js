@@ -89,6 +89,8 @@ export const Colors = {
     success:    '#41b883',
     warning:    '#f0a843',
     warningSoft:'rgba(240,168,67,0.15)',
+    movement:    '#d97a2e',
+    movementSoft:'rgba(217,122,46,0.15)',
     error:      '#e05c5c',
     info:       '#5a8dd1',
     border: {
@@ -124,6 +126,8 @@ export const Colors = {
   // Semantic Colors
   success: '#34C759',        // iOS Green
   warning: '#E08A00',        // Muted amber — Direction A
+  movement: '#C2611C',       // Burnt orange — plantão alterado (troca/cessão/oferta)
+  movementSoft: 'rgba(194,97,28,0.10)',
   error: '#E0524C',          // Muted red — Direction A
   info: '#5A8DD1',           // Steel blue — Direction A
   

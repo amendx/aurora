@@ -12,10 +12,12 @@ Plataformas de gestão de escalas resolveram parte do problema, centralizando as
 
 Aurora é esse app.
 
-Construído em React Native com Expo, Aurora oferece:
+Um app nativo, rápido e bonito. Aurora oferece:
 
 - **Calendário visual** de plantões com cores por instituição
-- **Relatórios financeiros** automáticos baseados no valor/hora configurado
+- **Relatórios financeiros** automáticos com fidelização e valores por hospital
+- **Trocas e cessões** de plantão entre colegas, com central de avisos
+- **Vagas e plantões abertos** — pegue plantões cedidos e veja onde falta gente
 - **Rede de colegas** — veja quem está escalado com você hoje
 - **Integração nativa** com sua plataforma de gestão de escalas
 - **Design premium** com dark mode e animações suaves
@@ -24,7 +26,7 @@ Construído em React Native com Expo, Aurora oferece:
 
 Aurora segue princípios simples:
 
-**Velocidade acima de tudo.** O app deve abrir e mostrar seus plantões em menos de um segundo. Cache agressivo, skeleton loading, zero espera desnecessária.
+**Velocidade acima de tudo.** O app deve abrir e mostrar seus plantões em menos de um segundo. Carregamento instantâneo, zero espera desnecessária.
 
 **Mínimo de fricção.** Se você já tem conta numa plataforma compatível, não precisa criar outra conta. Login em dois toques.
 
@@ -42,32 +44,20 @@ Aurora está crescendo além do app mobile. O roadmap é claro:
   <div style="background:rgba(63,169,167,0.1); border:1px solid rgba(63,169,167,0.25); border-radius:14px; padding:1.25rem">
     <div style="font-family:'IBM Plex Mono',monospace; font-size:0.68rem; letter-spacing:0.08em; text-transform:uppercase; color:#3FA9A7; margin-bottom:0.5rem">Mobile · Ativo</div>
     <div style="font-weight:800; font-size:1.05rem; color:#E8F4FD; margin-bottom:0.5rem">App iOS & Android</div>
-    <div style="font-size:0.85rem; color:#97cafc; line-height:1.5">React Native / Expo. Para profissionais de saúde. Plantões, financeiro, calendário, colegas.</div>
+    <div style="font-size:0.85rem; color:#97cafc; line-height:1.5">App nativo para profissionais de saúde. Plantões, financeiro, calendário, colegas.</div>
   </div>
   <div style="background:rgba(255,159,10,0.08); border:1px solid rgba(255,159,10,0.25); border-radius:14px; padding:1.25rem">
     <div style="font-family:'IBM Plex Mono',monospace; font-size:0.68rem; letter-spacing:0.08em; text-transform:uppercase; color:#FF9F0A; margin-bottom:0.5rem">Web · Em construção</div>
     <div style="font-weight:800; font-size:1.05rem; color:#E8F4FD; margin-bottom:0.5rem">Dashboard Web</div>
-    <div style="font-size:0.85rem; color:#97cafc; line-height:1.5">React. Para profissionais e gestores. Mesmo design language, funcionalidades de gestão de equipe.</div>
+    <div style="font-size:0.85rem; color:#97cafc; line-height:1.5">Para profissionais e gestores. Mesma linguagem visual, com funcionalidades de gestão de equipe.</div>
   </div>
   <div style="background:rgba(65,184,131,0.08); border:1px solid rgba(65,184,131,0.2); border-radius:14px; padding:1.25rem">
     <div style="font-family:'IBM Plex Mono',monospace; font-size:0.68rem; letter-spacing:0.08em; text-transform:uppercase; color:#41b883; margin-bottom:0.5rem">Docs · Ativo</div>
     <div style="font-weight:800; font-size:1.05rem; color:#E8F4FD; margin-bottom:0.5rem">Documentação</div>
-    <div style="font-size:0.85rem; color:#97cafc; line-height:1.5">VitePress. Guia do usuário, funcionalidades, FAQ, referência técnica — você está aqui.</div>
+    <div style="font-size:0.85rem; color:#97cafc; line-height:1.5">Guia do usuário, funcionalidades e perguntas frequentes — você está aqui.</div>
   </div>
 </div>
 </div>
-
-## Stack técnico
-
-| Camada | Tecnologia |
-|--------|-----------|
-| Mobile | React Native + Expo SDK 54 |
-| Web (em breve) | React + mesmo design system |
-| Auth | Firebase Authentication + SecureStore |
-| Dados | PlantaoAPI (REST) + AsyncStorage cache + Firestore shadow |
-| Docs | VitePress |
-
-→ [Ver arquitetura completa](/guide/architecture)
 
 ## Contato
 

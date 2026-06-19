@@ -6,6 +6,7 @@ import {
   Pressable,
   StyleSheet,
   Animated,
+  Easing,
   Dimensions,
 } from 'react-native';
 import Svg, { Path, Circle, Rect, Line, Text as SvgText, Defs, LinearGradient, Stop } from 'react-native-svg';
@@ -14,6 +15,7 @@ import { useShifts } from '../contexts/ShiftsContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useColors, Typography, Spacing, BorderRadius, Shadows } from '../constants/DesignSystem';
 import { calculateShiftValueWithBreakdown, computeShiftValue } from '../utils/ShiftValueCalculator';
+import { getMonthTotalValue } from '../utils/MonthSummaryComputer';
 import { formatMoney } from '../utils/MoneyFormatter';
 import TimeUtils from '../utils/TimeUtils';
 import { AuthContext } from '../context/AuthContext';
@@ -204,12 +206,32 @@ function InsightCard({ iconName, iconColor, iconBg, title, value, C }) {
 }
 
 // ── SkeletonBox ───────────────────────────────────────────────────────────────
-const SkeletonBox = ({ width = '100%', height = 20, style }) => (
-  <View style={[{ width, height, backgroundColor: '#90a4ae22', borderRadius: 6 }, style]} />
-);
+// Shimmer suave entre 0.4 e 1.0 — mesmo padrão do ReportsScreen.
+const SkeletonBox = ({ width = '100%', height = 20, style }) => {
+  const anim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(anim, { toValue: 1, duration: 900, useNativeDriver: false }),
+        Animated.timing(anim, { toValue: 0, duration: 900, useNativeDriver: false }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, []);
+  const opacity = anim.interpolate({ inputRange: [0, 1], outputRange: [0.4, 1] });
+  return (
+    <Animated.View
+      style={[{ width, height, backgroundColor: '#90a4ae22', borderRadius: 6, opacity }, style]}
+    />
+  );
+};
 
-// ── ChartsScreen ──────────────────────────────────────────────────────────────
-export default function ChartsScreen() {
+// ── ChartsView ──────────────────────────────────────────────────────────────
+// Componente embedável (era ChartsScreen como overlay). Agora vive como aba
+// dentro de ReportsScreen. Mantém a ScrollView própria — cada aba do Reports
+// tem seu próprio scroll independente.
+export function ChartsView() {
   const { prefetchMonth, getMonthCache } = useShifts();
   const C = useColors();
   const insets = useSafeAreaInsets();
@@ -237,14 +259,24 @@ export default function ChartsScreen() {
     const key = ++loadKey.current;
     setLoading(true);
     setSelectedIdx(null);
-    Animated.timing(fadeAnim, { toValue: 0.4, duration: 160, useNativeDriver: true }).start();
+
+    // Limpa os dados → renderiza skeleton (condição já existente nos blocos).
+    // Reset fadeAnim p/ 1 — o gating `monthlyData.length > 0 ? fadeAnim : 1`
+    // mantém o skeleton em opacidade total enquanto carrega.
+    setMonthlyData([]);
+    fadeAnim.setValue(1);
+
+    // Tempo mínimo de skeleton — mesmo com cache instantâneo, mantém a
+    // transição perceptível em vez de "piscar" os dados de uma vez.
+    const MIN_SKELETON_MS = 450;
+    const startedAt = Date.now();
+
     try {
       const months = buildMonthList(n);
       const results = [];
+      // Coleta TODOS os meses antes de comitar — evita re-render parcial.
       for (const { month, year } of months) {
         if (loadKey.current !== key) return;
-
-        // Try LocalCache first for summary
         let totalValue = 0;
         let totalHours = 0;
         let count = 0;
@@ -253,16 +285,14 @@ export default function ChartsScreen() {
           const mk = `${year}-${String(month).padStart(2, '0')}`;
           const cached = await LocalCache.getSummary(user.id, mk);
           if (cached && (cached.totalGrossValue || cached.totalShifts)) {
-            totalValue = (cached.totalGrossValue || 0) + (cached.totalLoyaltyValue || 0) + (cached.totalBonusValue || 0);
+            totalValue = getMonthTotalValue(cached) ?? 0;
             totalHours = cached.totalHours || 0;
             count = cached.totalShifts || 0;
             results.push({ label: MONTH_NAMES_SHORT[month - 1], year, month, value: totalValue, hours: totalHours, count });
-            if (loadKey.current === key) setMonthlyData([...results]);
             continue;
           }
         }
 
-        // Fallback: compute from shift data (prefetch keeps global state untouched)
         await prefetchMonth(month, year);
         const cached = getMonthCache(month, year);
         const days = cached?.daysWithShifts || [];
@@ -270,7 +300,9 @@ export default function ChartsScreen() {
           const dateStr = dayData.date;
           let realHoursMap = {};
           try {
-            const saved = await SecureStore.getItemAsync(`real_hours_${dateStr}`);
+            const uid = String(user?.id || '');
+            const saved = (uid && await SecureStore.getItemAsync(`real_hours_${uid}_${dateStr}`))
+              || await SecureStore.getItemAsync(`real_hours_${dateStr}`);
             if (saved) realHoursMap = JSON.parse(saved);
           } catch (_) {}
           for (let i = 0; i < (dayData.shifts || []).length; i++) {
@@ -295,14 +327,31 @@ export default function ChartsScreen() {
           }
         }
         results.push({ label: MONTH_NAMES_SHORT[month - 1], year, month, value: totalValue, hours: totalHours, count });
-        if (loadKey.current === key) setMonthlyData([...results]);
       }
+
+      if (loadKey.current !== key) return;
+
+      // Espera completar o mínimo do skeleton antes de comitar.
+      const elapsed = Date.now() - startedAt;
+      if (elapsed < MIN_SKELETON_MS) {
+        await new Promise(r => setTimeout(r, MIN_SKELETON_MS - elapsed));
+      }
+      if (loadKey.current !== key) return;
+
+      // Crossfade skeleton → dados reais: começa em 0, anima até 1.
+      fadeAnim.setValue(0);
+      setMonthlyData(results);
     } catch (e) {
       // noop
     } finally {
       if (loadKey.current === key) {
         setLoading(false);
-        Animated.timing(fadeAnim, { toValue: 1, duration: 240, useNativeDriver: true }).start();
+        Animated.timing(fadeAnim, {
+          toValue: 1,
+          duration: 420,
+          easing: Easing.bezier(0.4, 0, 0.2, 1),
+          useNativeDriver: true,
+        }).start();
       }
     }
   }, [prefetchMonth, getMonthCache, user?.id]);
@@ -338,7 +387,7 @@ export default function ChartsScreen() {
   return (
     <ScrollView
       style={[s.root, { backgroundColor: C.background.secondary }]}
-      contentContainerStyle={{ paddingBottom: insets.bottom + 32 }}
+      contentContainerStyle={{ paddingBottom: Spacing.lg }}
       showsVerticalScrollIndicator={false}
     >
       {/* Period segmented control */}

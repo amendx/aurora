@@ -26,29 +26,9 @@ export default defineConfig({
       { text: 'Início', link: '/' },
       { text: 'Funcionalidades', link: '/features' },
       { text: 'Começar', link: '/getting-started' },
-      // {
-      //   text: 'Para Devs',
-      //   items: [
-      //     { text: '⌥ Arquitetura', link: '/guide/architecture' },
-      //     { text: '⌥ Guia do Desenvolvedor', link: '/guide/developer' },
-      //   ],
-      // },
-      { text: 'Roadmap', link: '/roadmap' },
       { text: 'FAQ', link: '/faq' },
       { text: 'Sobre', link: '/about' },
     ],
-
-    sidebar: {
-      '/guide/': [
-        {
-          text: 'Guia Técnico',
-          items: [
-            { text: 'Arquitetura', link: '/guide/architecture' },
-            { text: 'Desenvolvedor', link: '/guide/developer' },
-          ],
-        },
-      ],
-    },
 
     socialLinks: [
       { icon: 'github', link: 'https://github.com/amendx/Aurora' },
