@@ -161,6 +161,11 @@ export default function AuraAvailabilityScreen({ navigation }) {
     setBTurnos(prev => prev.includes(k) ? prev.filter(t => t !== k) : [...prev, k]);
 
   const _validTime = (t) => /^([01]?\d|2[0-3]):[0-5]\d$/.test(t.trim());
+  const _maskTime = (t) => {
+    const d = String(t).replace(/\D/g, '').slice(0, 4);
+    if (d.length <= 2) return d;
+    return `${d.slice(0, 2)}:${d.slice(2)}`;
+  };
   const blockReady = bMode === 'turno' ? bTurnos.length > 0 : (_validTime(bStart) && _validTime(bEnd));
 
   const handleAddBlock = () => {
@@ -274,9 +279,9 @@ export default function AuraAvailabilityScreen({ navigation }) {
           <>
             <Text style={s.formLabel}>Horário (HH:mm)</Text>
             <View style={s.timeRow}>
-              <TextInput style={[s.input, s.timeInput]} placeholder="18:00" placeholderTextColor={C.text.tertiary} value={bStart} onChangeText={setBStart} keyboardType="numbers-and-punctuation" />
+              <TextInput style={[s.input, s.timeInput]} placeholder="18:00" placeholderTextColor={C.text.tertiary} value={bStart} onChangeText={(t) => setBStart(_maskTime(t))} keyboardType="number-pad" maxLength={5} />
               <Text style={s.timeSep}>até</Text>
-              <TextInput style={[s.input, s.timeInput]} placeholder="20:00" placeholderTextColor={C.text.tertiary} value={bEnd} onChangeText={setBEnd} keyboardType="numbers-and-punctuation" />
+              <TextInput style={[s.input, s.timeInput]} placeholder="20:00" placeholderTextColor={C.text.tertiary} value={bEnd} onChangeText={(t) => setBEnd(_maskTime(t))} keyboardType="number-pad" maxLength={5} />
             </View>
           </>
         )}
@@ -453,9 +458,9 @@ export default function AuraAvailabilityScreen({ navigation }) {
           <>
             <Text style={s.formLabel}>Horário (HH:mm)</Text>
             <View style={s.timeRow}>
-              <TextInput style={[s.input, s.timeInput]} placeholder="20:00" placeholderTextColor={C.text.tertiary} value={evStart} onChangeText={setEvStart} keyboardType="numbers-and-punctuation" />
+              <TextInput style={[s.input, s.timeInput]} placeholder="20:00" placeholderTextColor={C.text.tertiary} value={evStart} onChangeText={(t) => setEvStart(_maskTime(t))} keyboardType="number-pad" maxLength={5} />
               <Text style={s.timeSep}>até</Text>
-              <TextInput style={[s.input, s.timeInput]} placeholder="23:00" placeholderTextColor={C.text.tertiary} value={evEnd} onChangeText={setEvEnd} keyboardType="numbers-and-punctuation" />
+              <TextInput style={[s.input, s.timeInput]} placeholder="23:00" placeholderTextColor={C.text.tertiary} value={evEnd} onChangeText={(t) => setEvEnd(_maskTime(t))} keyboardType="number-pad" maxLength={5} />
             </View>
           </>
         )}

@@ -24,7 +24,7 @@ import { useOffers } from '../contexts/OffersContext';
 import { usePrivacy } from '../contexts/PrivacyContext';
 import { useGroups } from '../contexts/GroupsContext';
 import { useColors, Typography, Spacing, BorderRadius, Shadows } from '../constants/DesignSystem';
-import { getFullShiftConfig, calculateShiftValueSync, roundCurrency, getShiftPeriod, getShiftHours, shouldUseWeekendValue } from '../utils/ShiftValueCalculator';
+import { getFullShiftConfig, roundCurrency, getShiftPeriod, getShiftHours, shouldUseWeekendValue } from '../utils/ShiftValueCalculator';
 import { resolveShiftConfig, resolveLoyaltyPct } from '../utils/HospitalConfigResolver';
 import { applyLuisFrancaPreset } from '../utils/LuisFrancaPreset';
 import { applyPublishedHospitalConfigs, collectInstIds } from '../utils/PublishedHospitalConfig';
@@ -43,6 +43,7 @@ import TodayCoworkersService from '../services/TodayCoworkersService';
 import LocalCache from '../services/LocalCache';
 import { deriveShiftStatus, SHIFT_STATUS_META, statusTone, SHIFT_STATUS } from '../utils/shiftStatus';
 import TimeUtils from '../utils/TimeUtils';
+import SkeletonBox from '../components/Skeleton';
 
 // Horas do plantão p/ exibição: usa durationMinutes quando existe (manuais/
 // openings), senão cai pra duração padrão do turno (M/T=6h, N/D=12h). Plantões
@@ -76,6 +77,8 @@ const DAY_PADDING    = Spacing.md;
 
 const LABEL_MAP = { M: 'Manhã', T: 'Tarde', N: 'Noite', D: 'Noite', FN: 'Sex. Noite' };
 const SHIFT_TYPE_COLOR = { M: '#3FA9A7', T: '#97CAFC', N: '#5B6FBF', D: '#5B6FBF', FN: '#E08A00' };
+// Ordem fixa de exibição: manhã → tarde → noite (D/FN são noite).
+const SHIFT_SORT_ORDER = { M: 0, T: 1, N: 2, D: 3, FN: 4 };
 
 const fmtBRLk = (v) => {
   if (!v || isNaN(v)) return null;
@@ -109,13 +112,13 @@ const buildWeekDays = (centerDate) => {
 const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
   const C = useColors();
   const insets = useSafeAreaInsets();
-  const { daysWithShifts, hoursReport, persistTimeEntries, refreshMonthSummary } = useShifts();
+  const { daysWithShifts, hoursReport, persistTimeEntries, refreshMonthSummary, loadMonthlyShifts, loadedFor } = useShifts();
   const { myCededOpenings, refresh: refreshOpenings, cancelCedeOpening } = useOpenings();
   const { swapsSent, swapsReceived, offersSent, cancelSwap, cancelOffer } = useOffers();
   const { valuesHidden } = usePrivacy();
   const { coworkersById } = useGroups();
   const { deleteManualShift, restoreShiftLocally } = useShifts();
-  const { user } = useContext(AuthContext);
+  const { user, token } = useContext(AuthContext);
   const viewOnly = isViewOnly(user);
 
   useEffect(() => { refreshOpenings?.(true); }, [refreshOpenings]);
@@ -137,6 +140,9 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
   const [shiftPickerVisible, setShiftPickerVisible] = useState(false);
   const [addModalVisible, setAddModalVisible] = useState(false);
   const [hoursEditor, setHoursEditor] = useState(null);
+  const [coworkersModal, setCoworkersModal] = useState(null);
+  const [, setCoworkersVersion] = useState(0);
+  const [coworkersLoading, setCoworkersLoading] = useState(false);
 
   // Foco + lista (mockup Aurora · Dia + Detalhe · variação C).
   // Só o plantão em foco exibe ações; os demais ficam como linhas compactas.
@@ -171,6 +177,7 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
   })).current;
 
   const daySelectorRef  = useRef(null);
+  const lastReqMonthRef = useRef(null);
   const fabEntryScale   = useRef(new Animated.Value(0)).current;
   const fabPressScale   = useRef(new Animated.Value(1)).current;
   const fabAnimatedOnce = useRef(false);
@@ -255,6 +262,33 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
       return true;
     });
   }, [baseDayShifts, myCededOpenings, selectedDateStr, swapsSent, swapsReceived, offersSent]);
+
+  // Garante que o mês do dia selecionado esteja carregado. O DayView lê o mês
+  // ATIVO do contexto; se ele estiver em outro mês (ex: Relatórios trocou), os
+  // dias ficam vazios. loadMonthlyShifts NÃO entra nas deps (evita loop — ver
+  // memória context-value-loops); o ref evita re-disparo durante o load.
+  useEffect(() => {
+    const m = selectedDate.getMonth() + 1;
+    const y = selectedDate.getFullYear();
+    const mk = `${y}-${m}`;
+    if (loadedFor === mk) { lastReqMonthRef.current = null; return; }
+    if (lastReqMonthRef.current === mk) return;
+    lastReqMonthRef.current = mk;
+    loadMonthlyShifts?.(m, y);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDate, loadedFor]);
+
+  useEffect(() => {
+    const userId = user?.id || user?.data?.id;
+    if (!userId || !token || !daysWithShifts?.length) return;
+    // Só mostra skeleton quando não há colegas em cache (1ª computação) — evita
+    // piscar quando já tem dado e o compute só revalida.
+    if (!TodayCoworkersService.isReady(userId)) setCoworkersLoading(true);
+    TodayCoworkersService.compute(userId, token, userId, { force: true, daysWithShifts })
+      .then(() => setCoworkersVersion(v => v + 1))
+      .catch(() => {})
+      .finally(() => setCoworkersLoading(false));
+  }, [user?.id, user?.data?.id, token, daysWithShifts]);
 
   useEffect(() => {
     if (!fabAnimatedOnce.current) {
@@ -408,7 +442,10 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
     const instId = shift?.group?.institution?.id ?? shift?.group?.institutionId ?? null;
     const eff = resolveShiftConfig(fullConfig || {}, instId);
     const rates = eff.hourValues || savedValues;
-    const baseValue = calculateShiftValueSync(shift, shift.date, rates);
+    const period = getShiftPeriod(shift.label);
+    const useWe = shouldUseWeekendValue(shift.date, shift.label, eff.fridayNightAsWeekend, eff.treatHolidayAsWeekend);
+    const hourly = parseFloat((useWe ? rates?.weekend : rates?.weekday)?.[period]) || 0;
+    const baseValue = roundCurrency(hourly * getShiftHours(shift.label));
 
     const loyaltyHours = (() => {
       if (instId == null || String(instId).length === 0) return hoursReport?.realHours || 0;
@@ -435,30 +472,30 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
     // extra hours from registered real hours — mesma taxa/hora do hospital
     const realEntry = dayRealHours[index];
     let extraValue = 0;
+    let extraMin = 0;
     if (realEntry?.startTime && realEntry?.endTime) {
       const toMin = t => { const [h, m] = t.replace('h', ':').split(':').map(Number); return h * 60 + (m || 0); };
-      const scheduledMin = (() => {
-        const parts = (shift.time || '').split(/\s*[–-]\s*/);
-        if (parts.length < 2) return 0;
-        const s = toMin(parts[0].replace(/\s*\([^)]*\)/, '').trim());
-        let e = toMin(parts[1].replace(/\s*\([^)]*\)/, '').trim());
-        if (e < s) e += 1440;
-        return e - s;
-      })();
-      const realStart = toMin(realEntry.startTime);
-      let realEnd = toMin(realEntry.endTime);
-      if (realEnd < realStart) realEnd += 1440;
-      const extraMin = (realEnd - realStart) - scheduledMin;
-      if (extraMin > 0 && rates) {
-        const period = getShiftPeriod(shift.label);
-        const useWe = shouldUseWeekendValue(shift.date, shift.label, eff.fridayNightAsWeekend);
-        const hourly = parseFloat((useWe ? rates.weekend : rates.weekday)?.[period]) || 0;
+      // Previsto deste mês: split usa minutesThisMonth; senão a duração da escala.
+      const scheduledMin = shift.splitHours?.minutesThisMonth != null
+        ? shift.splitHours.minutesThisMonth
+        : (() => {
+            const parts = (shift.time || '').split(/\s*[–-]\s*/);
+            if (parts.length < 2) return 0;
+            const s = toMin(parts[0].replace(/\s*\([^)]*\)/, '').trim());
+            let e = toMin(parts[1].replace(/\s*\([^)]*\)/, '').trim());
+            if (e < s) e += 1440;
+            return e - s;
+          })();
+      // Real deste mês: recortado na virada (plantão de último dia do mês).
+      const realMin = TimeUtils.actualMinutesThisMonth(shift, realEntry.startTime, realEntry.endTime);
+      extraMin = realMin - scheduledMin;
+      if (extraMin > 0 && hourly) {
         extraValue = roundCurrency((extraMin / 60) * hourly * mult);
       }
     }
 
     const total = roundCurrency(baseValue * mult) + extraValue;
-    return { baseValue: roundCurrency(baseValue), loyaltyPct, loyaltyValue, bonusPct, bonusValue, extraValue, total };
+    return { baseValue: roundCurrency(baseValue), loyaltyPct, loyaltyValue, bonusPct, bonusValue, extraValue, extraMin: extraMin > 0 ? extraMin : 0, total };
   };
 
   // Cálculo de valor reaproveitado pelo FocusCard e pelo CompactRow.
@@ -466,11 +503,10 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
 
   // Colegas do plantão — paridade com ShiftBottomSheet._getCoworkersForShift.
   const _getCoworkersForShift = (shift) => {
-    if (shift?.id && TodayCoworkersService.hasEntry(shift.id)) {
-      return TodayCoworkersService.getCoworkers(shift.id);
-    }
     const selfId = user?.id ? String(user.id) : null;
+    const fromService = shift?.id ? TodayCoworkersService.getCoworkers(shift.id) : [];
     const raw = [
+      ...fromService,
       ...(shift?.originalData?.coworkers || []),
       ...(shift?.originalData?.vacancy?.coworkers || []),
     ];
@@ -485,6 +521,47 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
       persons.push(coworkersById?.[pid] || coworkersById?.[p.id] || p);
     }
     return persons;
+  };
+
+  const _getCoworkersByGroupForShift = (shift, flatPersons) => {
+    const grouped = shift?.id ? TodayCoworkersService.getCoworkersByGroup(shift.id) : [];
+    if (grouped.length > 0) return grouped;
+    if (flatPersons.length === 0) return [];
+    return [{
+      groupId: String(shift?.group?.id ?? ''),
+      groupName: shift?.group?.name || '',
+      institutionName: shift?.group?.institution?.name || '',
+      coworkers: flatPersons,
+    }];
+  };
+
+  const _getVacanciesByGroupForShift = (shift) => {
+    const vacancies = shift?.id ? TodayCoworkersService.getVacanciesByGroup(shift.id) : [];
+    if (vacancies.length > 0) return vacancies;
+    const vacancy = shift?.originalData?.vacancy;
+    const available = vacancy?.slots ?? vacancy?.available ?? vacancy?.openSlots ?? 0;
+    if (!available || available <= 0) return [];
+    return [{
+      groupId: String(shift?.group?.id ?? ''),
+      groupName: shift?.group?.name || '',
+      groupColor: shift?.group?.color || '',
+      institutionName: shift?.group?.institution?.name || '',
+      label: shift?.label,
+      available,
+      total: (shift?.originalData?.coworkers?.length || 0) + available,
+    }];
+  };
+
+  const openCoworkersModal = (shift, coworkers) => {
+    const groups = _getCoworkersByGroupForShift(shift, coworkers);
+    const vacanciesByGroup = _getVacanciesByGroupForShift(shift);
+    setCoworkersModal({
+      title: 'Equipe do plantão',
+      subtitle: `${shift?.group?.institution?.name || 'Plantão'}${shift?.group?.name ? ' · ' + shift.group.name : ''}`,
+      coworkers,
+      coworkersByGroup: groups,
+      vacanciesByGroup,
+    });
   };
 
   // Handler central: roteia ações do FocusCard pro fluxo certo.
@@ -624,7 +701,11 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
     const groupColor = resolveGroupColor(shift);
     const typeKey = shiftTypeKey(shift);
     const badgeColor = SHIFT_TYPE_COLOR[typeKey] || C.primary;
-    const timeStr = parseShiftTime(shift.time) || `${shift.startTime || ''}${shift.endTime ? '–' + shift.endTime : ''}`;
+    const stdTime = parseShiftTime(shift.time) || `${shift.startTime || ''}${shift.endTime ? '–' + shift.endTime : ''}`;
+    // Se há horas extras registradas, elas substituem o horário padrão no header
+    // condensado (o turno já está no badge/label, não precisa repetir o padrão).
+    const reg = dayRealHours?.[index];
+    const timeStr = (reg?.startTime && reg?.endTime) ? `${reg.startTime}–${reg.endTime}` : stdTime;
     const labelTxt = LABEL_MAP[shift.label] || LABEL_MAP[typeKey] || shift.label || 'Plantão';
     return (
       <Pressable
@@ -697,10 +778,14 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
     }
     // confirmado / cobrindo / a_confirmar — primário "Registrar horas" + menu 3-pontos
     const primaryConfirm = status === SHIFT_STATUS.A_CONFIRMAR;
+    const shiftIndex = dayShifts.findIndex(s => String(s.id) === String(shift.id));
+    const registeredHours = shiftIndex >= 0 ? dayRealHours?.[shiftIndex] : null;
+    const hasRegisteredHours = !!(registeredHours?.startTime && registeredHours?.endTime);
     return (
       <FocusActionPrimary
         shift={shift}
         primaryConfirm={primaryConfirm}
+        hasRegisteredHours={hasRegisteredHours}
         viewOnly={viewOnly}
         onPrimary={() => handleShiftAction(shift, primaryConfirm ? 'confirmar_presenca' : 'registrar_horas')}
         onMenuAction={(act) => handleShiftAction(shift, act)}
@@ -718,6 +803,7 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
     const labelTxt = LABEL_MAP[shift.label] || LABEL_MAP[typeKey] || shift.label || 'Plantão';
     const timeStr = parseShiftTime(shift.time) || `${shift.startTime || ''}${shift.endTime ? '–' + shift.endTime : ''}`;
     const hours = shiftHoursOf(shift);
+    const registeredHours = dayRealHours?.[index];
     // Composição do valor: base (hora × horas) + fidelização + bônus + extras.
     const parts = computeValueParts(shift, index);
     const rate = hours > 0 && parts.baseValue > 0 ? roundCurrency(parts.baseValue / hours) : null;
@@ -731,6 +817,10 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
     // (coworkers + vacancy.coworkers), deduplicado, sem o próprio usuário e
     // enriquecido via coworkersById.
     const coworkers = _getCoworkersForShift(shift);
+    const vacancyGroups = _getVacanciesByGroupForShift(shift);
+    const totalVacancies = vacancyGroups.reduce((acc, v) => acc + (v.available ?? 0), 0);
+    const previewPeople = coworkers.slice(0, totalVacancies > 0 ? 3 : 4);
+    const overflowCount = (coworkers.length - previewPeople.length) + Math.max(0, totalVacancies - (totalVacancies > 0 ? 1 : 0));
 
     return (
       <View
@@ -770,17 +860,14 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
                   </Text>
                 </>
               ) : null}
-              {/* Collapse — só faz sentido com 2+ plantões (com 1 ele é sempre
-                  focado e não recolhe). */}
-              {dayShifts.length > 1 && (
-                <Pressable
-                  onPress={() => setFocusedShiftId(null)}
-                  hitSlop={8}
-                  style={({ pressed }) => [s.collapseBtn, { borderColor: C.border.light }, pressed && { opacity: 0.75 }]}
-                >
-                  <Ionicons name="chevron-up" size={15} color={C.text.tertiary} />
-                </Pressable>
-              )}
+              {/* Collapse — sempre disponível: nenhum plantão é obrigado a ficar aberto. */}
+              <Pressable
+                onPress={() => setFocusedShiftId(null)}
+                hitSlop={8}
+                style={({ pressed }) => [s.collapseBtn, { borderColor: C.border.light }, pressed && { opacity: 0.75 }]}
+              >
+                <Ionicons name="chevron-up" size={15} color={C.text.tertiary} />
+              </Pressable>
             </View>
           </View>
 
@@ -795,6 +882,20 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
             </Text>
           </View>
 
+          {registeredHours?.startTime && registeredHours?.endTime && (
+            <Pressable
+              style={({ pressed }) => [s.focusInfoRow, pressed && { opacity: 0.6 }]}
+              onPress={() => openHoursEditor(shift)}
+            >
+              <Ionicons name="timer-outline" size={16} color={C.money} />
+              <Text style={[s.focusInfoLabel, { color: C.text.secondary }]}>Horas registradas</Text>
+              <Text style={[s.focusInfoValue, { color: C.money }]} numberOfLines={1}>
+                {registeredHours.startTime} - {registeredHours.endTime}
+              </Text>
+              <Ionicons name="create-outline" size={14} color={C.text.tertiary} />
+            </Pressable>
+          )}
+
           {/* "Recebido de" se aplicável */}
           {originName && (
             <View style={s.focusInfoRow}>
@@ -804,21 +905,31 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
             </View>
           )}
 
-          {/* Colegas no plantão — toca p/ abrir a equipe do dia/grupo */}
-          {coworkers.length > 0 && (
+          {coworkersLoading && coworkers.length === 0 && totalVacancies === 0 && (
+            <View style={s.focusInfoRow}>
+              <Ionicons name="people-outline" size={16} color={C.text.secondary} />
+              <Text style={[s.focusInfoLabel, { color: C.text.secondary }]}>Equipe</Text>
+              <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 6 }}>
+                <View style={s.coworkerStack}>
+                  {[0, 1, 2].map(i => (
+                    <SkeletonBox key={i} width={24} height={24} style={{ borderRadius: 12, marginLeft: i === 0 ? 0 : -5 }} />
+                  ))}
+                </View>
+                <SkeletonBox width={60} height={12} style={{ borderRadius: 4 }} />
+              </View>
+            </View>
+          )}
+
+          {(coworkers.length > 0 || totalVacancies > 0) && (
             <Pressable
               style={({ pressed }) => [s.focusInfoRow, pressed && { opacity: 0.6 }]}
-              disabled={!shift.group?.id || !navigation?.navigate}
-              onPress={() => navigation?.navigate?.('GroupDayTeam', {
-                date: new Date(shift.date + 'T00:00:00'),
-                groupIds: [String(shift.group.id)],
-              })}
+              onPress={() => openCoworkersModal(shift, coworkers)}
             >
               <Ionicons name="people-outline" size={16} color={C.text.secondary} />
               <Text style={[s.focusInfoLabel, { color: C.text.secondary }]}>Equipe</Text>
               <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 6 }}>
                 <View style={s.coworkerStack}>
-                  {coworkers.slice(0, 4).map((p, i) => (
+                  {previewPeople.map((p, i) => (
                     <View key={p.id || i} style={[s.coworkerAvatar, { marginLeft: i === 0 ? 0 : -5, borderColor: C.background.card }]}>
                       {p.photo
                         ? <Image source={{ uri: p.photo }} style={s.coworkerAvatarImg} />
@@ -827,15 +938,23 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
                           </View>}
                     </View>
                   ))}
-                  {coworkers.length > 4 && (
+                  {totalVacancies > 0 && (
+                    <View style={[s.coworkerAvatar, s.coworkerAvatarVacancy, { marginLeft: previewPeople.length > 0 ? -5 : 0, backgroundColor: C.warning + '18', borderColor: C.warning + '60', borderStyle: 'dashed' }]}>
+                      <Ionicons name="star-outline" size={10} color={C.warning} />
+                    </View>
+                  )}
+                  {overflowCount > 0 && (
                     <View style={[s.coworkerAvatar, s.coworkerAvatarOverflow, { marginLeft: -5, backgroundColor: C.background.secondary, borderColor: C.background.card }]}>
-                      <Text style={[s.coworkerAvatarOverflowText, { color: C.text.secondary }]}>+{coworkers.length - 4}</Text>
+                      <Text style={[s.coworkerAvatarOverflowText, { color: C.text.secondary }]}>+{overflowCount}</Text>
                     </View>
                   )}
                 </View>
-                {!!shift.group?.id && navigation?.navigate && (
-                  <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
-                )}
+                <Text style={[s.focusInfoValue, { color: C.text.primary }]} numberOfLines={1}>
+                  {coworkers.length > 0 ? `${coworkers.length} colega${coworkers.length !== 1 ? 's' : ''}` : ''}
+                  {coworkers.length > 0 && totalVacancies > 0 ? ' · ' : ''}
+                  {totalVacancies > 0 ? `${totalVacancies} vaga${totalVacancies !== 1 ? 's' : ''}` : ''}
+                </Text>
+                <Ionicons name="chevron-forward" size={14} color={C.text.tertiary} />
               </View>
             </Pressable>
           )}
@@ -862,7 +981,7 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
               )}
               {parts.extraValue > 0 && (
                 <View style={[s.compositionRow, { marginTop: 6 }]}>
-                  <Text style={[s.compositionLine, { color: C.text.secondary }]}>Horas extras</Text>
+                  <Text style={[s.compositionLine, { color: C.text.secondary }]}>Horas extras · {TimeUtils.minutesToDisplay(parts.extraMin)}</Text>
                   <Text style={[s.compositionLine, { color: C.money }]}>+ {valuesHidden ? 'R$ ••••' : fmtBRLk(parts.extraValue)}</Text>
                 </View>
               )}
@@ -951,17 +1070,19 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
           </View>
         ) : (() => {
           // Computa valor + status uma vez por shift; FocusCard usa tudo, CompactRow só value + status.
+          // index preserva a posição original em dayShifts (chave de dayRealHours).
           const enriched = dayShifts.map((sh, idx) => ({
             shift: sh,
             index: idx,
             value: computeShiftValue(sh, idx),
             status: deriveShiftStatus(sh, user?.id),
-          }));
+          })).sort((a, b) =>
+            (SHIFT_SORT_ORDER[shiftTypeKey(a.shift)] ?? 9) - (SHIFT_SORT_ORDER[shiftTypeKey(b.shift)] ?? 9)
+          );
           const total = enriched.reduce((acc, e) => acc + (e.value || 0), 0);
           const hours = enriched.reduce((acc, e) => acc + shiftHoursOf(e.shift), 0);
-          // NÃO reordena: cada card abre/fecha NA POSIÇÃO dele. Fallback foca o
-          // primeiro. (Reordenar fazia os cards "trocarem de lugar".)
-          const focusedId = focusedShiftId || enriched[0]?.shift?.id;
+          // Sem fallback: nenhum plantão é forçado a ficar aberto (todos podem colapsar).
+          const focusedId = focusedShiftId;
           return (
             <>
               {/* DaySummary — N plantões · Xh / Total previsto */}
@@ -1070,6 +1191,102 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
         currentHours={hoursEditor ? (dayRealHours?.[hoursEditor.index] || {}) : {}}
       />
 
+      <Modal
+        visible={coworkersModal !== null}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setCoworkersModal(null)}
+      >
+        <Pressable style={s.modalBackdrop} onPress={() => setCoworkersModal(null)} />
+        <View style={[s.teamModalSheet, { backgroundColor: C.background.elevated, paddingBottom: 16 + insets.bottom }]}>
+          <View style={s.teamModalHeader}>
+            <View style={[s.sheetHandle, { backgroundColor: C.border.light }]} />
+            <View style={s.teamModalTitleRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={[s.teamModalTitle, { color: C.text.primary }]}>{coworkersModal?.title}</Text>
+                {coworkersModal?.subtitle ? (
+                  <Text style={[s.teamModalSubtitle, { color: C.text.secondary }]}>{coworkersModal.subtitle}</Text>
+                ) : null}
+              </View>
+              <Pressable onPress={() => setCoworkersModal(null)} style={s.teamModalClose}>
+                <Ionicons name="close" size={22} color={C.text.secondary} />
+              </Pressable>
+            </View>
+          </View>
+          <ScrollView style={s.teamModalList} contentContainerStyle={s.teamModalListContent} showsVerticalScrollIndicator={false}>
+            {(() => {
+              const groups = coworkersModal?.coworkersByGroup?.length > 0
+                ? coworkersModal.coworkersByGroup
+                : coworkersModal?.coworkers?.length > 0
+                  ? [{ groupId: '', groupName: '', institutionName: '', coworkers: coworkersModal.coworkers }]
+                  : [];
+              const vacanciesByGroup = coworkersModal?.vacanciesByGroup || [];
+              const vacancyOnlyGroups = vacanciesByGroup
+                .filter(v => !groups.some(g => String(g.groupId) === String(v.groupId)))
+                .map(v => ({
+                  groupId: String(v.groupId || ''),
+                  groupName: v.groupName || '',
+                  institutionName: v.institutionName || '',
+                  coworkers: [],
+                }));
+              const blocks = [...groups, ...vacancyOnlyGroups];
+              const showGroupHeaders = blocks.length > 1 || (blocks.length === 1 && blocks[0].groupName);
+              return blocks.map((group, gi) => {
+                const groupVacancies = vacanciesByGroup.filter(v => !group.groupId || !v.groupId || String(v.groupId) === String(group.groupId));
+                const memberCount = group.coworkers.length;
+                const vacancyCount = groupVacancies.reduce((acc, v) => acc + (v.available || 0), 0);
+                if (memberCount === 0 && vacancyCount === 0) return null;
+                return (
+                  <View key={group.groupId || gi} style={s.teamGroupBlock}>
+                    {showGroupHeaders ? (
+                      <View style={[s.teamGroupHeader, { borderBottomColor: C.border.light }]}>
+                        <Text style={[s.teamGroupName, { color: C.text.tertiary }]} numberOfLines={1}>{group.groupName || 'Grupo'}</Text>
+                        <View style={[s.teamGroupCount, { backgroundColor: C.background.secondary, borderColor: C.border.light }]}>
+                          <Text style={[s.teamGroupCountText, { color: C.text.secondary }]}>{memberCount + vacancyCount}</Text>
+                        </View>
+                      </View>
+                    ) : null}
+                    {group.coworkers.map((person, pi) => {
+                      const fullName = person.full_name || person.name || '';
+                      const initials = (person.name || '?').split(' ').filter(Boolean).slice(0, 2).map(w => w.charAt(0)).join('').toUpperCase();
+                      const meta = [person.description, person.council].filter(Boolean).join(' · ');
+                      return (
+                        <View key={person.id || pi} style={s.teamRow}>
+                          {person.photo ? (
+                            <Image source={{ uri: person.photo }} style={s.teamAvatar} />
+                          ) : (
+                            <View style={[s.teamAvatar, s.teamAvatarFallback, { backgroundColor: C.primaryLight + '22' }]}>
+                              <Text style={[s.teamAvatarInitials, { color: C.primary }]}>{initials}</Text>
+                            </View>
+                          )}
+                          <View style={s.teamRowInfo}>
+                            <Text style={[s.teamRowName, { color: C.text.primary }]} numberOfLines={1}>{fullName}</Text>
+                            {meta ? <Text style={[s.teamRowMeta, { color: C.text.tertiary }]} numberOfLines={1}>{meta}</Text> : null}
+                          </View>
+                        </View>
+                      );
+                    })}
+                    {groupVacancies.flatMap((v, vi) =>
+                      Array.from({ length: v.available ?? 0 }).map((_, si) => (
+                        <View key={`vacancy-${v.groupId || vi}-${si}`} style={s.teamRow}>
+                          <View style={[s.teamAvatar, s.teamAvatarVacancy, { backgroundColor: C.warning + '18', borderColor: C.warning + '55' }]}>
+                            <Ionicons name="star-outline" size={16} color={C.warning} />
+                          </View>
+                          <View style={s.teamRowInfo}>
+                            <Text style={[s.teamRowName, { color: C.warning }]} numberOfLines={1}>Vaga aberta</Text>
+                            {v.groupName ? <Text style={[s.teamRowMeta, { color: C.text.tertiary }]} numberOfLines={1}>{v.groupName}</Text> : null}
+                          </View>
+                        </View>
+                      ))
+                    )}
+                  </View>
+                );
+              });
+            })()}
+          </ScrollView>
+        </View>
+      </Modal>
+
       <ConfirmActionSheet
         intent={confirmIntent}
         C={C}
@@ -1102,7 +1319,7 @@ const DayViewScreen = ({ navigation, initialDate, initialFocusShiftId }) => {
 // ────────────────────────────────────────────────────────────────────────────
 
 // Primário "Registrar horas" (ou "Confirmar presença" se a_confirmar) + menu 3-pontos.
-function FocusActionPrimary({ shift, primaryConfirm, viewOnly, onPrimary, onMenuAction, C, s }) {
+function FocusActionPrimary({ shift, primaryConfirm, hasRegisteredHours, viewOnly, onPrimary, onMenuAction, C, s }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const isManual = shift?.isManual === true;
   // Conta só-visualização (Soffia/webClient) não cede/troca — só sobra excluir
@@ -1121,9 +1338,9 @@ function FocusActionPrimary({ shift, primaryConfirm, viewOnly, onPrimary, onMenu
           onPress={onPrimary}
           style={({ pressed }) => [s.actionBtnPrimary, { flex: 1, backgroundColor: primaryConfirm ? C.warning : C.primary }, pressed && { opacity: 0.85 }]}
         >
-          <Ionicons name={primaryConfirm ? 'checkmark' : 'add'} size={16} color="#fff" />
+          <Ionicons name={primaryConfirm ? 'checkmark' : hasRegisteredHours ? 'create-outline' : 'add'} size={16} color="#fff" />
           <Text style={s.actionBtnPrimaryText}>
-            {primaryConfirm ? 'Confirmar presença' : 'Registrar horas'}
+            {primaryConfirm ? 'Confirmar presença' : hasRegisteredHours ? 'Editar horas' : 'Registrar horas'}
           </Text>
         </Pressable>
         {menuItems.length > 0 && (
@@ -1514,6 +1731,118 @@ const s = StyleSheet.create({
     marginTop: 16,
   },
   footerHintText: { fontSize: 10.5 },
+
+  teamModalSheet: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: '75%',
+  },
+  teamModalHeader: {
+    alignItems: 'center',
+    paddingTop: 10,
+    paddingHorizontal: Spacing.lg,
+    paddingBottom: Spacing.md,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  teamModalTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: Spacing.sm,
+    width: '100%',
+  },
+  teamModalTitle: {
+    fontSize: Typography.fontSize.body,
+    fontWeight: Typography.fontWeight.semiBold,
+  },
+  teamModalSubtitle: {
+    fontSize: Typography.fontSize.footnote,
+    marginTop: 2,
+  },
+  teamModalClose: {
+    padding: 4,
+  },
+  teamModalList: {
+    flexGrow: 0,
+  },
+  teamModalListContent: {
+    paddingHorizontal: Spacing.lg,
+    paddingTop: Spacing.sm,
+  },
+  teamGroupBlock: {
+    marginBottom: Spacing.lg,
+  },
+  teamGroupHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: Spacing.md,
+    paddingBottom: Spacing.sm,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    marginBottom: Spacing.sm,
+  },
+  teamGroupName: {
+    flex: 1,
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+  },
+  teamGroupCount: {
+    minWidth: 22,
+    height: 20,
+    paddingHorizontal: 7,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  teamGroupCountText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  teamRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    gap: 12,
+  },
+  teamAvatar: {
+    width: 40,
+    height: 40,
+    borderRadius: 10,
+  },
+  teamAvatarFallback: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  teamAvatarVacancy: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderStyle: 'dashed',
+  },
+  teamAvatarInitials: {
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: -0.2,
+  },
+  teamRowInfo: {
+    flex: 1,
+    minWidth: 0,
+  },
+  teamRowName: {
+    fontSize: 14,
+    fontWeight: '600',
+    letterSpacing: -0.1,
+  },
+  teamRowMeta: {
+    fontSize: 11.5,
+    marginTop: 2,
+  },
 });
 
 export default DayViewScreen;

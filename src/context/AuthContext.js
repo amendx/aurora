@@ -4,7 +4,7 @@ import { StorageService } from '../utils/StorageService';
 import { runMigration } from '../services/StorageMigration';
 import LocalCache from '../services/LocalCache';
 import FirebaseAdapter from '../services/firebase/FirebaseAdapter';
-import { syncCurrentMonthToFirebase, hydratePastMonthsFromFirebase } from '../services/firebase/LoginSyncService';
+import { syncCurrentMonthToFirebase, hydratePastMonthsFromFirebase, hydrateFinancialConfigFromFirebase } from '../services/firebase/LoginSyncService';
 import {
   createAccount,
   loginAuroraUser,
@@ -12,6 +12,7 @@ import {
   waitForAuroraAuth,
   signOutAurora,
   friendlyAuthError,
+  requestPasswordReset,
 } from '../services/firebase/SignupService';
 import { handleGoogleSignIn } from '../services/firebase/GoogleSignInService';
 import { db } from '../services/firebase/config';
@@ -106,13 +107,18 @@ export const AuthProvider = ({ children }) => {
           // Hydrate immutable past months from Firestore for both user types
           // so Charts/Reports don't re-fetch on fresh device or after logout.
           hydratePastMonthsFromFirebase(userData?.id, userData?.source).catch(() => {});
+          // Pull financial/Aura config so settings appear on any device of this user.
+          hydrateFinancialConfigFromFirebase(userData?.id).catch(() => {});
 
           // WebClient-only background tasks — skip for Aurora users who have no WebClient token.
           // [WEBCLIENT-BRIDGE] e tb skip se usuário webClient migrou pra aurora-only:
           // ele não precisa mais bater no PlantaoAPI.
           if (!_isAurora(userData) && !userData?.auroraOnlyMode) {
             syncCurrentMonthToFirebase(userData?.id).catch(() => {});
-            TodayCoworkersService.compute(userData?.id, activeToken, userData?.id).catch(() => {});
+            // Hydrate from Firebase first (instant), then refresh online (force — cache is seeded).
+            TodayCoworkersService.hydrate(userData?.id)
+              .catch(() => {})
+              .finally(() => TodayCoworkersService.compute(userData?.id, activeToken, userData?.id, { force: true }).catch(() => {}));
           }
 
           Logger.info('✅ Usuário já autenticado com token válido');
@@ -201,6 +207,7 @@ export const AuthProvider = ({ children }) => {
           _activateFirebase();
           FirebaseAdapter.saveUser(userInfo.id, null, userInfo).catch(() => {});
           hydratePastMonthsFromFirebase(userInfo.id, 'aurora').catch(() => {});
+          hydrateFinancialConfigFromFirebase(userInfo.id).catch(() => {});
           Logger.info(`✅ Login concluído — email: ${email} source: aurora`);
           return { success: true };
         }
@@ -287,7 +294,11 @@ export const AuthProvider = ({ children }) => {
     FirebaseAdapter.saveUser(userInfo.id, apiData, userInfo).catch(() => {});
     syncCurrentMonthToFirebase(userInfo.id).catch(() => {});
     hydratePastMonthsFromFirebase(userInfo.id, userInfo.source).catch(() => {});
-    TodayCoworkersService.compute(userInfo.id, extractedToken, userInfo.id).catch(() => {});
+    hydrateFinancialConfigFromFirebase(userInfo.id).catch(() => {});
+    // Hydrate from Firebase first (instant), then refresh online (force — cache is seeded).
+    TodayCoworkersService.hydrate(userInfo.id)
+      .catch(() => {})
+      .finally(() => TodayCoworkersService.compute(userInfo.id, extractedToken, userInfo.id, { force: true }).catch(() => {}));
 
     Logger.info(`✅ Login concluído — email: ${email} source: webClient`);
     return { success: true };
@@ -362,6 +373,7 @@ export const AuthProvider = ({ children }) => {
       _activateFirebase();
       FirebaseAdapter.saveUser(userInfo.id, null, userInfo).catch(() => {});
       hydratePastMonthsFromFirebase(userInfo.id, 'aurora').catch(() => {});
+      hydrateFinancialConfigFromFirebase(userInfo.id).catch(() => {});
 
       Logger.info(`✅ Login concluído — email: ${userInfo.email} source: aurora (google)`);
       return { success: true };
@@ -371,6 +383,18 @@ export const AuthProvider = ({ children }) => {
       return { success: false, error: friendly || error.message };
     } finally {
       setLoading(false);
+    }
+  };
+
+  const resetPassword = async (email) => {
+    try {
+      await requestPasswordReset(email);
+      return { success: true };
+    } catch (error) {
+      Logger.error('❌ Erro ao enviar redefinição de senha:', error.message);
+      const friendly = friendlyAuthError(error.code);
+      if (error.code === 'auth/user-not-found') return { success: true };
+      return { success: false, error: friendly || error.message };
     }
   };
 
@@ -483,6 +507,7 @@ export const AuthProvider = ({ children }) => {
     loginWebClient,
     signup,
     loginWithGoogle,
+    resetPassword,
     logout,
     updatePhoto,
     completeOnboarding,

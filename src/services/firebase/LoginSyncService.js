@@ -26,6 +26,7 @@
  *   receive new/changed shifts from PlantaoAPI between sessions.
  */
 
+import * as SecureStore from 'expo-secure-store';
 import { doc, getDoc } from './fdb';
 import { db } from './config';
 import LocalCache from '../LocalCache';
@@ -124,6 +125,46 @@ export const syncCurrentMonthToFirebase = async (userId) => {
   } catch (err) {
     // Never propagate — this is a best-effort background operation
     Logger.warn(`[LoginSync] syncCurrentMonthToFirebase error for ${userId}: ${err?.message}`);
+  }
+};
+
+/**
+ * Pull the financial config from Firestore so the same user sees their
+ * Aura/financial settings on any device.
+ *
+ * Writes go through-write on every save (ConfigScreen / HospitalDetailScreen /
+ * ShiftsContext → LocalCache.saveFinancialConfig → FirebaseAdapter). The only
+ * missing piece for cross-device parity was the READ on a fresh device, where
+ * SecureStore + LocalCache start empty. This pulls remote and seeds BOTH local
+ * stores so getFullShiftConfig() (SecureStore) and LocalCache readers see it.
+ *
+ * Recency: remote wins only if local is missing or strictly older. `updatedAt`
+ * is stamped on every save; falls back to savedAt/_updatedAt. This protects an
+ * offline edit that hasn't pushed yet from being clobbered by a stale remote.
+ *
+ * Fire-and-forget. Never blocks login. Never throws.
+ *
+ * @param {number} userId
+ */
+const _cfgTs = (c) => c?.updatedAt || c?.savedAt || c?._updatedAt || '';
+
+export const hydrateFinancialConfigFromFirebase = async (userId) => {
+  if (!userId || !db) return;
+  try {
+    const remote = await FirebaseAdapter.fetchFinancialConfig(userId);
+    if (!remote) return;
+
+    const local = await LocalCache.getFinancialConfig(userId);
+    if (local && _cfgTs(local) >= _cfgTs(remote)) return; // local same/newer — keep
+
+    // Remote wins (or no local). Default dirty-mark → summaries recompute with the pulled config.
+    await LocalCache.saveFinancialConfig(userId, remote);
+    try {
+      await SecureStore.setItemAsync('shift_configurations', JSON.stringify(remote));
+    } catch (_) {}
+    Logger.info(`[LoginSync] Financial config hydrated from Firestore for user ${userId}`);
+  } catch (err) {
+    Logger.warn(`[LoginSync] hydrateFinancialConfig error for ${userId}: ${err?.message}`);
   }
 };
 

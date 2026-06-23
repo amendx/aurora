@@ -1,6 +1,7 @@
 // Utilitário para cálculo de valores de plantão
 import * as SecureStore from 'expo-secure-store';
 import { resolveShiftConfig, resolveLoyaltyPct } from './HospitalConfigResolver';
+import { isHoliday } from './Holidays';
 
 // Configurações padrão (caso não haja configuração salva)
 const DEFAULT_VALUES = {
@@ -71,20 +72,25 @@ export const isFriday = (dateString) => {
 };
 
 // Função para verificar se deve usar valor de fim de semana (incluindo sexta N se configurado)
-export const shouldUseWeekendValue = (dateString, shiftLabel, fridayNightAsWeekend = false) => {
+export const shouldUseWeekendValue = (dateString, shiftLabel, fridayNightAsWeekend = false, treatHolidayAsWeekend = false) => {
   const isWeekendDay = isWeekend(dateString);
-  
+
   // Se é fim de semana natural, sempre usar valor de FDS
   if (isWeekendDay) {
     return true;
   }
-  
+
+  // Feriado paga na faixa de FDS (folha LUIS FRANÇA: ex. terça de Carnaval = 170)
+  if (treatHolidayAsWeekend && isHoliday(dateString)) {
+    return true;
+  }
+
   // Se é sexta-feira e o turno é noturno (N) e a opção está ativada
   if (fridayNightAsWeekend && isFriday(dateString)) {
     const period = getShiftPeriod(shiftLabel);
     return period === 'night';
   }
-  
+
   return false;
 };
 
@@ -109,11 +115,18 @@ export const isBonusApplicable = (dateString, bonusConfig) => {
   if (!bonusConfig || !bonusConfig.startMonth || !bonusConfig.endMonth) {
     return false;
   }
-  
+
+  const shiftMonthKey = String(dateString).slice(0, 7);
+  const startRaw = String(bonusConfig.startMonth);
+  const endRaw = String(bonusConfig.endMonth);
+  if (startRaw.includes('-') || endRaw.includes('-')) {
+    return shiftMonthKey >= startRaw.slice(0, 7) && shiftMonthKey <= endRaw.slice(0, 7);
+  }
+
   const date = new Date(dateString);
   const month = date.getMonth() + 1; // getMonth() retorna 0-11
-  
-  return month >= bonusConfig.startMonth && month <= bonusConfig.endMonth;
+
+  return month >= Number(bonusConfig.startMonth) && month <= Number(bonusConfig.endMonth);
 };
 
 // Função para arredondamento monetário consistente
@@ -176,7 +189,7 @@ export const calculateShiftValueWithBreakdown = async (shift, dateString, totalM
     const eff = resolveShiftConfig(config, instId);
 
     const isNaturalWeekend = isWeekend(dateString);
-    const useWeekendValue = shouldUseWeekendValue(dateString, shift.label, eff.fridayNightAsWeekend);
+    const useWeekendValue = shouldUseWeekendValue(dateString, shift.label, eff.fridayNightAsWeekend, eff.treatHolidayAsWeekend);
 
     const period = getShiftPeriod(shift.label);
     const hours = getShiftHours(shift.label);
@@ -263,10 +276,10 @@ export const calculateShiftValueWithBreakdown = async (shift, dateString, totalM
 export const calculateShiftValue = async (shift, dateString) => {
   try {
     const config = await getFullShiftConfig();
-    const useWeekendValue = shouldUseWeekendValue(dateString, shift.label, config.fridayNightAsWeekend);
+    const useWeekendValue = shouldUseWeekendValue(dateString, shift.label, config.fridayNightAsWeekend, config.treatHolidayAsWeekend);
     const period = getShiftPeriod(shift.label);
     const hours = getShiftHours(shift.label);
-    
+
     // Selecionar valor base correto
     let hourlyValue;
     if (useWeekendValue) {
@@ -329,7 +342,7 @@ export const calculateShiftFinalValueSync = (shift, dateString, config, totalMon
   const instId = shift?.group?.institution?.id ?? shift?.group?.institutionId ?? null;
   const eff = resolveShiftConfig(config, instId);
 
-  const useWeekendValue = shouldUseWeekendValue(dateString, shift.label, eff.fridayNightAsWeekend);
+  const useWeekendValue = shouldUseWeekendValue(dateString, shift.label, eff.fridayNightAsWeekend, eff.treatHolidayAsWeekend);
   const period = getShiftPeriod(shift.label);
   const standardHours = getShiftHours(shift.label);
 

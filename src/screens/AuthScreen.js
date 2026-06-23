@@ -123,7 +123,7 @@ function UField({ label, value, onChangeText, placeholder, keyboardType, autoCap
 }
 
 export default function AuthScreen() {
-  const { login, loginWebClient, loginWithGoogle, signup } = useContext(AuthContext);
+  const { login, loginWebClient, loginWithGoogle, signup, resetPassword } = useContext(AuthContext);
   const C = useColors();
   const { isDark, preference } = useTheme();
   const systemScheme = useColorScheme();
@@ -148,6 +148,7 @@ export default function AuthScreen() {
   const [isLoading, setIsLoading]               = useState(false);
   const [isGoogleLoading, setGoogleLoading]     = useState(false);
   const [isSoffiaLoading, setSoffiaLoading]     = useState(false);
+  const [isResetLoading, setResetLoading]       = useState(false);
 
   // ── Signup state ──────────────────────────────────────────────────────────
   const [suName, setSuName]                       = useState('');
@@ -246,6 +247,20 @@ export default function AuthScreen() {
     if (!result.success) Alert.alert('Erro no Login', result.error || 'Falha na autenticação');
   };
 
+  const handleForgotPassword = async () => {
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail) { Alert.alert('E-mail obrigatório', 'Informe seu e-mail para receber o link de redefinição.'); return; }
+    if (!isValidEmail(trimmedEmail)) { Alert.alert('E-mail inválido', 'Informe um e-mail válido para redefinir a senha.'); return; }
+    setResetLoading(true);
+    const result = await resetPassword(trimmedEmail);
+    setResetLoading(false);
+    if (!result.success) {
+      Alert.alert('Erro', result.error || 'Não foi possível enviar o link de redefinição.');
+      return;
+    }
+    Alert.alert('Verifique seu e-mail', 'Se existir uma conta Aurora com este e-mail, enviaremos um link para redefinir a senha.');
+  };
+
   const pickPhoto = async () => {
     setPickingPhoto(true);
     try {
@@ -317,6 +332,7 @@ export default function AuthScreen() {
                 isLoading={isLoading} isGoogleLoading={isGoogleLoading}
                 isEmailValid={isEmailValid} canSubmit={canSubmit}
                 handleLogin={handleLogin} handleGooglePress={handleGooglePress}
+                handleForgotPassword={handleForgotPassword} isResetLoading={isResetLoading}
                 handleSoffiaLogin={handleSoffiaLogin} isSoffiaLoading={isSoffiaLoading}
                 onShowSignup={() => switchMode('signup')}
                 C={C} s={s}
@@ -374,7 +390,7 @@ export default function AuthScreen() {
   );
 }
 
-function LoginContent({ heading, email, setEmail, password, setPassword, isPasswordVisible, setPasswordVisible, isLoading, isGoogleLoading, isEmailValid, canSubmit, handleLogin, handleGooglePress, handleSoffiaLogin, isSoffiaLoading, onShowSignup, C, s }) {
+function LoginContent({ heading, email, setEmail, password, setPassword, isPasswordVisible, setPasswordVisible, isLoading, isGoogleLoading, isEmailValid, canSubmit, handleLogin, handleGooglePress, handleForgotPassword, isResetLoading, handleSoffiaLogin, isSoffiaLoading, onShowSignup, C, s }) {
   const passwordRef = useRef(null);
   return (
     <View style={s.cardScroll}>
@@ -405,8 +421,10 @@ function LoginContent({ heading, email, setEmail, password, setPassword, isPassw
       <View style={s.field}>
         <View style={s.fieldLabelRow}>
           <Text style={[s.fieldLabel, { marginBottom: 0 }]}>Senha</Text>
-          <Pressable hitSlop={8}>
-            <Text style={s.forgotLabel}>Esqueci minha senha</Text>
+          <Pressable onPress={handleForgotPassword} disabled={isResetLoading} hitSlop={8}>
+            <Text style={[s.forgotLabel, isResetLoading && { opacity: 0.6 }]}>
+              {isResetLoading ? 'Enviando...' : 'Esqueci minha senha'}
+            </Text>
           </Pressable>
         </View>
         <View style={[s.fieldRow, password.length > 0 && s.fieldRowActive]}>

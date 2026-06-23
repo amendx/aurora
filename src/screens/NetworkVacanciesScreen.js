@@ -1,6 +1,6 @@
 import { useContext, useEffect, useState, useCallback, useMemo } from 'react';
 import {
-  View, Text, ScrollView, ActivityIndicator,
+  View, Text, ScrollView,
   RefreshControl, StyleSheet, Pressable,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -19,6 +19,7 @@ import {
 } from '../utils/ShiftValueCalculator';
 import TimeUtils from '../utils/TimeUtils';
 import Logger from '../utils/Logger';
+import SkeletonBox from '../components/Skeleton';
 
 const WINDOW_DAYS = 7;
 const URGENT_THRESHOLD_MS = 24 * 60 * 60 * 1000;
@@ -78,7 +79,7 @@ const _fmtBRL = (value) => {
 
 const _computeValue = (cfg, dateStr, shiftLetter, minutes) => {
   if (!cfg || !minutes) return 0;
-  const useWeekend = shouldUseWeekendValue(dateStr, shiftLetter, cfg.fridayNightAsWeekend);
+  const useWeekend = shouldUseWeekendValue(dateStr, shiftLetter, cfg.fridayNightAsWeekend, cfg.treatHolidayAsWeekend);
   const period = getShiftPeriod(shiftLetter);
   const bucket = useWeekend ? cfg.hourValues?.weekend : cfg.hourValues?.weekday;
   const hourly = parseFloat(bucket?.[period]) || (useWeekend ? (period === 'night' ? 185 : 170) : (period === 'night' ? 143 : 130));
@@ -348,9 +349,22 @@ export default function NetworkVacanciesScreen({ navigation }) {
   return (
     <View style={[s.root, { backgroundColor: C.background.secondary }]}>
       {loading && !refreshing ? (
-        <View style={s.centered}>
-          <ActivityIndicator size="large" color={C.primary} />
-        </View>
+        <ScrollView contentContainerStyle={{ padding: Spacing.screen }}>
+          {[0, 1, 2, 3, 4].map(i => (
+            <View key={i} style={s.row}>
+              <View style={s.dayBlock}>
+                <SkeletonBox width={26} height={22} style={{ borderRadius: 4, marginBottom: 3 }} />
+                <SkeletonBox width={22} height={9} style={{ borderRadius: 3 }} />
+              </View>
+              <View style={{ alignItems: 'flex-start', gap: 6 }}>
+                <SkeletonBox width={120} height={14} style={{ borderRadius: 4 }} />
+                <SkeletonBox width={80} height={10} style={{ borderRadius: 4 }} />
+              </View>
+              <View style={{ flex: 1 }} />
+              <SkeletonBox width={56} height={20} style={{ borderRadius: 10 }} />
+            </View>
+          ))}
+        </ScrollView>
       ) : error ? (
         <View style={s.centered}>
           <Ionicons name="alert-circle-outline" size={32} color={C.text.tertiary} />

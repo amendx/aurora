@@ -1,8 +1,10 @@
 import Logger from '../utils/Logger';
+import WebClientCounter from '../utils/WebClientCounter';
 
 const _fetch = (url, opts) => {
   const path = typeof url === 'string' ? url.replace(/^https?:\/\/[^/]+/, '') : 'fetch';
   Logger.api(opts?.method || 'GET', path);
+  WebClientCounter.bump(path);
   return fetch(url, opts);
 };
 

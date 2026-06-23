@@ -211,7 +211,10 @@ export default function AuraScreen({ navigation }) {
     const dim = new Date(viewYear, viewMonth, 0).getDate();
     for (let d = 1; d <= dim; d++) {
       const dk = `${viewYear}-${String(viewMonth).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-      map[dk] = classifyDay(dk, existingIntervals, config, { greenAllowed, needHours: belowTarget });
+      // needHours = "ainda quero mais horas" → mesmo critério do verde
+      // (sem meta sempre quer; com meta só enquanto abaixo dela). Antes usava
+      // belowTarget cru e deixava o FDS vazio quando não havia meta.
+      map[dk] = classifyDay(dk, existingIntervals, config, { greenAllowed, needHours: greenAllowed });
     }
     return map;
   }, [config, existingIntervals, greenAllowed, belowTarget, viewMonth, viewYear]);
@@ -221,7 +224,7 @@ export default function AuraScreen({ navigation }) {
   // como livres — o usuário escolheu evitá-los.
   const availableDaysCount = useMemo(
     () => Object.values(dayStatus).filter(
-      st => (st.safeTurnos?.length || 0) > 0 && st.status !== DAY_STATUS.WEEKEND,
+      st => (st.safeTurnos?.length || 0) > 0 && st.status !== DAY_STATUS.WEEKEND && st.status !== DAY_STATUS.DISCOURAGED,
     ).length,
     [dayStatus],
   );
@@ -291,15 +294,16 @@ export default function AuraScreen({ navigation }) {
 
   const verdictStyle = (verdict) => {
     switch (verdict) {
-      case VERDICT.SAFE:    return { color: C.money,   bg: C.moneySoft,   icon: 'checkmark-circle', text: 'Pode encaixar' };
-      case VERDICT.RISKY:   return { color: C.warning, bg: C.warningSoft, icon: 'alert-circle',     text: 'Arriscado' };
-      default:              return { color: C.error,   bg: C.error + '22', icon: 'close-circle',    text: 'Bloqueado' };
+      case VERDICT.SAFE:        return { color: C.money,       bg: C.moneySoft,        icon: 'checkmark-circle', text: 'Pode encaixar' };
+      case VERDICT.DISCOURAGED: return { color: C.discouraged, bg: C.discouragedSoft, icon: 'alert-circle',      text: 'Não recomendado' };
+      case VERDICT.RISKY:       return { color: C.warning,     bg: C.warningSoft,      icon: 'alert-circle',     text: 'Arriscado' };
+      default:                  return { color: C.error,       bg: C.error + '22',     icon: 'close-circle',     text: 'Bloqueado' };
     }
   };
 
   // cor do motivo conforme severidade (info não é alerta)
   const reasonColor = (severity) =>
-    severity === 'block' ? C.error : severity === 'warn' ? C.warning : C.text.secondary;
+    severity === 'block' ? C.error : severity === 'warn' ? C.warning : severity === 'soft' ? C.discouraged : C.text.secondary;
 
   // ── Barra do dia selecionado (chips) ──────────────────────────────────────
   const selDayObj = new Date(`${testDate}T00:00:00`);
@@ -422,6 +426,7 @@ export default function AuraScreen({ navigation }) {
                 : status === DAY_STATUS.FULL ? C.error
                 : status === DAY_STATUS.GOOD ? C.money
                 : status === DAY_STATUS.WEEKEND ? C.info
+                : status === DAY_STATUS.DISCOURAGED ? C.discouraged
                 : null;
               return (
                 <Pressable key={di} onPress={() => setTestDate(dk)} style={s.calCell}>
@@ -449,7 +454,7 @@ export default function AuraScreen({ navigation }) {
 
         {/* legenda */}
         <View style={s.calLegend}>
-          {[['completar', 'pode completar', C.money], ['cheio', 'cheio', C.error], ['folga', 'folga', C.warning], ['fds', 'fim de semana', C.info]].map(([k, lbl, c]) => (
+          {[['completar', 'pode completar', C.money], ['cheio', 'cheio', C.error], ['folga', 'folga', C.warning], ['fds', 'fim de semana', C.info], ['naoideal', 'não recomendado', C.discouraged]].map(([k, lbl, c]) => (
             <View key={k} style={s.legendItem}>
               <View style={[s.legendSwatch, { backgroundColor: c + (dark ? '22' : '14') }]}>
                 <View style={[s.legendSwatchFloor, { backgroundColor: c }]} />

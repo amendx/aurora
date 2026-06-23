@@ -82,6 +82,33 @@ export class TimeUtils {
   }
 
   /**
+   * Minutos REAIS que pertencem a ESTE mês, recortando o intervalo na virada.
+   * Plantão N do último dia do mês: só a parte antes da meia-noite conta aqui
+   * (o resto vira o carryover D do mês seguinte). Carryover D: só a parte depois
+   * da meia-noite. Plantão normal: duração cheia.
+   *
+   * @param {object} shift            precisa de splitHours/carryover p/ saber o tipo
+   * @param {string} startStr         início real ("19:10" ou "19h10")
+   * @param {string} endStr           fim real ("07:05")
+   * @param {number|null} fallbackMin usado quando não há intervalo
+   * @returns {number|null} minutos deste mês
+   */
+  static actualMinutesThisMonth(shift, startStr, endStr, fallbackMin = null) {
+    if (!startStr || !endStr) return fallbackMin;
+    const norm = (t) => String(t).replace('h', ':');
+    const [sh, sm] = norm(startStr).split(':').map(Number);
+    const [eh, em] = norm(endStr).split(':').map(Number);
+    if ([sh, sm, eh, em].some(isNaN)) return fallbackMin;
+    const startMin = sh * 60 + sm;
+    const endMin = eh * 60 + em;
+    const crosses = endMin < startMin;
+    const full = crosses ? (1440 - startMin) + endMin : endMin - startMin;
+    if (!shift?.splitHours) return full;
+    if (shift.carryover) return crosses ? endMin : full;   // pós-meia-noite (dia 1)
+    return crosses ? (1440 - startMin) : full;              // pré-meia-noite (último dia)
+  }
+
+  /**
    * Converte horas padrão de plantão para minutos
    * @param {string} shiftLabel - Label do plantão ('M', 'T', 'N')
    * @returns {number} Minutos padrão do plantão

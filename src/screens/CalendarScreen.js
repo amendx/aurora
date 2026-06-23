@@ -4,7 +4,6 @@ import {
   Text,
   ScrollView,
   Pressable,
-  Animated,
   Dimensions,
   Image,
   ActivityIndicator,
@@ -35,6 +34,7 @@ import GroupSummaryCard from '../components/GroupSummaryCard';
 import { useGroups } from '../contexts/GroupsContext';
 import GroupScheduleService from '../services/GroupScheduleService';
 import { getGroupVisibility } from '../utils/GroupVisibilityConfig';
+import SkeletonBox from '../components/Skeleton';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 
@@ -65,25 +65,6 @@ const formatHours = (decimalHours) => {
   const m = totalMin % 60;
   return m === 0 ? `${h}h` : `${h}h${String(m).padStart(2, '0')}`;
 };
-
-// ── Skeleton ──────────────────────────────────────────────────────────────────
-const SkeletonBox = ({ width = '100%', height = 20, style }) => {
-  const anim = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(anim, { toValue: 1, duration: 900, useNativeDriver: false }),
-        Animated.timing(anim, { toValue: 0, duration: 900, useNativeDriver: false }),
-      ])
-    );
-    loop.start();
-    return () => loop.stop();
-  }, []);
-  const opacity = anim.interpolate({ inputRange: [0, 1], outputRange: [0.08, 0.2] });
-  return <Animated.View style={[{ width, height, backgroundColor: '#90a4ae', borderRadius: 6, opacity }, style]} />;
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
 
 const CalendarScreen = ({ navigation }) => {
   useContext(AuthContext);
@@ -793,25 +774,33 @@ const CalendarScreen = ({ navigation }) => {
     <View style={s.summaryCard}>
       <View style={s.summaryTopRow}>
         <Text style={s.summaryEarningsLabel}>Ganhos previstos</Text>
-        <Text style={s.summaryEarnings}>
-          {summaryLoading ? '—' : projected != null ? (valuesHidden ? 'R$ ••••' : fmtBRLk(projected)) : '—'}
-        </Text>
+        {summaryLoading
+          ? <SkeletonBox width={120} height={22} style={{ borderRadius: 4 }} />
+          : <Text style={s.summaryEarnings}>
+              {projected != null ? (valuesHidden ? 'R$ ••••' : fmtBRLk(projected)) : '—'}
+            </Text>}
       </View>
       <View style={s.summaryDivider} />
       <View style={s.summaryStatsRow}>
         <View style={s.summaryStat}>
           <Text style={s.summaryStatLabel}>Plantões</Text>
-          <Text style={s.summaryStatValue}>{summaryLoading ? '—' : stats.totalShifts}</Text>
+          {summaryLoading
+            ? <SkeletonBox width={28} height={16} style={{ borderRadius: 4, marginTop: 2 }} />
+            : <Text style={s.summaryStatValue}>{stats.totalShifts}</Text>}
         </View>
         <View style={[s.summaryStat, { borderLeftWidth: 0.5, borderLeftColor: C.border.light }]}>
           <Text style={s.summaryStatLabel}>Horas</Text>
-          <Text style={s.summaryStatValue}>{summaryLoading ? '—' : formatHours(stats.totalHours)}</Text>
+          {summaryLoading
+            ? <SkeletonBox width={40} height={16} style={{ borderRadius: 4, marginTop: 2 }} />
+            : <Text style={s.summaryStatValue}>{formatHours(stats.totalHours)}</Text>}
         </View>
         <View style={[s.summaryStat, { borderLeftWidth: 0.5, borderLeftColor: C.border.light }]}>
           <Text style={s.summaryStatLabel}>Horas extras</Text>
-          <Text style={[s.summaryStatValue, stats.extraHours > 0 && { color: C.warning }]}>
-            {summaryLoading ? '—' : (stats.extraHours > 0 ? formatHours(stats.extraHours) : '—')}
-          </Text>
+          {summaryLoading
+            ? <SkeletonBox width={40} height={16} style={{ borderRadius: 4, marginTop: 2 }} />
+            : <Text style={[s.summaryStatValue, stats.extraHours > 0 && { color: C.warning }]}>
+                {stats.extraHours > 0 ? formatHours(stats.extraHours) : '—'}
+              </Text>}
         </View>
       </View>
     </View>

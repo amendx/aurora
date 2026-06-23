@@ -18,8 +18,10 @@ const MIN = 60_000;        // ms por minuto
 const DAY_MIN = 24 * 60;   // minutos por dia
 
 // Veredito de um candidato a plantão.
-export const VERDICT = { SAFE: 'safe', RISKY: 'risky', BLOCKED: 'blocked' };
-const VERDICT_ORDER = { safe: 0, risky: 1, blocked: 2 };
+// DISCOURAGED = funciona, mas não é o ideal (ex.: passou do máx de dias seguidos).
+// Não bloqueia; sinaliza só uma não-recomendação.
+export const VERDICT = { SAFE: 'safe', DISCOURAGED: 'discouraged', RISKY: 'risky', BLOCKED: 'blocked' };
+const VERDICT_ORDER = { safe: 0, discouraged: 1, risky: 2, blocked: 3 };
 
 // Horários padrão por turno, usados quando o candidato é hipotético (sem horário).
 export const DEFAULT_SHIFT_TIMES = {
@@ -95,6 +97,9 @@ export const shiftToInterval = (shift) => {
   const label = (shift.label || '').charAt(0).toUpperCase();
 
   let startMs = _isoOrLocalMs(shift.startISO, dateKey, shift.startTime);
+  // Sem horário explícito (alguns plantões aurora não trazem hora): usa o padrão
+  // do turno p/ o plantão ainda ocupar o dia — senão dia "cheio" fica em branco.
+  if (startMs == null && DEFAULT_SHIFT_TIMES[label]) startMs = _localMs(dateKey, DEFAULT_SHIFT_TIMES[label].startTime);
   let endMs = _isoOrLocalMs(shift.endISO, dateKey, shift.endTime);
   if (startMs == null) return null;
 
@@ -361,24 +366,25 @@ export const evaluateCandidate = (candidate, existingIntervals, config) => {
     });
   }
 
-  // 5. dias consecutivos trabalhados — passar do máximo BLOQUEIA o dia.
-  // FDS que o usuário evita (sem plantão real) não é dia trabalhado: não conta na
-  // sequência nem é bloqueado por ela — só leva o aviso de "evitar fim de semana".
+  // 5. dias consecutivos trabalhados — passar do máximo NÃO bloqueia, só desaconselha
+  // (funciona, mas não é o ideal). FDS que o usuário evita (sem plantão real) não é
+  // dia trabalhado: não conta na sequência — só leva o aviso de "evitar fim de semana".
   const days = _consecutiveDays(candidate.dateKey, others);
   if (rules.maxConsecutiveDays && days.run > rules.maxConsecutiveDays && !_isAvoidedWeekend(candidate, config)) {
     violations.push({
       rule: 'consecutiveDays',
-      severity: 'block',
-      message: `Passaria de ${rules.maxConsecutiveDays} dias seguidos de plantão (seriam ${days.run}: ${days.startBr}–${days.endBr})`,
+      severity: 'soft',
+      message: `Seriam ${days.run} dias seguidos de plantão (seu máx é ${rules.maxConsecutiveDays}: ${days.startBr}–${days.endBr}) — funciona, mas não é o ideal`,
     });
   }
 
   const hasBlock = violations.some(v => v.severity === 'block');
   const hasWarn = violations.some(v => v.severity === 'warn');
+  const hasSoft = violations.some(v => v.severity === 'soft');
 
   // Nota informativa: há plantão emendado, mas dentro do limite — só avisa,
   // não rebaixa o veredito (ex.: já tenho um M e quero pôr um T no mesmo dia).
-  if (!hasBlock && !hasWarn) {
+  if (!hasBlock && !hasWarn && !hasSoft) {
     const adjacent = [];
     if (before && before.gap <= CHAIN_GAP_MIN) adjacent.push(before.iv);
     if (after && after.gap <= CHAIN_GAP_MIN) adjacent.push(after.iv);
@@ -396,7 +402,7 @@ export const evaluateCandidate = (candidate, existingIntervals, config) => {
     }
   }
 
-  return { verdict: hasBlock ? VERDICT.BLOCKED : hasWarn ? VERDICT.RISKY : VERDICT.SAFE, violations };
+  return { verdict: hasBlock ? VERDICT.BLOCKED : hasWarn ? VERDICT.RISKY : hasSoft ? VERDICT.DISCOURAGED : VERDICT.SAFE, violations };
 };
 
 // cadeia de plantões quase emendados ao candidato (gap ≤ CHAIN_GAP): soma das
@@ -495,7 +501,7 @@ export const rankOpenings = (openings, existingShifts, config) => {
 
 // ── classificação de dias (visual do calendário) ────────────────────────────────
 
-export const DAY_STATUS = { FOLGA: 'folga', FULL: 'full', GOOD: 'good', WEEKEND: 'weekend', NEUTRAL: 'neutral' };
+export const DAY_STATUS = { FOLGA: 'folga', FULL: 'full', GOOD: 'good', WEEKEND: 'weekend', DISCOURAGED: 'discouraged', NEUTRAL: 'neutral' };
 
 const _nextMidnightMs = (dateKey) => {
   const d = new Date(`${dateKey}T00:00:00`);
@@ -531,14 +537,16 @@ export const scheduledMinutes = (shifts, config) => {
  * Classifica um dia para colorir o calendário, de forma determinística:
  *   - folga   : dia marcado como folga.
  *   - good    : há turno livre seguro p/ encaixar (verde) — gate em greenAllowed.
- *   - weekend : FDS livre que só é "arriscado" pela flag evitar-FDS, mas você
- *               precisa de horas (needHours) → azul claro: talvez seja a saída.
+ *   - weekend : turno livre mas só com ressalva (FDS evitado, descanso curto,
+ *               horas emendadas…) → azul claro, sob o mesmo gate do verde
+ *               (greenAllowed): sinaliza enquanto há o que sugerir, em vez de
+ *               virar dia em branco. (nome legado; cobre todo dia "risky" livre.)
  *   - full    : nenhum turno livre seguro (saturado/bloqueado).
  *   - neutral : sem sinal relevante.
  * @param {string} dateKey
  * @param {object[]} existingIntervals  plantões do mês (intervalos)
  * @param {object} config
- * @param {{greenAllowed?:boolean, needHours?:boolean}} opts
+ * @param {{greenAllowed?:boolean}} opts
  * @returns {{status:string, safeTurnos:string[]}}
  */
 export const classifyDay = (dateKey, existingIntervals, config, opts = {}) => {
@@ -552,11 +560,13 @@ export const classifyDay = (dateKey, existingIntervals, config, opts = {}) => {
 
   let anyBlocked = false;
   const safe = [];
+  const discouraged = []; // funciona, mas não é o ideal (ex.: passou do máx de dias seguidos)
   const weekendOnly = []; // turnos que SÓ caem porque o usuário evita FDS
   for (const t of freeTurnos) {
     const ev = evaluateCandidate(candidateFromSlot(dateKey, t), existingIntervals, config);
     if (ev.verdict === VERDICT.SAFE) safe.push(t);
     else if (ev.verdict === VERDICT.BLOCKED) anyBlocked = true;
+    else if (ev.verdict === VERDICT.DISCOURAGED) discouraged.push(t);
     else if (ev.violations.length && ev.violations.every(v => v.rule === 'weekend')) weekendOnly.push(t);
   }
 
@@ -568,6 +578,10 @@ export const classifyDay = (dateKey, existingIntervals, config, opts = {}) => {
   // FDS livre + preciso de horas → azul (talvez a única saída seja pegar o FDS)
   if (weekendOnly.length > 0 && needHours) {
     return { status: DAY_STATUS.WEEKEND, safeTurnos: weekendOnly };
+  }
+  // só dá pra encaixar passando do máx de dias seguidos → lilás (não recomendado)
+  if (discouraged.length > 0) {
+    return { status: DAY_STATUS.DISCOURAGED, safeTurnos: discouraged };
   }
   // sem turno livre seguro: saturado se já tem plantão, está bloqueado, ou sem espaço
   if (occupied.size > 0 || anyBlocked || freeTurnos.length === 0) {

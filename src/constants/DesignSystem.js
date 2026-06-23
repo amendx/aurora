@@ -93,6 +93,8 @@ export const Colors = {
     movementSoft:'rgba(217,122,46,0.15)',
     error:      '#e05c5c',
     info:       '#5a8dd1',
+    discouraged:    '#a896e8',
+    discouragedSoft:'rgba(168,150,232,0.16)',
     border: {
       light:  'rgba(255,255,255,0.08)',
       medium: 'rgba(255,255,255,0.13)',
@@ -130,6 +132,8 @@ export const Colors = {
   movementSoft: 'rgba(194,97,28,0.10)',
   error: '#E0524C',          // Muted red — Direction A
   info: '#5A8DD1',           // Steel blue — Direction A
+  discouraged: '#8A6FD1',    // Soft lilac — "funciona, mas não é o ideal" (não bloqueia)
+  discouragedSoft: '#EEEAFA',
   
   // Border & Separator
   border: {

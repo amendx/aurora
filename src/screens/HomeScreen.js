@@ -5,7 +5,6 @@ import {
   ScrollView,
   Pressable,
   RefreshControl,
-  Animated,
   Image,
   Alert,
 } from 'react-native';
@@ -18,6 +17,7 @@ import { useOpenings } from '../contexts/OpeningsContext';
 import { usePrivacy } from '../contexts/PrivacyContext';
 import { useColors, Typography, Spacing, Shadows } from '../constants/DesignSystem';
 import ShiftBottomSheet from '../components/ShiftBottomSheet';
+import SkeletonBox from '../components/Skeleton';
 import CederFlowSheet from './CederFlowSheet';
 import TrocarFlowSheet from './TrocarFlowSheet';
 import TodayCoworkersService from '../services/TodayCoworkersService';
@@ -28,28 +28,8 @@ import LocalCache from '../services/LocalCache';
 import { isAuroraOnly, isViewOnly } from '../utils/userSource';
 import { getShiftValues, getFullShiftConfig, calculateShiftValueSync, calculateShiftFinalValueSync } from '../utils/ShiftValueCalculator';
 import { getMonthTotalValue } from '../utils/MonthSummaryComputer';
-
-// ── Skeleton ──────────────────────────────────────────────────────────────────
-const SkeletonBox = ({ width = '100%', height = 20, style }) => {
-  const anim = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(anim, { toValue: 1, duration: 900, useNativeDriver: false }),
-        Animated.timing(anim, { toValue: 0, duration: 900, useNativeDriver: false }),
-      ])
-    );
-    loop.start();
-    return () => loop.stop();
-  }, []);
-  const opacity = anim.interpolate({ inputRange: [0, 1], outputRange: [0.08, 0.2] });
-  return (
-    <Animated.View
-      style={[{ width, height, backgroundColor: '#90a4ae', borderRadius: 6, opacity }, style]}
-    />
-  );
-};
-// ─────────────────────────────────────────────────────────────────────────────
+import { applyPublishedHospitalConfigs, collectInstIds } from '../utils/PublishedHospitalConfig';
+import { applyLuisFrancaPreset } from '../utils/LuisFrancaPreset';
 
 const LABEL_MAP = { M: 'Manhã', T: 'Tarde', N: 'Noite', D: 'Noite', FN: 'Sex. Noite' };
 
@@ -175,7 +155,6 @@ const HomeScreen = ({ navigation }) => {
     if (!userId) return;
     getGroupColors(userId).then(setGroupColors);
     getShiftValues().then(v => setSavedValues(v)).catch(() => {});
-    getFullShiftConfig().then(cfg => setLoyaltyConfig(cfg)).catch(() => {});
 
     // RESET antes de buscar — evita vazamento entre sessões (logout aurora →
     // login webClient mantinha summary do anterior se o novo não tinha cache).
@@ -198,6 +177,20 @@ const HomeScreen = ({ navigation }) => {
       LocalCache.getTimeEntries(userId, nextKey).catch(() => ({})),
     ]).then(([cur, nxt]) => setTimeEntriesByMonth({ [monthKey]: cur || {}, [nextKey]: nxt || {} }));
   }, [userId]);
+
+  useEffect(() => {
+    if (!userId) return;
+    const now = new Date();
+    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    getFullShiftConfig().then(async cfg => {
+      const [published, entries] = await Promise.all([
+        applyPublishedHospitalConfigs(cfg, collectInstIds(daysWithShifts)),
+        LocalCache.getTimeEntries(userId, monthKey).catch(() => ({})),
+      ]);
+      const eff = applyLuisFrancaPreset(published, daysWithShifts, isViewOnly(user), entries || {});
+      setLoyaltyConfig(eff);
+    }).catch(() => {});
+  }, [userId, user, daysWithShifts]);
 
   const [bsVisible, setBsVisible] = useState(false);
   const [bsShifts, setBsShifts] = useState([]);
@@ -247,6 +240,23 @@ const HomeScreen = ({ navigation }) => {
   const upcomingShifts = allShifts
     .filter(s => new Date(s.date + 'T00:00:00') >= today)
     .slice(0, 5);
+
+  const plannedHoursByInstitution = React.useMemo(() => {
+    const out = {};
+    (daysWithShifts || []).forEach(day => {
+      (day.shifts || []).forEach(shift => {
+        const instId = shift?.group?.institution?.id ?? shift?.group?.institutionId ?? null;
+        if (instId == null || String(instId).length === 0) return;
+        const hours = shift?.splitHours?.minutesThisMonth != null
+          ? shift.splitHours.minutesThisMonth / 60
+          : shift?.durationMinutes != null
+            ? shift.durationMinutes / 60
+            : (String(shift?.label || '').charAt(0).toUpperCase() === 'N' || String(shift?.label || '').charAt(0).toUpperCase() === 'D' ? 12 : 6);
+        out[String(instId)] = (out[String(instId)] || 0) + hours;
+      });
+    });
+    return out;
+  }, [daysWithShifts]);
 
   // Clique no card de plantão na Home → DayView com esse shift em foco.
   // Mesma experiência do calendário (status banner, ações por status, confirm
@@ -358,9 +368,11 @@ const HomeScreen = ({ navigation }) => {
       <View style={s.heroWrap}>
         <View style={s.heroCard}>
           <Text style={s.heroLabel}>Ganhos previstos · {monthName}</Text>
-          <Text style={s.heroValue}>
-            {loading ? '—' : projected != null ? (valuesHidden ? 'R$ ••••' : fmtBRLk(projected)) : '—'}
-          </Text>
+          {loading
+            ? <SkeletonBox width={180} height={34} style={{ marginVertical: 4 }} />
+            : <Text style={s.heroValue}>
+                {projected != null ? (valuesHidden ? 'R$ ••••' : fmtBRLk(projected)) : '—'}
+              </Text>}
           <View style={s.heroSubRow}>
             {deltaPct != null && (
               <View style={[s.deltaBadge, { backgroundColor: deltaPct >= 0 ? C.moneySoft : C.warningSoft }]}>
@@ -383,17 +395,23 @@ const HomeScreen = ({ navigation }) => {
 
           <View style={s.heroStatsRow}>
             <View style={s.heroStat}>
-              <Text style={s.heroStatValue}>{loading ? '—' : shiftsCount ?? '—'}</Text>
+              {loading
+                ? <SkeletonBox width={28} height={20} style={{ marginBottom: 3 }} />
+                : <Text style={s.heroStatValue}>{shiftsCount ?? '—'}</Text>}
               <Text style={s.heroStatLabel}>plantões</Text>
             </View>
             <View style={s.heroStatDivider} />
             <View style={s.heroStat}>
-              <Text style={s.heroStatValue}>{loading ? '—' : totalHours != null ? totalHours : '—'}</Text>
+              {loading
+                ? <SkeletonBox width={28} height={20} style={{ marginBottom: 3 }} />
+                : <Text style={s.heroStatValue}>{totalHours != null ? totalHours : '—'}</Text>}
               <Text style={s.heroStatLabel}>horas</Text>
             </View>
             <View style={s.heroStatDivider} />
             <View style={s.heroStat}>
-              <Text style={[s.heroStatValue, { color: C.warning }]}>{loading ? '—' : remaining}</Text>
+              {loading
+                ? <SkeletonBox width={28} height={20} style={{ marginBottom: 3 }} />
+                : <Text style={[s.heroStatValue, { color: C.warning }]}>{remaining}</Text>}
               <Text style={s.heroStatLabel}>próximos</Text>
             </View>
           </View>
@@ -417,7 +435,10 @@ const HomeScreen = ({ navigation }) => {
 
     const shiftMonthKey = (shift.date || '').slice(0, 7);
     const realEntry = timeEntriesByMonth?.[shiftMonthKey]?.[shift.id] || null;
-    const monthlyHours = hoursReport?.standardHours || ((monthSummary?.totalScheduledMinutes || 0) / 60) || 0;
+    const instId = shift?.group?.institution?.id ?? shift?.group?.institutionId ?? null;
+    const monthlyHours = instId != null && plannedHoursByInstitution[String(instId)] != null
+      ? plannedHoursByInstitution[String(instId)]
+      : hoursReport?.standardHours || ((monthSummary?.totalScheduledMinutes || 0) / 60) || 0;
     const value = loyaltyConfig
       ? calculateShiftFinalValueSync(shift, shift.date, loyaltyConfig, monthlyHours, realEntry)
       : calculateShiftValueSync(shift, shift.date, savedValues);
@@ -501,7 +522,7 @@ const HomeScreen = ({ navigation }) => {
                 )}
                 {totalVacancies > 0 && Array.from({ length: Math.min(totalVacancies, 2) }).map((_, i) => (
                   <View key={'v' + i} style={[s.coworkerAvatar, s.coworkerAvatarVacancy, { marginLeft: -5 }]}>
-                    <Text style={[s.coworkerAvatarInitial, { color: C.warning }]}>+</Text>
+                    <Ionicons name="star-outline" size={10} color={C.warning} />
                   </View>
                 ))}
               </View>
@@ -1026,7 +1047,6 @@ const makeStyles = (C) => ({
   },
   actionTile: {
     flex: 1,
-    aspectRatio: 1,
     backgroundColor: C.background.elevated,
     borderRadius: 14,
     paddingVertical: 14,

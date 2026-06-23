@@ -1,5 +1,5 @@
 
-import { createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, signOut } from 'firebase/auth';
+import { createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, sendPasswordResetEmail, signOut } from 'firebase/auth';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { collection, doc, setDoc, getDoc, getDocs, query, where, serverTimestamp } from './fdb';
 import { db, auth, storage } from './config';
@@ -207,6 +207,11 @@ export const loginAuroraUser = async (email, password) => {
   }
 
   return { userInfo, idToken };
+};
+
+export const requestPasswordReset = async (email) => {
+  if (!auth) throw new Error('Firebase Auth não inicializado. Verifique a configuração do app.');
+  return sendPasswordResetEmail(auth, email);
 };
 
 export const getFirebaseIdToken = async () => {

@@ -160,6 +160,24 @@ const FirebaseAdapter = {
   },
 
   /**
+   * Fetch the current financial config from Firestore.
+   * Returns the config object (incl. `_updatedAt` / `version`) or null.
+   *
+   * users/{userId}/financialConfig/current
+   */
+  fetchFinancialConfig: async (userId) => {
+    if (!db || !userId) return null;
+    try {
+      const { getDoc } = await import('./fdb');
+      const snap = await getDoc(_sub(userId, 'financialConfig', 'current'));
+      return snap.exists() ? snap.data() : null;
+    } catch (err) {
+      Logger.warn(`[Firebase] fetchFinancialConfig failed [${userId}]: ${err?.message}`);
+      return null;
+    }
+  },
+
+  /**
    * Persist each group as its own document (batched, chunked).
    *
    * users/{userId}/groups/{groupId}
@@ -307,8 +325,14 @@ const FirebaseAdapter = {
   saveAvailabilityConfig: (userId, config) =>
     _write(_sub(userId, 'settings', 'availability'), { ...config }),
 
-  saveTodayCoworkers: (userId, shiftId, data) =>
-    _write(_sub(userId, 'todayCoworkers', String(shiftId)), { ...data }),
+  /**
+   * Persist precomputed today-coworkers for a specific webClient shift,
+   * scoped under its month so the doc id inherits the real shift id:
+   *   users/{userId}/months/{monthKey}/todayCoworkers/{shiftId}
+   * Month-scoped → resync can wipe stale docs (no orphans from another era).
+   */
+  saveTodayCoworkers: (userId, monthKey, shiftId, data) =>
+    _write(_sub(userId, 'months', String(monthKey), 'todayCoworkers', String(shiftId)), { ...data }),
 
   /**
    * Shadow-write a full month of normalized DaySchedules for a group.
@@ -1062,6 +1086,56 @@ const FirebaseAdapter = {
     }
   },
 
+  /**
+   * Read precomputed today-coworkers for a webClient month.
+   * users/{userId}/months/{monthKey}/todayCoworkers/{shiftId}
+   * Returns { [shiftId]: entry } — ready to populate TodayCoworkersService cache.
+   */
+  fetchWebClientTodayCoworkers: async (userId, monthKey) => {
+    if (!db || !userId || !monthKey) return {};
+    try {
+      const { collection, getDocs } = await import('./fdb');
+      const snap = await getDocs(
+        collection(db, 'users', String(userId), 'months', String(monthKey), 'todayCoworkers')
+      );
+      const byShift = {};
+      snap.forEach(d => { byShift[d.id] = { shiftId: d.id, ...(d.data() || {}) }; });
+      return byShift;
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] fetchWebClientTodayCoworkers [${userId}/${monthKey}]: ${err?.message}`);
+      return {};
+    }
+  },
+
+  /**
+   * Delete today-coworker docs for a month whose shiftId is NOT in the current
+   * set of webClient shifts. Removes orphans left by a previous era / re-sync,
+   * so the user only ever sees coworkers for shifts they actually have.
+   * Returns number of deleted docs.
+   */
+  pruneTodayCoworkers: async (userId, monthKey, validShiftIds) => {
+    if (!db || !userId || !monthKey) return 0;
+    if (String(auth?.currentUser?.uid || '') !== String(userId)) return 0;
+    try {
+      const { collection, getDocs } = await import('./fdb');
+      const valid = new Set((validShiftIds || []).map(String));
+      const snap = await getDocs(
+        collection(db, 'users', String(userId), 'months', String(monthKey), 'todayCoworkers')
+      );
+      const stale = [];
+      snap.forEach(d => { if (!valid.has(d.id)) stale.push(d.ref); });
+      for (let i = 0; i < stale.length; i += BATCH_LIMIT) {
+        const batch = writeBatch(db);
+        stale.slice(i, i + BATCH_LIMIT).forEach(ref => batch.delete(ref));
+        await batch.commit();
+      }
+      return stale.length;
+    } catch (err) {
+      Logger.warn(`[FirebaseAdapter] pruneTodayCoworkers [${userId}/${monthKey}]: ${err?.message}`);
+      return 0;
+    }
+  },
+
   getWebClientMonthKeys: async (userId) => {
     if (!db || !userId) return [];
     if (String(auth?.currentUser?.uid || '') !== String(userId)) return [];
@@ -1115,6 +1189,10 @@ const FirebaseAdapter = {
           refs.push(d.ref);
           deletedShifts++;
         });
+        // Wipe stale today-coworkers for the month too — avoids orphaned docs
+        // when the same shift is re-synced under a different id.
+        const cwSnap = await getDocs(collection(db, 'users', String(userId), 'months', monthKey, 'todayCoworkers'));
+        cwSnap.forEach(d => refs.push(d.ref));
       }
       for (let i = 0; i < refs.length; i += BATCH_LIMIT) {
         const batch = writeBatch(db);

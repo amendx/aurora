@@ -42,6 +42,7 @@ const K = {
   groups:          (uid)      => `${P}_groups_${uid}`,
   groupMembers:    (uid, gid) => `${P}_grpmbr_${uid}_${gid}`,
   groupDaily:      (gid, dt)  => `${P}_grpdaily_${gid}_${dt}`,
+  todayCoworkers:  (uid)      => `${P}_todaycw_${uid}`,
   groupSchedule:   (gid, mk)  => `${P}_grpsched_${gid}_${mk}`,
   persons:         (uid)      => `${P}_persons_${uid}`,
   financialConfig: (uid)      => `${P}_finconfig_${uid}`,
@@ -260,6 +261,20 @@ const saveGroupDaily = (groupId, dateStr, dynamicSchedule) =>
     dynamic_schedule: dynamicSchedule,
     fetchedAt: new Date().toISOString(),
   });
+
+const getTodayCoworkers = (userId) => _get(K.todayCoworkers(userId));
+
+const saveTodayCoworkers = async (userId, entries, syncedAt = new Date().toISOString()) => {
+  const result = await _set(K.todayCoworkers(userId), { entries: entries || {}, syncedAt });
+  if (_fb) {
+    Object.entries(entries || {}).forEach(([shiftId, entry]) => {
+      const monthKey = (entry?.date || '').slice(0, 7);
+      if (!monthKey) return;
+      _fb.saveTodayCoworkers(userId, monthKey, shiftId, { shiftId, ...entry, syncedAt }).catch(() => {});
+    });
+  }
+  return result;
+};
 
 // ── Group Schedules (Meus Grupos calendar view) ───────────────────────────────
 // Per group, per month. Stores normalized DaySchedule[] (see OpeningNormalizer.normalizeGroupDaySchedule).
@@ -597,6 +612,8 @@ const LocalCache = {
   // Group daily calendar (coworkers cache)
   getGroupDaily,
   saveGroupDaily,
+  getTodayCoworkers,
+  saveTodayCoworkers,
 
   // Group schedule (Meus Grupos: per groupId × monthKey)
   getGroupSchedule,

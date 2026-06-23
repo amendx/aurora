@@ -4,9 +4,13 @@
  *
  * Engenharia reversa da folha médica (Vl Pagar das notas a emitir):
  *   - Taxas/hora: dia-sem 130, noite-sem 143, dia-FDS 170, noite-FDS 185.
- *   - Sexta à noite conta como NOITE DE FDS (185): confirmado na folha de
- *     maio/26 (plantão 29/05 18:47→30/05 07:46 pago a 185). Reconciliação
- *     bateu R$21.895 vs R$21.866,71 da folha (0,13%, arredondamento).
+ *   - Plantão valorizado INTEIRO pela taxa do dia/turno de INÍCIO (M/T=dia,
+ *     N=noite); não há split por meia-noite. Sexta-NOITE conta como FDS (185):
+ *     `fridayNightAsWeekend:true`. Provado na nota RAQUEL fev/26 (R$30.956,65):
+ *     o balde FDS "Sab Dia/Dom Noit" = 31:57 só fecha com a N de sexta 27/02
+ *     (735min); sem ela a nota fica ~R$616 curta. Os 21 plantões do ponto
+ *     reconciliam (10.241min = 170:41) e dão ~R$30.983 (0,08%, arredondamento).
+ *   - Feriado paga FDS (170 dia / 185 noite): Carnaval terça 17/02, 7h = 1.190.
  *   - Frações: minuto conta como fração real (min/60), nunca hora cheia.
  *     Arredonda por turno (centavos) e soma.
  *   - Fidelização: faixas por TOTAL de horas no hospital (soma de todos os
@@ -33,7 +37,8 @@ const INSTITUTION_CONFIG = {
     weekend: { day: 170, night: 185 },
   },
   bonusEnabled: false,
-  fridayNightAsWeekend: true,
+  fridayNightAsWeekend: true, // sexta-noite (N) paga FDS 185: nota fev/26 só fecha assim
+  treatHolidayAsWeekend: true, // feriado paga na faixa de FDS (170 dia / 185 noite)
 };
 
 const LOYALTY = {
@@ -58,9 +63,12 @@ const _hoursByInstitution = (daysWithShifts, timeEntries = {}) => {
       const iid = String(shift.group?.institution?.id || '');
       if (!iid) return;
       const entry = timeEntries[shift.id];
+      const actualMin = entry
+        ? TimeUtils.actualMinutesThisMonth(shift, entry.actualStart, entry.actualEnd, entry.actualDurationMinutes)
+        : null;
       let h = 0;
-      if (entry?.actualDurationMinutes > 0) {
-        h = entry.actualDurationMinutes / 60;
+      if (actualMin > 0) {
+        h = actualMin / 60;
       } else if (shift.splitHours) {
         h = shift.splitHours.hoursThisMonth;
       } else {

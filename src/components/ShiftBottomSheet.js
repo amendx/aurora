@@ -468,8 +468,13 @@ const ShiftBottomSheet = ({
     const [predictedStart, predictedEnd] = timeParts.map(time => time.replace(/\s*\([^)]*\)/, '').trim());
     console.log('🔍 getHoursSummary - Horários extraídos:', { predictedStart, predictedEnd });
 
-    const predictedDurationMin = calculateDuration(predictedStart, predictedEnd);
-    const realDurationMin = calculateDuration(shiftRealHours.startTime, shiftRealHours.endTime);
+    // Split de virada de mês: previsto = porção deste mês; real = recortado na virada.
+    const predictedDurationMin = shift.splitHours?.minutesThisMonth != null
+      ? shift.splitHours.minutesThisMonth
+      : calculateDuration(predictedStart, predictedEnd);
+    const realDurationMin = shift.splitHours
+      ? TimeUtils.actualMinutesThisMonth(shift, shiftRealHours.startTime, shiftRealHours.endTime)
+      : calculateDuration(shiftRealHours.startTime, shiftRealHours.endTime);
 
     console.log('🔍 getHoursSummary - Durações calculadas:', {
       predictedStart,

@@ -52,11 +52,17 @@ export const resolveShiftConfig = (globalConfig, instId) => {
       ? instCfg.fridayNightAsWeekend
       : !!g.fridayNightAsWeekend;
 
+  const treatHolidayAsWeekend =
+    (instCfg && instCfg.treatHolidayAsWeekend != null)
+      ? instCfg.treatHolidayAsWeekend
+      : !!g.treatHolidayAsWeekend;
+
   return {
     hourValues,
     bonusEnabled,
     bonus,
     fridayNightAsWeekend,
+    treatHolidayAsWeekend,
     loyaltyEnabled: !!g.loyaltyEnabled,
     loyaltyOptions: Array.isArray(g.loyaltyOptions) ? g.loyaltyOptions : [],
     institutionLoyaltyCfg:    key ? (g.institutionLoyalty?.[key] || null)        : null,
@@ -98,6 +104,7 @@ export const buildHybridConfig = (currentConfig, snapshotConfig) => {
     const entry = {};
     if (c.hourValues)                  entry.hourValues             = c.hourValues;
     if (c.fridayNightAsWeekend != null) entry.fridayNightAsWeekend  = c.fridayNightAsWeekend;
+    if (c.treatHolidayAsWeekend != null) entry.treatHolidayAsWeekend = c.treatHolidayAsWeekend;
     if (s.bonus)                       entry.bonus                  = s.bonus;
     if (s.bonusEnabled != null)        entry.bonusEnabled           = s.bonusEnabled;
     if (Object.keys(entry).length) mergedInstitutionConfig[id] = entry;
@@ -107,6 +114,7 @@ export const buildHybridConfig = (currentConfig, snapshotConfig) => {
     // Rate-like (current wins, always retroactive)
     hourValues:           cur.hourValues,
     fridayNightAsWeekend: cur.fridayNightAsWeekend,
+    treatHolidayAsWeekend: cur.treatHolidayAsWeekend,
     // Earned add-ons (snapshot wins, frozen at month of earning)
     bonusEnabled:             snap.bonusEnabled,
     bonus:                    snap.bonus,

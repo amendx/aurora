@@ -21,6 +21,7 @@ import TimeUtils from '../utils/TimeUtils';
 import { AuthContext } from '../context/AuthContext';
 import LocalCache from '../services/LocalCache';
 import { Ionicons } from '@expo/vector-icons';
+import SkeletonBox from '../components/Skeleton';
 
 const MONTH_NAMES_SHORT = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
 const SCREEN_W = Dimensions.get('window').width;
@@ -205,27 +206,6 @@ function InsightCard({ iconName, iconColor, iconBg, title, value, C }) {
   );
 }
 
-// ── SkeletonBox ───────────────────────────────────────────────────────────────
-// Shimmer suave entre 0.4 e 1.0 — mesmo padrão do ReportsScreen.
-const SkeletonBox = ({ width = '100%', height = 20, style }) => {
-  const anim = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(anim, { toValue: 1, duration: 900, useNativeDriver: false }),
-        Animated.timing(anim, { toValue: 0, duration: 900, useNativeDriver: false }),
-      ])
-    );
-    loop.start();
-    return () => loop.stop();
-  }, []);
-  const opacity = anim.interpolate({ inputRange: [0, 1], outputRange: [0.4, 1] });
-  return (
-    <Animated.View
-      style={[{ width, height, backgroundColor: '#90a4ae22', borderRadius: 6, opacity }, style]}
-    />
-  );
-};
 
 // ── ChartsView ──────────────────────────────────────────────────────────────
 // Componente embedável (era ChartsScreen como overlay). Agora vive como aba

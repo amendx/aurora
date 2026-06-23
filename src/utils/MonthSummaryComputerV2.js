@@ -99,8 +99,13 @@ export const computeMonthSummary = (userId, monthKey, daysWithShifts, timeEntrie
       totalScheduledMinutes += scheduledMin;
 
       const entry = entries[shift.id];
-      const actualMin = (entry?.actualDurationMinutes != null && entry.actualDurationMinutes > 0)
-        ? entry.actualDurationMinutes
+      // Horas reais recortadas na virada de mês (plantão N do último dia: só a
+      // parte deste mês conta; o resto é o carryover D do mês seguinte).
+      const actualThisMonth = entry
+        ? TimeUtils.actualMinutesThisMonth(shift, entry.actualStart, entry.actualEnd, entry.actualDurationMinutes)
+        : null;
+      const actualMin = (actualThisMonth != null && actualThisMonth > 0)
+        ? actualThisMonth
         : scheduledMin;
       totalActualMinutes += actualMin;
 
@@ -110,7 +115,7 @@ export const computeMonthSummary = (userId, monthKey, daysWithShifts, timeEntrie
 
       const period       = getShiftPeriod(shift.label);
       const isFridayNight = eff.fridayNightAsWeekend && isFriday(dateStr) && period === 'night';
-      const useWeekend   = shouldUseWeekendValue(dateStr, shift.label, eff.fridayNightAsWeekend);
+      const useWeekend   = shouldUseWeekendValue(dateStr, shift.label, eff.fridayNightAsWeekend, eff.treatHolidayAsWeekend);
 
       if (isFridayNight) {
         fridayNightMinutes += scheduledMin;

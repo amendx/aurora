@@ -5,7 +5,6 @@ import {
   StyleSheet,
   ScrollView,
   Pressable,
-  Animated,
   Share,
   Alert,
   Dimensions,
@@ -26,28 +25,7 @@ import { applyPublishedHospitalConfigs, collectInstIds } from '../utils/Publishe
 import { applyLuisFrancaPreset } from '../utils/LuisFrancaPreset';
 import { isViewOnly } from '../utils/userSource';
 import { ChartsView } from './ChartsScreen';
-
-// ── Skeleton ──────────────────────────────────────────────────────────────────
-const SkeletonBox = ({ width = '100%', height = 20, style }) => {
-  const anim = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(anim, { toValue: 1, duration: 900, useNativeDriver: false }),
-        Animated.timing(anim, { toValue: 0, duration: 900, useNativeDriver: false }),
-      ])
-    );
-    loop.start();
-    return () => loop.stop();
-  }, []);
-  const opacity = anim.interpolate({ inputRange: [0, 1], outputRange: [0.08, 0.2] });
-  return (
-    <Animated.View
-      style={[{ width, height, backgroundColor: '#90a4ae', borderRadius: 6, opacity }, style]}
-    />
-  );
-};
-// ─────────────────────────────────────────────────────────────────────────────
+import SkeletonBox from '../components/Skeleton';
 
 const MONTH_NAMES = [
   'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
@@ -236,7 +214,10 @@ export default function ReportsScreen({ onExportReady, initialTab = 'resumo' } =
           let extraMinutes = 0;
           const rh = realHoursMap[i];
           if (rh?.startTime && rh?.endTime) {
-            const realMinutes = TimeUtils.calculateDurationMinutes(rh.startTime, rh.endTime);
+            // Split de virada de mês: real recortado na meia-noite (só este mês).
+            const realMinutes = shift.splitHours
+              ? TimeUtils.actualMinutesThisMonth(shift, rh.startTime, rh.endTime)
+              : TimeUtils.calculateDurationMinutes(rh.startTime, rh.endTime);
             if (realMinutes !== null) {
               const rawDiffMinutes = realMinutes - plannedMinutes;
               // Aplicar fracionamento se configurado

@@ -38,7 +38,7 @@
 import LocalCache from './LocalCache';
 import FirebaseAdapter from './firebase/FirebaseAdapter';
 import WebClientApiService from './WebClientApiService';
-import { getGroupVisibility } from '../utils/GroupVisibilityConfig';
+import { getGroupVisibility, saveGroupVisibility } from '../utils/GroupVisibilityConfig';
 import Logger from '../utils/Logger';
 
 // ── In-memory cache ───────────────────────────────────────────────────────────
@@ -87,6 +87,22 @@ const _serializePerson = (p) => ({
   photo: p.photo, description: p.description, council: p.council,
 });
 
+/**
+ * Run `fn` over `items` with at most `limit` in flight. Keeps the coworker
+ * calendar fetches from flooding the PlantaoAPI (which would throttle the
+ * critical month/shift loading happening at the same time on login).
+ */
+const _mapLimit = async (items, limit, fn) => {
+  const queue = [...items];
+  const workers = Array.from({ length: Math.min(limit, queue.length) }, async () => {
+    while (queue.length) {
+      const item = queue.shift();
+      await fn(item);
+    }
+  });
+  await Promise.all(workers);
+};
+
 // ── Core per-date processing ──────────────────────────────────────────────────
 
 /**
@@ -106,24 +122,22 @@ const _serializePerson = (p) => ({
 const _processDate = async ({ date, userShifts, enabledGroups, groupById, selfId, token, allEntries }) => {
   // Fetch daily calendars for all enabled groups on this date (LocalCache TTL applies)
   const dailyByGroup = new Map();
-  await Promise.all(
-    enabledGroups.map(async (g) => {
-      const gid = String(g.id);
-      const cached = await LocalCache.getGroupDaily(gid, date);
-      if (cached) {
-        dailyByGroup.set(gid, cached);
-        return;
-      }
-      const res = await WebClientApiService.getGroupDailyCalendar(token, gid, date);
-      if (res.success && res.data?.dynamic_schedule) {
-        const slots = res.data.dynamic_schedule;
-        dailyByGroup.set(gid, slots);
-        LocalCache.saveGroupDaily(gid, date, slots).catch(() => {});
-      } else {
-        dailyByGroup.set(gid, null);
-      }
-    })
-  );
+  await _mapLimit(enabledGroups, 3, async (g) => {
+    const gid = String(g.id);
+    const cached = await LocalCache.getGroupDaily(gid, date);
+    if (cached) {
+      dailyByGroup.set(gid, cached);
+      return;
+    }
+    const res = await WebClientApiService.getGroupDailyCalendar(token, gid, date);
+    if (res.success && res.data?.dynamic_schedule) {
+      const slots = res.data.dynamic_schedule;
+      dailyByGroup.set(gid, slots);
+      LocalCache.saveGroupDaily(gid, date, slots).catch(() => {});
+    } else {
+      dailyByGroup.set(gid, null);
+    }
+  });
 
   for (const shift of userShifts) {
     const shiftLabel = shift?.label ? String(shift.label) : null;
@@ -223,7 +237,7 @@ const TodayCoworkersService = {
    * @param {string}        token
    * @param {string|number} currentUserId  — self, always excluded
    */
-  compute: async (userId, token, currentUserId, { force = false } = {}) => {
+  compute: async (userId, token, currentUserId, { force = false, daysWithShifts = null } = {}) => {
     if (!userId || !token) return;
     if (!force && _cachedUserId === String(userId) && _cache.size > 0) {
       Logger.info('[TodayCoworkers] cache already ready for this user — skipped');
@@ -242,18 +256,25 @@ const TodayCoworkersService = {
       const today = weekDates[0];
 
       // ── 1. Gather user shifts for each date in the window ──────────────────
-      // The week can span a month boundary — fetch both months if needed.
-      const monthKeys = [...new Set(weekDates.map(_monthKeyOf))];
-      const monthDataArr = await Promise.all(
-        monthKeys.map(mk => LocalCache.getShifts(userId, mk))
-      );
-
-      // date → shift[]
+      // Prefer caller-supplied daysWithShifts (DayView already has them); else
+      // read LocalCache. The week can span a month boundary — fetch both months.
       const shiftsByDate = new Map();
-      for (const data of monthDataArr) {
-        for (const day of (data?.daysWithShifts || [])) {
+      if (Array.isArray(daysWithShifts) && daysWithShifts.length) {
+        for (const day of daysWithShifts) {
           if (weekDates.includes(day.date) && day.shifts?.length) {
             shiftsByDate.set(day.date, day.shifts);
+          }
+        }
+      } else {
+        const monthKeys = [...new Set(weekDates.map(_monthKeyOf))];
+        const monthDataArr = await Promise.all(
+          monthKeys.map(mk => LocalCache.getShifts(userId, mk))
+        );
+        for (const data of monthDataArr) {
+          for (const day of (data?.daysWithShifts || [])) {
+            if (weekDates.includes(day.date) && day.shifts?.length) {
+              shiftsByDate.set(day.date, day.shifts);
+            }
           }
         }
       }
@@ -265,15 +286,34 @@ const TodayCoworkersService = {
       Logger.info(`[TodayCoworkers] ${shiftsByDate.size} date(s) with shifts in window`);
 
       // ── 2. Enabled groups ──────────────────────────────────────────────────
+      // Authoritative current group list comes from the API: group ids change on
+      // webClient re-sync, and LocalCache can be stale/partial at login time
+      // (GroupsContext may not have run yet). Fall back to cache, then shifts.
       const [visibilityConfig, groupsData] = await Promise.all([
         getGroupVisibility(userId),
         LocalCache.getGroups(userId),
       ]);
-      const enabledGroupIds = visibilityConfig?.enabledGroupIds ?? null;
 
-      let allUserGroups = groupsData?.groups ?? [];
+      let allUserGroups = [];
+      try {
+        const resp = await WebClientApiService.getGroups(token);
+        const items = resp?.data?.items;
+        if (Array.isArray(items) && items.length) {
+          allUserGroups = items
+            .filter(g => g?.id && !g.is_removed)
+            .map(g => ({
+              id: g.id,
+              name: g.name || '',
+              color: g.color || '',
+              institution: g.institution ? { id: g.institution.id, name: g.institution.name || '' } : null,
+            }));
+        }
+      } catch (err) {
+        Logger.warn(`[TodayCoworkers] getGroups failed: ${err?.message}`);
+      }
+      if (allUserGroups.length === 0) allUserGroups = groupsData?.groups ?? [];
       if (allUserGroups.length === 0) {
-        // Fallback: derive from shifts on any day in the window
+        // Last resort: derive from shifts on any day in the window
         const shiftGroupMap = new Map();
         for (const shifts of shiftsByDate.values()) {
           for (const s of shifts) {
@@ -283,13 +323,31 @@ const TodayCoworkersService = {
         allUserGroups = Array.from(shiftGroupMap.values());
       }
 
+      const currentIds = allUserGroups.map(g => String(g.id));
+
+      // Reconcile + HEAL the visibility config against current group ids. Old ids
+      // from a previous era are dropped and the cleaned set is persisted. If the
+      // saved set is now fully stale (zero overlap), reset to "all current groups
+      // enabled" — the previous selection is unrecoverable after a re-sync.
+      let enabledGroupIds = visibilityConfig?.enabledGroupIds ?? null;
+      if (enabledGroupIds && currentIds.length > 0) {
+        const valid = enabledGroupIds.filter(id => currentIds.includes(String(id)));
+        if (valid.length === 0) {
+          saveGroupVisibility(userId, currentIds).catch(() => {});
+          enabledGroupIds = null; // treat as all current
+        } else if (valid.length !== enabledGroupIds.length) {
+          saveGroupVisibility(userId, valid).catch(() => {});
+          enabledGroupIds = valid;
+        }
+      }
+
       const enabledGroups = allUserGroups.filter(g => {
         if (!g?.id) return false;
         if (!enabledGroupIds) return true;
         return enabledGroupIds.some(id => String(id) === String(g.id));
       });
 
-      Logger.info(`[TodayCoworkers] ${enabledGroups.length} enabled group(s)`);
+      Logger.info(`[TodayCoworkers] ${enabledGroups.length} enabled group(s) of ${allUserGroups.length}`);
 
       if (enabledGroups.length === 0) {
         Logger.info('[TodayCoworkers] No enabled groups — skipped');
@@ -319,7 +377,7 @@ const TodayCoworkersService = {
         // Find the shift object to get label/institution metadata
         const shiftList = shiftsByDate.get(entry.date) || [];
         const shift = shiftList.find(s => String(s.id) === shiftId);
-        FirebaseAdapter.saveTodayCoworkers(userId, shiftId, {
+        FirebaseAdapter.saveTodayCoworkers(userId, _monthKeyOf(entry.date), shiftId, {
           shiftId,
           date: entry.date,
           shiftLabel: shift?.label ?? null,
@@ -337,10 +395,61 @@ const TodayCoworkersService = {
           syncedAt,
         }).catch(err => Logger.warn(`[TodayCoworkers] Firebase write failed for ${shiftId}: ${err?.message}`));
       }
+
+      // ── 6. Reconcile: drop coworker docs for shifts we no longer have ───────
+      // Source of truth = current webClient shifts in LocalCache (per month).
+      // Skips months not yet loaded (monthData null) to avoid wiping valid data.
+      const touchedMonthKeys = [...new Set([...shiftsByDate.keys()].map(_monthKeyOf))];
+      for (const mk of touchedMonthKeys) {
+        const monthData = await LocalCache.getShifts(userId, mk);
+        if (!monthData) continue; // not loaded — don't prune blindly
+        const validIds = (monthData.daysWithShifts || [])
+          .flatMap(d => (d.shifts || []).map(s => String(s.id)));
+        FirebaseAdapter.pruneTodayCoworkers(userId, mk, validIds)
+          .then(n => { if (n) Logger.info(`[TodayCoworkers] pruned ${n} orphan(s) in ${mk}`); })
+          .catch(() => {});
+      }
     } catch (err) {
       Logger.warn(`[TodayCoworkers] compute error: ${err?.message}`);
     } finally {
       _computing = false;
+    }
+  },
+
+  /**
+   * Populate the in-memory cache from Firebase (no PlantaoAPI calls), so the
+   * feature shows instantly on boot/restore before compute() refreshes online.
+   * Reads users/{userId}/months/{mk}/todayCoworkers for each monthKey.
+   * Does not clear existing entries — merges, then marks cache ready.
+   *
+   * @param {string|number}   userId
+   * @param {string[]}        monthKeys  — defaults to current week's month(s)
+   */
+  hydrate: async (userId, monthKeys = null) => {
+    if (!userId) return;
+    try {
+      const keys = (monthKeys && monthKeys.length)
+        ? [...new Set(monthKeys.map(String))]
+        : [...new Set(_weekDates().map(_monthKeyOf))];
+      const results = await Promise.all(
+        keys.map(mk => FirebaseAdapter.fetchWebClientTodayCoworkers(userId, mk))
+      );
+      let added = 0;
+      for (const byShift of results) {
+        for (const [shiftId, entry] of Object.entries(byShift || {})) {
+          _cache.set(String(shiftId), {
+            date: entry.date,
+            coworkers: entry.coworkers || [],
+            coworkersByGroup: entry.coworkersByGroup || [],
+            vacanciesByGroup: entry.vacanciesByGroup || [],
+          });
+          added++;
+        }
+      }
+      if (added > 0) _cachedUserId = String(userId);
+      Logger.info(`[TodayCoworkers] hydrated ${added} shift(s) from Firebase`);
+    } catch (err) {
+      Logger.warn(`[TodayCoworkers] hydrate error: ${err?.message}`);
     }
   },
 
